@@ -67,6 +67,8 @@ impl MemberScopeSource {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OrgMembership {
+    #[serde(default)]
+    pub eligibility_revision: i64,
     #[serde(rename = "_id")]
     pub id: String,
     /// User where `user_type = Org`. The owner of all org-shared resources.
@@ -92,6 +94,19 @@ pub struct OrgMembership {
     /// Soft-delete timestamp. Active memberships have `revoked_at = None`.
     #[serde(default, with = "bson_datetime::optional")]
     pub revoked_at: Option<DateTime<Utc>>,
+}
+
+/// The two independent revisions that authorize delayed specialist work for one actor.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MemberUse {
+    pub org_use_revision: i64,
+    #[serde(skip_serializing_if = "is_initial_revision")]
+    pub eligibility_revision: i64,
+}
+
+pub(crate) fn is_initial_revision(value: &i64) -> bool {
+    *value == 0
 }
 
 impl OrgMembership {
@@ -124,6 +139,7 @@ mod tests {
 
     fn make_membership() -> OrgMembership {
         OrgMembership {
+            eligibility_revision: 0,
             id: uuid::Uuid::new_v4().to_string(),
             org_user_id: uuid::Uuid::new_v4().to_string(),
             member_user_id: uuid::Uuid::new_v4().to_string(),

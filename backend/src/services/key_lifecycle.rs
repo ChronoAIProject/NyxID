@@ -110,6 +110,109 @@ pub(crate) async fn status(db: &Database, config: &AppConfig) -> AppResult<Optio
     }))
 }
 
+/// Admit a process before database initialization. This path only reads the
+/// lifecycle singleton, its proof and database identities, so it is safe to
+/// run with the bootstrap database identity before any indexes, migrations or
+/// application writes.
+/// An unenrolled installation remains observational until an administrator
+/// enrolls it. Once enrolled, every process must prove the exact persisted
+/// ring and contextual writer policy.
+pub(crate) async fn admit_startup(db: &Database, config: &AppConfig) -> AppResult<()> {
+    let application = transaction_service::durable_database(db);
+    let Some(enrollment) = application
+        .collection::<Document>(HEAD)
+        .find_one(doc! {"_id": SINGLETON})
+        .projection(doc! {"revision": 1})
+        .await?
+    else {
+        return Ok(());
+    };
+    let url = std::env::var("NYXID_BOOTSTRAP_DATABASE_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            conflict("Enrolled lifecycle requires a read-only bootstrap database identity")
+        })?;
+    let bootstrap =
+        crate::db::create_connection_with_url(&url, config.database_max_connections).await?;
+    let bootstrap = transaction_service::durable_database(&bootstrap);
+    let location = location::identity(&application).await?;
+    if location != location::identity(&bootstrap).await? {
+        return Err(conflict(
+            "Bootstrap identity points to a different database",
+        ));
+    }
+    let revision: i64 = field(&enrollment, "revision")?;
+    let row = bootstrap
+        .collection::<Document>(HEAD)
+        .find_one(doc! {"_id": SINGLETON, "revision": revision})
+        .projection(doc! {"scope": 1, "location": 1, "restore_required": 1, "proofs": 1})
+        .await?
+        .ok_or_else(stale)?;
+    if row.get_bool("restore_required") != Ok(false) {
+        return Err(conflict(
+            "Key lifecycle admission is blocked by a restore signal",
+        ));
+    }
+    if field::<Document>(&row, "location")? != location {
+        return Err(conflict(
+            "Key lifecycle admission found a different database identity",
+        ));
+    }
+    let scope: Scope = field(&row, "scope")?;
+    let expected = std::env::var("NYXID_DEPLOYMENT_REVISION")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| conflict("Enrolled lifecycle requires a deployment revision"))?;
+    if scope.deployment_revision != expected {
+        return Err(conflict(
+            "Deployment revision is outside the enrolled lifecycle scope",
+        ));
+    }
+    if !config.contextual_record_writes {
+        return Err(conflict(
+            "Enrolled lifecycle requires contextual record writers",
+        ));
+    }
+    proof::verify(
+        &scope.deployment_id,
+        &proof::slots(config).await?,
+        &field::<Vec<proof::Proof>>(&row, "proofs")?,
+    )
+    .await
+}
+
+/// Exceptional writers call this inside their existing transaction before
+/// changing a source that can invalidate a retirement proof.
+pub(crate) async fn invalidate_in_transaction(
+    db: &Database,
+    session: &mut ClientSession,
+    reason: &'static str,
+) -> AppResult<Option<i64>> {
+    let head = db.collection::<Document>(HEAD);
+    let Some(row) = head
+        .find_one_and_update(
+            doc! {"_id": SINGLETON, "restore_required": false},
+            doc! {"$inc": {"revision": 1_i64}, "$set": {"restore_required": true, "current": {}}},
+        )
+        .projection(doc! {"revision": 1})
+        .session(&mut *session)
+        .await?
+    else {
+        return Ok(None);
+    };
+    let key = audit_service::audit_chain_hmac_key().ok_or_else(corrupt)?;
+    audit_service::log_system_event_in_session(
+        db,
+        session,
+        key,
+        "encryption_key_lifecycle.writer_invalidated",
+        json!({"revision": field::<i64>(&row, "revision")?, "reason": reason}),
+    )
+    .await?;
+    Ok(Some(field(&row, "revision")?))
+}
+
 pub(crate) async fn enroll(
     db: &Database,
     config: &AppConfig,
@@ -424,4 +527,50 @@ pub(super) async fn census_scope_revision(
         return Ok(Some(field(&row, "scope_revision")?));
     }
     Ok(None)
+}
+
+/// An unenrolled observational generation uses private, generation-local
+/// references. Enrolled reports carry the same logical references as the ring.
+#[derive(Serialize, serde::Deserialize)]
+pub(crate) struct CensusRing {
+    pub deployment: String,
+    pub revision: i64,
+    pub deployment_revision: String,
+    pub restore_epoch: String,
+    pub proofs: Vec<proof::Proof>,
+}
+
+pub(crate) async fn census_ring(db: &Database, config: &AppConfig) -> AppResult<CensusRing> {
+    let slots = proof::slots(config).await?;
+    if let Some(row) = location::observed(db).await? {
+        if field::<bool>(&row, "restore_required")? {
+            return Err(stale());
+        }
+        let scope: Scope = field(&row, "scope")?;
+        let proofs: Vec<proof::Proof> = field(&row, "proofs")?;
+        proof::verify(&scope.deployment_id, &slots, &proofs).await?;
+        Ok(CensusRing {
+            deployment: scope.deployment_id,
+            revision: field(&row, "scope_revision")?,
+            deployment_revision: scope.deployment_revision,
+            restore_epoch: scope.restore_epoch,
+            proofs,
+        })
+    } else {
+        let deployment = fresh();
+        let proofs = proof::issue(&deployment, &slots).await?;
+        Ok(CensusRing {
+            deployment,
+            revision: 0,
+            deployment_revision: "unenrolled".into(),
+            restore_epoch: "unenrolled".into(),
+            proofs,
+        })
+    }
+}
+
+impl CensusRing {
+    pub(crate) async fn verify(&self, config: &AppConfig) -> AppResult<()> {
+        proof::verify(&self.deployment, &proof::slots(config).await?, &self.proofs).await
+    }
 }

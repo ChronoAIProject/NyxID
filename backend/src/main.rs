@@ -664,6 +664,14 @@ async fn server_run(cli: Cli) {
     {
         return;
     }
+    services::key_lifecycle::admit_startup(&db, &config)
+        .await
+        .expect("Key lifecycle startup admission failed");
+    if let Some(signals) = &startup_signals
+        && signals.stop_requested("ring_admitted").await
+    {
+        return;
+    }
     db::initialize(&db)
         .await
         .expect("Failed to initialize database");
@@ -1681,12 +1689,36 @@ async fn server_run(cli: Cli) {
                 break;
             }
             if let Err(error) =
+                services::platform_entry_receipts::cleanup_expired(&platform_cleanup_state.db, 128)
+                    .await
+            {
+                tracing::warn!(%error, "Native entry receipt cleanup failed");
+            }
+            if services::shutdown::process().is_draining() {
+                break;
+            }
+            if let Err(error) =
                 services::platform_setup_service::expire(&platform_cleanup_state.db).await
             {
                 tracing::warn!(
                     error_code = error.error_code(),
                     "Platform setup expiry sweep failed"
                 );
+            }
+        }
+    });
+
+    let migration_db = services::transaction_service::durable_database(&state.db);
+    services::shutdown::process().spawn_worker(async move {
+        let mut after = None;
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        while let Some(_work) = services::shutdown::process().tick(&mut interval).await {
+            if services::mcp_session_storage::migrate_batch(&migration_db, &mut after)
+                .await
+                .is_err()
+            {
+                tracing::warn!("MCP session storage migration will retry");
             }
         }
     });

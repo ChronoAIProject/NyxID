@@ -305,6 +305,7 @@ mod tests {
             .db
             .collection::<OrgMembership>(MEMBERSHIPS)
             .insert_one(OrgMembership {
+                eligibility_revision: 0,
                 id: Uuid::new_v4().to_string(),
                 org_user_id: org,
                 member_user_id: auth.user_id.to_string(),

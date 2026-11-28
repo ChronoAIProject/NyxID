@@ -588,6 +588,10 @@ async fn prepare_and_retire(db: &Database, lease: &str, stop_before_retire: bool
 }
 
 #[cfg(test)]
+#[path = "platform_entry_migration_mixed_tests.rs"]
+mod mixed_fleet_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

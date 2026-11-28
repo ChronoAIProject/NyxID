@@ -19,8 +19,8 @@ pub struct NyxbotEventBinding {
     /// The agent's owning person or organisation at creation. This is an
     /// identity hint only; ACL is resolved live from the agent on each use.
     pub agent_owner_id: String,
-    #[serde(default)]
-    pub org_use_revision: i64,
+    #[serde(flatten)]
+    pub member_use: super::org_membership::MemberUse,
     /// Existing chat row and partition selected by the owner for delivery.
     pub destination_channel_id: String,
     pub destination_partition: String,

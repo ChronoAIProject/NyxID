@@ -3,10 +3,7 @@
 use super::*;
 use crate::{
     handlers::saved_logins,
-    models::{
-        saved_login::{COLLECTION_NAME, SavedLogin},
-        user::UserType,
-    },
+    models::{saved_login::COLLECTION_NAME, user::UserType},
     services::saved_login_service::{self, Input},
     test_utils::{test_app_state, test_auth_user, test_user},
 };
@@ -15,53 +12,12 @@ use axum::{
     extract::{Path, State},
 };
 use std::{
-    collections::BTreeSet,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Instant,
 };
-
-struct Verified<'a> {
-    keys: &'a EncryptionKeys,
-    ids: BTreeSet<String>,
-}
-
-#[async_trait::async_trait]
-impl Observations for Verified<'_> {
-    async fn previous_dependents(&self, _: &Cut, _: &Row) -> AppResult<Dependents> {
-        Ok(Dependents::Rows(vec![]))
-    }
-    async fn current_dependents(&self, _: &Snapshot<'_>, _: &Row) -> AppResult<Dependents> {
-        Ok(Dependents::Rows(vec![]))
-    }
-    async fn replace(
-        &mut self,
-        _: &Snapshot<'_>,
-        row: &Row,
-        source: Option<Document>,
-    ) -> AppResult<()> {
-        if let Some(source) = source {
-            let record: SavedLogin = bson::from_document(source).map_err(|_| malformed())?;
-            saved_login_service::verify_current_secrets(self.keys, &record).await?;
-            self.ids.insert(record.id);
-        } else {
-            self.ids.remove(row.id.as_str().ok_or_else(malformed)?);
-        }
-        Ok(())
-    }
-    async fn rescan(&mut self, at: &Snapshot<'_>) -> AppResult<()> {
-        self.ids.clear();
-        let mut cursor = at.find(COLLECTION_NAME, doc! {}, doc! {}).await?;
-        while let Some(d) = cursor.try_next().await? {
-            let record: SavedLogin = bson::from_document(d).map_err(|_| malformed())?;
-            saved_login_service::verify_current_secrets(self.keys, &record).await?;
-            self.ids.insert(record.id);
-        }
-        Ok(())
-    }
-}
 
 fn input() -> Input {
     Input {
@@ -82,7 +38,7 @@ async fn saved_login_writes_during_capture_and_authenticated_scan() {
     let selection = std::env::var("NYXID_CENSUS_LOAD_MODE")
         .ok()
         .map(|value| value.parse::<usize>().expect("mode 0..=3"));
-    assert!(selection.is_none_or(|mode| mode < 4));
+    assert!(selection.is_none_or(|mode| mode < 3));
     let rounds = if selection.is_some() { 1 } else { 8 };
     let source_commands = Arc::new(AtomicUsize::new(0));
     let journal_commands = Arc::new(AtomicUsize::new(0));
@@ -94,7 +50,7 @@ async fn saved_login_writes_during_capture_and_authenticated_scan() {
                 Ok(COLLECTION_NAME) => {
                     source_counter.fetch_add(1, Ordering::Relaxed);
                 }
-                Ok(LOG) => {
+                Ok(LOG | report::REPORTS) => {
                     journal_counter.fetch_add(1, Ordering::Relaxed);
                 }
                 _ => {}
@@ -126,57 +82,57 @@ async fn saved_login_writes_during_capture_and_authenticated_scan() {
         .await
         .unwrap()
         .database(db.name());
-    let scope = Scope {
-        namespaces: [COLLECTION_NAME.into()].into(),
-        ..scope()
-    };
     for round in 0..rounds {
-        let order = if round % 2 == 0 {
-            [0, 1, 2, 3]
-        } else {
-            [3, 2, 1, 0]
-        };
+        let order = if round % 2 == 0 { [0, 1, 2] } else { [2, 1, 0] };
         for mode in order
             .into_iter()
             .filter(|mode| selection.is_none_or(|s| s == *mode))
         {
-            let started = if mode >= 2 {
-                Some(Census::start(&reader, keys, scope.clone()).await.unwrap())
-            } else {
-                None
-            };
             source_commands.store(0, Ordering::Relaxed);
             journal_commands.store(0, Ordering::Relaxed);
             let stop = AtomicBool::new(false);
             let collector = async {
-                let Some((census, mut last)) = started else {
+                if mode < 2 {
                     return 0;
-                };
-                let mut observations = Verified {
-                    keys,
-                    ids: BTreeSet::new(),
-                };
-                observations
-                    .rescan(&census.snapshot(&last).await.unwrap())
-                    .await
-                    .unwrap();
+                }
                 let mut cuts = 0;
-                while !stop.load(Ordering::Acquire) {
-                    tokio::time::sleep(Duration::from_millis(200)).await;
-                    let end = witness(&census, &census.request_cut().await.unwrap()).await;
-                    census
-                        .reconcile(&last, &end, &mut observations)
-                        .await
-                        .unwrap();
-                    if mode == 3 {
-                        observations
-                            .rescan(&census.snapshot(&end).await.unwrap())
+                loop {
+                    let mut result = report::start(&reader, keys, &state.config).await.unwrap();
+                    while !result.complete {
+                        result = report::advance(&reader, keys, &state.config, &result.generation)
                             .await
                             .unwrap();
                     }
-                    assert_eq!(observations.ids.len(), 4);
-                    last = end;
+                    let mut after = None;
+                    let mut verified = false;
+                    loop {
+                        let page = report::families(
+                            &reader,
+                            keys,
+                            &result.generation,
+                            report::Query { after },
+                        )
+                        .await
+                        .unwrap();
+                        for f in page
+                            .items
+                            .iter()
+                            .filter(|f| f["collection"] == COLLECTION_NAME)
+                        {
+                            assert_eq!(f["totals"]["homogeneous"], 4);
+                            assert_eq!(f["totals"]["rows_examined"], 4);
+                            verified = true;
+                        }
+                        after = page.next;
+                        if after.is_none() {
+                            break;
+                        }
+                    }
+                    assert!(verified);
                     cuts += 1;
+                    if stop.load(Ordering::Acquire) {
+                        break;
+                    }
                 }
                 cuts
             };

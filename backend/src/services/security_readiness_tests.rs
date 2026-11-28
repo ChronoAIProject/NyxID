@@ -179,6 +179,7 @@ async fn membership_enablement_preserves_configured_flags_when_readiness_becomes
             .unwrap()
     );
     let membership = OrgMembership {
+        eligibility_revision: 0,
         id: uuid::Uuid::new_v4().to_string(),
         org_user_id: org,
         member_user_id: user.clone(),

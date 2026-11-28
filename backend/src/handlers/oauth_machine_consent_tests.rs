@@ -114,7 +114,7 @@ impl MachineConsentFixture {
         .unwrap()
     }
     async fn token_response(&self, code: &str) -> TokenResponse {
-        token_inner(&self.state, &TelemetryContext::default(), &HeaderMap::new(),
+        token_inner(None,&self.state, &TelemetryContext::default(), &HeaderMap::new(),
             serde_json::from_value(serde_json::json!({
                 "grant_type": "authorization_code", "code": code, "client_id": self.client,
                 "redirect_uri": "https://app.example/callback", "code_verifier": "machine-test-verifier"

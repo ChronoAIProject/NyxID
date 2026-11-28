@@ -1,6 +1,41 @@
 use super::*;
 use crate::test_utils::{connect_transaction_test_database, test_app_config, test_auth_user};
 
+#[tokio::test]
+async fn unenrolled_admission_is_one_indexed_read_without_lifecycle_environment() {
+    use mongodb::event::{EventHandler, command::CommandEvent};
+    use std::sync::{Arc, Mutex};
+
+    let commands = Arc::new(Mutex::new(Vec::new()));
+    let captured = commands.clone();
+    let db = crate::test_utils::connect_test_database_with_command_handler(
+        "unenrolled_admission",
+        EventHandler::callback(move |event| {
+            if let CommandEvent::Started(event) = event {
+                captured.lock().unwrap().push(event.command);
+            }
+        }),
+    )
+    .await
+    .unwrap();
+    commands.lock().unwrap().clear();
+
+    admit_startup(&db, &test_app_config()).await.unwrap();
+
+    {
+        let commands = commands.lock().unwrap();
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].get_str("find"), Ok(HEAD));
+        assert_eq!(
+            commands[0]
+                .get_document("filter")
+                .and_then(|filter| filter.get_str("_id")),
+            Ok(SINGLETON)
+        );
+    }
+    db.drop().await.unwrap();
+}
+
 fn recording(rev: i64) -> Recording {
     Recording {
         request_id: fresh(),

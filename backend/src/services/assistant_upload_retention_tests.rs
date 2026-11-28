@@ -63,7 +63,8 @@ async fn root(
         text: "private extracted text".into(),
         sections: Vec::new(),
     };
-    let row = AssistantUpload {
+    let keys = &state.encryption_keys;
+    let mut row = AssistantUpload {
         filename_is_original: None,
         pdf: None,
         source: None,
@@ -81,17 +82,28 @@ async fn root(
         size: 8,
         pages: 0,
         chunks: 2,
-        text_encrypted: state
-            .encryption_keys
-            .encrypt(&serde_json::to_vec(&extracted).unwrap())
-            .await
-            .unwrap(),
+        text_encrypted: vec![],
         created_at: now,
         expires_at: None,
         bound_at: bound.then_some(now),
         reads: 0,
         coverage: Vec::new(),
     };
+    row.text_encrypted = crate::crypto::record_field::encrypt(
+        keys,
+        ATTACHMENTS,
+        &id,
+        owner,
+        "text_encrypted",
+        &serde_json::to_vec(&extracted).unwrap(),
+    )
+    .await
+    .unwrap();
+    crate::services::credential_record_service::mark_version(
+        &mut row.secret_context_versions,
+        keys,
+        "text_encrypted",
+    );
     state
         .db
         .collection(ATTACHMENTS)
@@ -99,8 +111,24 @@ async fn root(
         .await
         .unwrap();
     for (i, bytes) in [b"abcd", b"efgh"].iter().enumerate() {
-        state.db.collection::<Document>(ATTACHMENTS).insert_one(doc! {"_id":Uuid::new_v4().to_string(),"parent_attachment_id":&id,"user_id":owner,"conversation_id":conversation,
-            "chunk_index":i as i64,"data_encrypted":bson::Binary {subtype:bson::spec::BinarySubtype::Generic,bytes:state.encryption_keys.encrypt(*bytes).await.unwrap()}}).await.unwrap();
+        let chunk_id = Uuid::new_v4().to_string();
+        let index = i as i64;
+        let encrypted = crate::services::assistant_record_service::encrypt_chunk(
+            keys, &chunk_id, owner, &id, index, *bytes,
+        )
+        .await
+        .unwrap();
+        let mut versions = Default::default();
+        crate::services::credential_record_service::mark_version(
+            &mut versions,
+            keys,
+            "data_encrypted",
+        );
+        state.db.collection::<Document>(ATTACHMENTS).insert_one(doc! {
+            "_id":chunk_id,"parent_attachment_id":&id,"user_id":owner,"conversation_id":conversation,"chunk_index":index,
+            "secret_context_versions":bson::to_bson(&versions).unwrap(),
+            "data_encrypted":bson::Binary {subtype:bson::spec::BinarySubtype::Generic,bytes:encrypted},
+        }).await.unwrap();
     }
     id
 }
@@ -1083,7 +1111,7 @@ async fn upload_retention_group_placeholder_and_deletion_keep_scope() {
 async fn machine_preview_retention_shortens_immediately_and_sweep_is_fenced() {
     let (state, owner, thread) = fixture().await;
     let id = Uuid::new_v4().to_string();
-    let row = crate::models::assistant_attachment::AssistantAttachment {
+    let mut row = crate::models::assistant_attachment::AssistantAttachment {
         artifact: Default::default(),
         secret_context_versions: Default::default(),
         id: id.clone(),
@@ -1094,9 +1122,15 @@ async fn machine_preview_retention_shortens_immediately_and_sweep_is_fenced() {
         content_type: "text/plain".into(),
         size: 7,
         chunks: 0,
-        data_encrypted: state.encryption_keys.encrypt(b"preview").await.unwrap(),
+        data_encrypted: vec![],
         created_at: Utc::now() - Duration::days(2),
     };
+    crate::services::assistant_record_service::set_fixture_image_data(
+        &state.encryption_keys,
+        &mut row,
+        b"preview",
+    )
+    .await;
     state
         .db
         .collection(ATTACHMENTS)
@@ -1152,18 +1186,30 @@ async fn tool_image(
     age: Duration,
 ) -> String {
     let id = Uuid::new_v4().to_string();
+    let mut image = crate::models::assistant_attachment::AssistantAttachment {
+        id: id.clone(),
+        origin: "tool".into(),
+        user_id: owner.into(),
+        conversation_id: conversation.into(),
+        turn_id: turn.into(),
+        content_type: "image/png".into(),
+        size: 4,
+        chunks: 0,
+        data_encrypted: vec![],
+        secret_context_versions: Default::default(),
+        artifact: Default::default(),
+        created_at: Utc::now() - age,
+    };
+    crate::services::assistant_record_service::set_fixture_image_data(
+        &state.encryption_keys,
+        &mut image,
+        b"png!",
+    )
+    .await;
     state
         .db
-        .collection::<Document>(ATTACHMENTS)
-        .insert_one(doc! {
-            "_id": &id, "origin": "tool", "user_id": owner, "conversation_id": conversation,
-            "turn_id": turn, "content_type": "image/png", "size": 4_i64,
-            "data_encrypted": bson::Binary {
-                subtype: bson::spec::BinarySubtype::Generic,
-                bytes: state.encryption_keys.encrypt(b"png!").await.unwrap(),
-            },
-            "created_at": bson::DateTime::from_chrono(Utc::now() - age),
-        })
+        .collection(ATTACHMENTS)
+        .insert_one(image)
         .await
         .unwrap();
     id

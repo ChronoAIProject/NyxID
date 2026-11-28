@@ -627,7 +627,7 @@ async fn manual_signing_secret_patch_does_not_repair_failed_grant() {
         .await
         .unwrap();
     state.db.collection::<bson::Document>(BOTS).update_one(
-        doc! {"_id": &bot.id}, doc! {"$set": {"app_secret_encrypted": binary(state.encryption_keys.encrypt(b"old-signing-secret").await.unwrap())}},
+        doc! {"_id": &bot.id}, doc! {"$set": {"app_secret_encrypted": binary(hex::decode(crate::services::channel_registration::historical::OLD_SIGNING_SECRET).unwrap())}},
     ).await.unwrap();
     super::super::channel_registration::bind_fixture_fields(
         &state.db,
@@ -2186,7 +2186,7 @@ async fn prepared_meta_credentials_transfer_before_and_after_signed_deauthorizat
             doc! {"_id": &bot.id},
             doc! {"$set": {
                 "credential_source":"platform",
-                secret: binary(keys.encrypt(b"webhook-secret").await.unwrap()),
+                secret: binary(hex::decode(crate::services::channel_registration::historical::META_WEBHOOK_SECRET).unwrap()),
                 "webhook_secret_hash":fingerprint("webhook-secret"),
             }},
         )
@@ -7155,18 +7155,8 @@ async fn accepted_subject_cutoff_closes_overflow_verify_refresh_reconnect_and_ca
     );
     // An encrypted cache can still await a compatibility page. Progress must
     // enforce the accepted identity cutoff without waiting for its deletion.
-    let assets = vec![AssetCredential {
-        id: "222".into(),
-        name: "Cached account".into(),
-        token: Zeroizing::new("cached-token".into()),
-        grant_subject_id: "900".into(),
-        expires_at: None,
-    }];
-    let encrypted = state
-        .encryption_keys
-        .encrypt(&serde_json::to_vec(&assets).unwrap())
-        .await
-        .unwrap();
+    let encrypted =
+        hex::decode(crate::services::channel_registration::historical::CACHED_ASSETS).unwrap();
     let mut cached = pending;
     cached.insert("status", "assets");
     cached.insert("grant_subject_id", "900");
@@ -7175,7 +7165,10 @@ async fn accepted_subject_cutoff_closes_overflow_verify_refresh_reconnect_and_ca
         .replace_one(doc! {"_id":&start.session_id}, cached)
         .await
         .unwrap();
-    assert!(s.progress(&bot.user_id, &start.session_id).await.is_err());
+    assert!(matches!(
+        s.progress(&bot.user_id, &start.session_id).await,
+        Err(AppError::ChannelConversationNotReachable(reason)) if reason == "meta:reconnect_required"
+    ));
     assert!(server.received_requests().await.unwrap().is_empty());
     state.db.drop().await.unwrap();
 }

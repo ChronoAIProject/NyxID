@@ -174,3 +174,121 @@ For `POST /evidence`, replace the enrollment's `deployment_revision` field with 
 3. **Evidence after the baseline.** Use `attest` with `assertion`, `affirmed` and optional `valid_until_ms` (Unix milliseconds). Record `old_writers_withdrawn`, `database_access_revoked`, `restore_continuity` and `recovery_dependencies_closed`. Include old images, deployments and jobs, obsolete credentials and live sessions, and all restorable backup, PITR and rollback dependencies. A changed dependency clears its prior inventory review and aggregate assertion for the affected keys. A withdrawal or replacement appends a new revision. The decision reader must check those exact entries, their expiry and the singleton at decision commit. To establish strict post-baseline ordering, read the singleton revision at snapshot S and require each relied-on evidence revision to be greater. Wall-clock ties are possible.
 4. **Restore or deployment change.** Submit `advance_restore_epoch` for the complete ring after an announced restore/import, or `change_deployment_revision` with the new release revision when that scope changes. Reread status, start a fresh census and record fresh scoped reviews and attestations. A detected database or lifecycle collection identity change opens a durable restore blocker. Only an explicit epoch advance clears it. NyxID cannot independently prove that an unannounced restore or import did not occur. A restore can roll back the database, journal and evidence together.
 5. **Verification and rollback.** Submit `verify_ring` for the complete scope to challenge the enrolled layout again. The previous release can continue serving under the enrolled configuration and ignores the new collections. Enrollment authorizes neither a key removal nor a second rotation. The census runner and release rehearsal must repeat the fixed-load throughput and tail-latency gate on an isolated rig before enabling certification.
+
+## Running a dated census
+
+A census reports which encryption formats and keys the registered families use
+at a specific MongoDB cluster time. It reads application records even when
+contextual application writes are disabled. Use a first-party human session or
+access token. A full admin can start and advance a census. Full admins and
+operators can read its status, family counts and findings.
+
+1. Send `POST /api/v1/admin/encrypted-records/censuses` with no body. Save the
+   UUID in the returned status field `generation`. Use it as `{id}` in the
+   paths below, relative to `/api/v1/admin/encrypted-records/censuses`.
+2. Send `POST /{id}/advance` with no body. Each call performs bounded work and
+   returns status. Repeat until `phase` is `published`. Use `GET /{id}` to
+   check progress between calls. The runner scans at the baseline snapshot S,
+   follows the database change stream through a witnessed marker W, reconciles
+   affected rows and their dependencies at W, and authenticates the report
+   partitions before publication.
+3. Read `GET /{id}/families` and `GET /{id}/findings` after publication.
+   Both return `items` and `next`. Pass each non-null `next` as `?after=` on
+   the same route and generation, even if the current page has no items.
+
+### Reading the report
+
+Published status gives the cluster times `baseline` (S) and `as_of` (W),
+registry digest, lifecycle scope revision, restore epoch, deployment revision,
+reader and writer settings, opaque key references, row totals and blockers.
+Every status includes `certification_enabled: false` and the blocker
+`isolated_load_gate_unmet`. The isolated-rig load gate remains unmet. A
+published census provides dated observations and cannot authorize key retirement.
+
+The families list includes families with zero rows. Within a family, each
+examined row counts once as `absent` (no material), `homogeneous` (one
+combination of material attributes), `mixed` (several combinations) or
+`unresolved` (at least one finding). Buckets group observations by static
+field path, storage version, envelope version, binding, key reference and
+route. A null `field` groups the same observations across the family.
+`rows_with` counts each matching row once per bucket, so a row can appear
+in several buckets. `material_instances` counts each authenticated envelope,
+including repeated entries in one row. `empty_envelopes` counts the subset
+with empty payloads. An unresolved row retains the counts for its fields that
+authenticate successfully.
+
+Each finding names the `family`, `collection`, static `field` path, `reason`
+code (such as `MissingParent` or `Authentication`) and `state` of
+`unresolved`. Use the opaque `record_token` to group findings for the same
+source record within this generation. The database record ID stays private.
+
+### Retrying, invalidation and retention
+
+If an advance loses its lease or another worker holds it, retry the same
+generation from its last committed checkpoint. Loss of snapshot history, a
+change-stream gap, a missing or unreadable journal page, journal exhaustion,
+or a change to the database identity, watched collection identity or lifecycle
+scope invalidates unfinished work. Start a fresh generation after resolving
+the cause. A registry, reader/writer policy or ring-proof mismatch also blocks
+advance. A damaged report partition blocks publication or fails authentication
+on read. A published report with an older registry digest keeps its dated
+totals and carries `registry_digest_mismatch`.
+
+The report, journal and partitions share a seven-day TTL measured from
+generation creation, including unreferenced partitions left by an interrupted
+advance. Publication uses that original expiry. Start a new census if the
+generation expires.
+
+NyxID cannot independently prove that an unannounced restore or import did
+not occur. A restore can roll back the data and the evidence together. For an
+announced restore or import, a full admin advances the restore epoch, starts a
+fresh census and records restore-continuity evidence for the new scope.
+
+## Process admission and survivor-preserving writers
+
+Every server start and every database-using one-shot command performs a
+read-only ring admission between the database connection and `db::initialize`.
+The guard looks up `ring-v1` by its unique `_id` on the existing application
+connection. For an unenrolled database this one read completes admission.
+Both lifecycle environment variables are optional until enrollment. Login and
+SSH client helpers return before connecting to MongoDB.
+
+For an enrolled database, set `NYXID_BOOTSTRAP_DATABASE_URL` to a read-only
+principal on the same database and `NYXID_DEPLOYMENT_REVISION` to the recorded
+release label. Both principals need to inspect the replica-set and lifecycle
+collection identities. The bootstrap principal reads the proofs at the observed
+revision. The guard checks the database identity, restore blocker, release,
+contextual writer policy and ring before initialization can write.
+
+The writer inventory covers contextual record adapters, exact-source migration
+rewraps, native entry receipt and handle transactions, bulk restore or import,
+and erasure cleanup. Copy and rewrap paths use the complete BSON source as
+their CAS predicate, preserving missing fields and BSON byte shapes. A writer
+that imports, restores or otherwise replaces a survivor source calls the
+lifecycle invalidation helper inside its existing transaction. The helper
+advances the lifecycle revision, clears current evidence pointers and records a
+metadata-only chained audit. A subsequent census and fresh evidence are needed
+before retirement can be considered.
+
+Native entry receipts use a durable cleanup fence with a default of zero for
+legacy rows. The bounded server cleanup worker selects expired parents through
+the existing expiry index, increments the fence, removes all child handles and
+deletes the parent in one transaction. Both replicas insert any new handle
+in the transaction that creates its parent.
+
+Deploy the cleanup worker with the original zero-delay parent and child TTL
+indexes. Both indexes continue enforcing retention through a full rollback.
+MongoDB can still expire the parent first, leaving an expired handle until
+the child TTL runs. Keep this family ineligible for certification through
+this rollout. A later release can switch the parent index after all serving
+and rollback versions run bounded cleanup. Verify the catalog and cleanup
+lag before enabling certification.
+
+NyxID has no independent signal for an unannounced database restore or import.
+An authorized administrator records the restore-continuity evidence and
+advances the restore epoch after an announced event. Retirement waits for
+current records covering withdrawn old writers, revoked or rotated database
+credentials, restore continuity and closed backup, PITR and rollback
+dependencies. Each record names the owner, evidence reference, key and restore
+scope, deployment revision and recorded time through the lifecycle revisioned
+API. Automated attestations can use the same immutable entry shape later.

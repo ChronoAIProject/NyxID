@@ -10,7 +10,7 @@ use crate::{
 use bson::{Document, doc};
 use zeroize::Zeroizing;
 
-const PREFIX: &str = "v3:";
+pub(super) const PREFIX: &str = "v3:";
 const FIELDS: &[&str] = &[
     "code_verifier",
     "device_code_encrypted",
@@ -19,7 +19,7 @@ const FIELDS: &[&str] = &[
 fn invalid() -> AppError {
     AppError::Internal("OAuth state field authentication or encoding is invalid".into())
 }
-fn path<'a>(state: &'a OAuthState, field: &'a str) -> [&'a str; 11] {
+pub(super) fn path<'a>(state: &'a OAuthState, field: &'a str) -> [&'a str; 11] {
     [
         field,
         "initiator",
@@ -42,7 +42,10 @@ fn path<'a>(state: &'a OAuthState, field: &'a str) -> [&'a str; 11] {
         state.connection_id.as_deref().unwrap_or("absent"),
     ]
 }
-fn context<'a>(state: &'a OAuthState, path: &'a [&'a str]) -> AppResult<RecordContext<'a>> {
+pub(super) fn context<'a>(
+    state: &'a OAuthState,
+    path: &'a [&'a str],
+) -> AppResult<RecordContext<'a>> {
     if !path.first().is_some_and(|field| FIELDS.contains(field)) {
         return Err(invalid());
     }
@@ -75,7 +78,7 @@ pub(crate) async fn encrypt(
         Ok(encoded)
     }
 }
-fn validate(bytes: &[u8]) -> AppResult<()> {
+pub(super) fn validate(bytes: &[u8]) -> AppResult<()> {
     if bytes.is_empty() || std::str::from_utf8(bytes).is_err() {
         return Err(invalid());
     }

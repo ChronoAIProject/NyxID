@@ -73,6 +73,10 @@ pub(crate) enum Dependents {
 
 #[async_trait::async_trait]
 pub(crate) trait Observations: Sync + Send {
+    fn dirty_limit(&self) -> usize {
+        MAX_DIRTY_ROWS
+    }
+
     /// Include missing-parent edges recorded by the last complete generation.
     async fn previous_dependents(&self, from: &Cut, parent: &Row) -> AppResult<Dependents>;
     /// Include newly linked sources using the reviewed reverse join at W.
@@ -99,14 +103,14 @@ struct Closure {
 }
 
 impl Closure {
-    fn add(&mut self, scope: &Scope, row: Row) -> AppResult<bool> {
+    fn add(&mut self, scope: &Scope, row: Row, limit: usize) -> AppResult<bool> {
         if !scope.namespaces.contains(&row.collection) {
             return Err(malformed());
         }
         let key = bson::to_vec(&row).map_err(|_| malformed())?;
         if !self.seen.contains_key(&key) {
             self.bytes += key.len();
-            if self.bytes > MAX_DIRTY_BYTES || self.seen.len() >= MAX_DIRTY_ROWS {
+            if self.bytes > MAX_DIRTY_BYTES || self.seen.len() >= limit {
                 return Ok(false);
             }
             self.pending.push(key.clone());
@@ -136,12 +140,27 @@ impl Census<'_> {
         to: &Cut,
         observer: &mut impl Observations,
     ) -> AppResult<()> {
+        self.reconcile_range(from, to, from.page + 1..=to.page, observer)
+            .await
+    }
+
+    pub(super) async fn reconcile_range(
+        &self,
+        from: &Cut,
+        to: &Cut,
+        pages: std::ops::RangeInclusive<i64>,
+        observer: &mut impl Observations,
+    ) -> AppResult<()> {
         self.snapshot(from).await?;
         let snapshot = self.snapshot(to).await?;
-        if from.page >= to.page || from.time >= to.time {
+        if pages.is_empty()
+            || *pages.start() <= from.page
+            || *pages.end() > to.page
+            || from.time >= to.time
+        {
             return Err(refused("Census cuts are out of order"));
         }
-        let result = self.apply(from, &snapshot, observer).await;
+        let result = self.apply(from, &snapshot, pages, observer).await;
         if let Err(e) = &result
             && continuity_lost(e)
         {
@@ -156,6 +175,7 @@ impl Census<'_> {
         &self,
         from: &Cut,
         to: &Snapshot<'_>,
+        pages: std::ops::RangeInclusive<i64>,
         observer: &mut impl Observations,
     ) -> AppResult<()> {
         let mut closure = Closure {
@@ -164,11 +184,11 @@ impl Census<'_> {
             bytes: 0,
         };
         let mut full_scan = false;
-        for page in from.page + 1..=to.cut.page {
+        for page in pages {
             let batch = self.read_page(page).await?;
             if !full_scan {
                 for row in batch.dirty {
-                    if !closure.add(&self.scope, row)? {
+                    if !closure.add(&self.scope, row, observer.dirty_limit())? {
                         full_scan = true;
                         break;
                     }
@@ -188,7 +208,7 @@ impl Census<'_> {
                     return observer.rescan(to).await;
                 };
                 for child in rows {
-                    if !closure.add(&self.scope, child)? {
+                    if !closure.add(&self.scope, child, observer.dirty_limit())? {
                         return observer.rescan(to).await;
                     }
                 }

@@ -559,6 +559,7 @@ impl IncrementalFixture {
         }))
         .unwrap();
         token_inner(
+            None,
             &self.state,
             &TelemetryContext::default(),
             &HeaderMap::new(),
@@ -638,6 +639,7 @@ async fn revoked_incremental_code_returns_invalid_grant_at_token_endpoint() {
     }))
     .unwrap();
     let response = token(
+        AuditIp(None),
         State(fixture.state),
         TelemetryContext::default(),
         HeaderMap::new(),
@@ -747,6 +749,7 @@ async fn incremental_ordinary_and_binding_flows_preserve_full_refresh_grant() {
         }))
         .unwrap();
         let Json(refreshed) = token_inner(
+            None,
             &fixture.state,
             &TelemetryContext::default(),
             &HeaderMap::new(),

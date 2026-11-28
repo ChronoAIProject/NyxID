@@ -184,6 +184,7 @@ pub async fn enroll(
                 credential_hash: credential_hash.clone(),
                 pool_token_hash: pool.worker_token_hash.clone(),
                 installation_epoch: pool.installation_epoch,
+                eligibility_revision: membership.as_ref().map_or(0, |m| m.eligibility_revision),
                 membership_id: membership.as_ref().map(|membership| membership.id.clone()),
                 membership_created_at: membership.as_ref().map(|membership| membership.created_at),
             };
@@ -200,6 +201,7 @@ pub async fn enroll(
                 if previous.credential_hash == credential_hash
                     && (previous.installation_epoch != enrollment.installation_epoch
                         || previous.pool_token_hash != enrollment.pool_token_hash
+                        || previous.eligibility_revision != enrollment.eligibility_revision
                         || previous.membership_id != enrollment.membership_id
                         || previous.membership_created_at != enrollment.membership_created_at) {
                     return Err(AppError::OracleWorkerCredentialRenewalRequired);
@@ -317,7 +319,8 @@ pub async fn authenticate(db: &Database, credential: &str) -> AppResult<WorkerAu
             AppError::DatabaseError(_) => error,
             _ => AppError::OracleWorkerTokenInvalid,
         })?;
-    if membership.as_ref().map(|membership| &membership.id) != enrollment.membership_id.as_ref()
+    if membership.as_ref().map_or(0, |m| m.eligibility_revision) != enrollment.eligibility_revision
+        || membership.as_ref().map(|membership| &membership.id) != enrollment.membership_id.as_ref()
         || membership.as_ref().map(|membership| membership.created_at)
             != enrollment.membership_created_at
     {
@@ -379,7 +382,9 @@ pub(crate) async fn ensure_current_worker_in_session(
             return Err(AppError::OracleWorkerTokenInvalid);
         }
         let membership = lock_authority(db, session, &enrollment.owner_user_id, &pool).await?;
-        if membership.as_ref().map(|m| &m.id) != enrollment.membership_id.as_ref()
+        if membership.as_ref().map_or(0, |m| m.eligibility_revision)
+            != enrollment.eligibility_revision
+            || membership.as_ref().map(|m| &m.id) != enrollment.membership_id.as_ref()
             || membership.as_ref().map(|m| m.created_at) != enrollment.membership_created_at
         {
             return Err(AppError::OracleWorkerTokenInvalid);

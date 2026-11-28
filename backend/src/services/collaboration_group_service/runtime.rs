@@ -220,9 +220,12 @@ pub(crate) async fn key_authority(
             agent.operation_scopes.clone(),
             agent.user_id.clone(),
             if b.authority.lane == model::Lane::OrgMember {
-                b.authority.revision
+                crate::models::org_membership::MemberUse {
+                    org_use_revision: b.authority.revision,
+                    eligibility_revision: b.authority.eligibility_revision,
+                }
             } else {
-                0
+                Default::default()
             },
         )
     };

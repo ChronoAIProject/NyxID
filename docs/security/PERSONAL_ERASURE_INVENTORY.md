@@ -597,7 +597,7 @@ and checks target, bystander and retained rows through job completion.
 | Public probe consents | `actor_user_id` is personal consent; the local inventory erases it. Probe financial evidence retains the organization's sponsor and metering references. |
 | Manager ingress/delivery and public sessions | Restricted replay, admission and recovery bookkeeping retains external platform identifiers. Public-session bindings clear after the fixed lifetime and confirmed remote cleanup; public turns separately expire through their `expires_at` TTL. |
 | Personal platform bindings, link intents and challenges | The platform lifecycle revokes/cancels them first. Local deletion waits for durable platform cleanup and for pending personal Stop effects that reference active, person-owned local nodes, preserving their signing credentials until then. Retained Stop captures do not depend on binding rows. |
-| MCP notifications | Ownership joins through `session_id` to `mcp_sessions`; there is no notification `user_id`. Children are removed before the credential-bearing session parent. |
+| MCP notifications | Ownership joins through `session_id` to `mcp_sessions`; there is no notification `user_id`. Children are removed before their parent under either storage key. The session row, including its absolute_expires_at deadline and slot_recovery_revision, and its slot are removed by user_id. The shared security_rollouts issuance fence revision contains no person or session identifier and is retained. |
 | Telegram creation requests | `owner_user_id` owns the request; `actor_user_id` is separate attribution. Shared destination snapshots are redacted for the departing actor. Unstarted requests are cancelled under the erasure barrier; started requests remain until confirmed bot cleanup permits retirement. Managed-bot observations retain external bot identifiers and monotonic replay evidence. |
 | Invite codes | Creator-authored notes are removed, usage email snapshots are redacted, and opaque creator/usage identifiers and counters remain. Exports contain only the caller's usage element. |
 | Encryption migration records | Run records are global progress. Restricted findings retain keyed diagnostic identifiers and verification metadata. `encrypted_record_migration::lookup_finding` returns a 15-minute encrypted lookup cursor to the operator without persisting it; operator-derived owner lookup fields are not persisted ownership columns. |
@@ -892,3 +892,10 @@ and owner acceptance are specified in [CRASH_REPORTING.md](../CRASH_REPORTING.md
 the opaque admin user ID, never names or emails. Personal erasure does not delete
 these rows: they preserve operational release identity and verification for
 reports from every account, independently of the registering administrator.
+
+The `encrypted_record_census_reports` collection retains generation-private
+encrypted source locators, dependency edges and diagnostic receipts for seven
+days. The census uses them to reconcile updates and deletes at its witnessed
+cut. The personal-data registry classifies them as retained erasure
+bookkeeping and excludes them from personal export. The generation and every
+staged partition share an `expires_at` TTL index.

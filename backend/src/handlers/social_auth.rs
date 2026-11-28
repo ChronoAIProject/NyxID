@@ -13,9 +13,9 @@ use crate::crypto::token::{constant_time_eq, generate_random_token, hash_token};
 use crate::errors::{AppError, AppResult};
 use crate::handlers::auth::{
     apply_browser_session_cookies, build_cookie_with_same_site, clear_cookie,
-    clear_cookie_with_same_site, extract_email_domain, extract_ip, extract_referrer_domain,
-    extract_user_agent,
+    clear_cookie_with_same_site, extract_email_domain, extract_referrer_domain, extract_user_agent,
 };
+use crate::mw::rate_limit::AuditIp;
 use crate::services::mobile_social_service as mobile;
 use crate::services::{
     audit_service, feature_flag_service, invite_code_service, social_auth_service, token_service,
@@ -509,7 +509,7 @@ pub async fn callback(
         .filter(|_| was_newly_created)
         .map(|r| r.invite_code_id.as_str());
 
-    let ip = extract_ip(&headers, Some(peer));
+    let ip = AuditIp::resolve(&headers, Some(peer), &state.config.trusted_proxy_ips).0;
     let ua = extract_user_agent(&headers);
 
     // Pre-auth path — derive telemetry surface from `redirect_target`
@@ -843,7 +843,7 @@ pub async fn apple_callback(
         .filter(|_| was_newly_created)
         .map(|r| r.invite_code_id.as_str());
 
-    let ip = extract_ip(&headers, Some(peer));
+    let ip = AuditIp::resolve(&headers, Some(peer), &state.config.trusted_proxy_ips).0;
     let ua = extract_user_agent(&headers);
 
     // Pre-auth path — derive surface from `redirect_target` rather than

@@ -1,7 +1,5 @@
-use std::net::SocketAddr;
-
 use axum::{
-    extract::{ConnectInfo, FromRequestParts, OriginalUri},
+    extract::{FromRequestParts, OriginalUri},
     http::{HeaderMap, Method, header, request::Parts},
     middleware::Next,
     response::IntoResponse,
@@ -113,8 +111,7 @@ pub struct AuthUser {
     /// Per-agent rate limit (from ApiKey), None = use user-level defaults
     pub rate_limit_per_second: Option<u32>,
     pub rate_limit_burst: Option<u32>,
-    /// Client IP captured at extraction time (from X-Forwarded-For, X-Real-IP, or
-    /// the TCP peer address). Used to enrich audit log entries.
+    /// Client IP resolved at the trusted proxy boundary for audit entries.
     pub ip_address: Option<String>,
     /// Client User-Agent header captured at extraction time. Used to enrich audit
     /// log entries.
@@ -137,38 +134,6 @@ impl AuthUser {
             app_policy_revision: None,
         }
     }
-}
-
-/// Extract the client IP from common reverse-proxy headers, falling back to the
-/// TCP peer address available via `ConnectInfo`.
-///
-/// Lookup order: `X-Forwarded-For` (first hop), `X-Real-IP`, then the peer
-/// socket address.
-fn extract_request_ip(parts: &Parts) -> Option<String> {
-    if let Some(forwarded) = parts
-        .headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .map(|v| v.split(',').next().unwrap_or("").trim().to_string())
-        .filter(|s| !s.is_empty())
-    {
-        return Some(forwarded);
-    }
-
-    if let Some(real_ip) = parts
-        .headers
-        .get("x-real-ip")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-    {
-        return Some(real_ip);
-    }
-
-    parts
-        .extensions
-        .get::<ConnectInfo<SocketAddr>>()
-        .map(|ConnectInfo(addr)| addr.ip().to_string())
 }
 
 /// Extract the User-Agent header.
@@ -1365,7 +1330,7 @@ impl FromRequestParts<AppState> for AuthUser {
     ) -> impl std::future::Future<Output = Result<Self, Self::Rejection>> + Send {
         async move {
             let authenticated = async {
-            let request_ip = extract_request_ip(parts);
+            let request_ip = super::rate_limit::AuditIp::from_transport(&parts.headers, &parts.extensions, state).0;
             let request_ua = extract_request_user_agent(parts);
             // Nested routers strip their mount prefixes from `parts.uri`.
             // Route authorization must use Axum's original request target.
@@ -3653,7 +3618,6 @@ mod tests {
             ServicePoolMember,
         };
         use crate::models::user::{COLLECTION_NAME as USERS, UserType};
-        use crate::models::user_api_key::{COLLECTION_NAME as USER_API_KEYS, UserApiKey};
         use crate::models::user_endpoint::COLLECTION_NAME as USER_ENDPOINTS;
         use crate::models::user_provider_credentials::{
             COLLECTION_NAME as USER_PROVIDER_CREDENTIALS, UserProviderCredentials,
@@ -3755,43 +3719,30 @@ mod tests {
             .unwrap();
 
         let raw_credential = "delegated-account-read-plaintext-secret-fixture";
-        let actor_external_key_id = Uuid::new_v4().to_string();
-        let encrypted_credential = state
-            .encryption_keys
-            .encrypt(raw_credential.as_bytes())
-            .await
-            .unwrap();
-        db.collection::<UserApiKey>(USER_API_KEYS)
-            .insert_one(UserApiKey {
-                secret_context_versions: Default::default(),
-                oauth_app_observation: None,
-                id: actor_external_key_id.clone(),
-                user_id: actor_id.to_string(),
-                label: "Secret-bearing fixture".to_string(),
-                credential_type: "api_key".to_string(),
-                credential_encrypted: Some(encrypted_credential),
-                access_token_encrypted: None,
-                refresh_token_encrypted: None,
+        let actor_external_key_id = crate::services::user_api_key_service::create_api_key(
+            &db,
+            &state.encryption_keys,
+            &actor_id.to_string(),
+            crate::services::user_api_key_service::CreateApiKeyParams {
+                label: "Secret-bearing fixture",
+                credential_type: "api_key",
+                credential: raw_credential,
+                access_token: None,
+                refresh_token: None,
                 token_scopes: None,
                 expires_at: None,
                 provider_config_id: None,
                 connection_id: None,
-                oauth_attempt_nonce: None,
-                user_oauth_client_id_encrypted: None,
-                user_oauth_client_secret_encrypted: None,
-                credential_source: None,
-                status: "active".to_string(),
-                last_used_at: None,
-                last_authorized_at: None,
-                error_message: None,
-                source: Some("user_created".to_string()),
+                oauth_client_id: None,
+                oauth_client_secret: None,
+                status: "active",
+                source: Some("user_created"),
                 source_id: None,
-                created_at: chrono::Utc::now(),
-                updated_at: chrono::Utc::now(),
-                credential_epoch: 1,
-            })
-            .await
-            .unwrap();
+            },
+        )
+        .await
+        .unwrap()
+        .id;
 
         let actor_endpoint_id = Uuid::new_v4().to_string();
         let visible_org_endpoint_id = Uuid::new_v4().to_string();
@@ -4194,46 +4145,6 @@ mod tests {
         )
         .await;
         assert_eq!(actor_node.status(), StatusCode::OK);
-    }
-
-    #[test]
-    fn extract_request_ip_prefers_first_forwarded_for_hop() {
-        let mut parts = request_parts_with_headers(&[
-            ("x-forwarded-for", " 203.0.113.7, 10.0.0.1 "),
-            ("x-real-ip", "198.51.100.9"),
-        ]);
-        parts
-            .extensions
-            .insert(ConnectInfo(SocketAddr::from(([192, 0, 2, 55], 443))));
-
-        assert_eq!(extract_request_ip(&parts), Some("203.0.113.7".to_string()));
-    }
-
-    #[test]
-    fn extract_request_ip_falls_back_to_real_ip_when_forwarded_for_empty() {
-        let parts = request_parts_with_headers(&[
-            ("x-forwarded-for", " , 10.0.0.1"),
-            ("x-real-ip", " 198.51.100.9 "),
-        ]);
-
-        assert_eq!(extract_request_ip(&parts), Some("198.51.100.9".to_string()));
-    }
-
-    #[test]
-    fn extract_request_ip_falls_back_to_connect_info_peer() {
-        let mut parts = request_parts_with_headers(&[]);
-        parts
-            .extensions
-            .insert(ConnectInfo(SocketAddr::from(([192, 0, 2, 55], 443))));
-
-        assert_eq!(extract_request_ip(&parts), Some("192.0.2.55".to_string()));
-    }
-
-    #[test]
-    fn extract_request_ip_returns_none_without_headers_or_peer() {
-        let parts = request_parts_with_headers(&[]);
-
-        assert_eq!(extract_request_ip(&parts), None);
     }
 
     #[test]
