@@ -817,19 +817,34 @@ identity revision, when the owner submits the decision, before asynchronous
 mutation middleware. The request, continuation and history invalidation retain
 that source across navigation. An idle source resumes immediately; an active
 source keeps its own queue until settlement, even while another thread is open.
-While an unselected source has a queued continuation, the browser refreshes its
-history every two seconds, with at most one such read in flight per source and
-identity revision. The selected source uses its existing history observer. This
-also observes server-started turns that have no local stream subscription. The
-additional timer and reads stop when no unselected source has queued work. A
-source read's 403/404 discards all surviving entries for that source and identity,
+The transport owns this in-memory queue and pending decision completion across
+chat-view unmounts, including navigation into a crew or a restricted specialist.
+A view's disabled state fences only that view's source; it cannot discard another
+thread's work. For queued sources without an active history observer, the browser
+refreshes history every two seconds, with at most one such read in flight per
+source and identity revision. A selected, enabled source uses its existing
+history observer. This also observes server-started turns that have no local
+stream subscription. The additional timer and reads stop when every queued
+source has an observer or no queued work remains. A source read's 403/404
+discards all surviving entries for that source and identity,
 including cards queued while the read was pending; a refusal for another selected
 thread cannot erase valid work.
+Before sending, the browser requires a positive user decision and filters
+non-allowed decisions and malformed deadlines against the latest loaded source
+history. An allowed action must also be before its exact expiry; allowed
+non-action grants and used receipts retain the server's post-deadline semantics.
+If history has changed since the decision response, an absent card is also
+unavailable. The continuation text
+and `acknowledgement_id` use only the surviving cards, with the first survivor as
+the marker; an empty queue sends nothing. Idle-source decisions apply the same
+eligibility rules to the returned card and start before mutation-refresh
+completion. These checks do not grant authority; server card and turn admission
+remain decisive.
 Automatic continuations never change the selected thread, and a late decision
 does not restore composer focus in another thread or account. Account transitions
-(including switching away and back) and disabling the engine discard queued
-continuations. Server-owned continuations remain server-owned. Each allowed-card
-instruction includes the shared task-continuation wording in
+(including switching away and back) discard queued continuations. Queue state is
+not restored on a browser reload. Server-owned continuations remain server-owned.
+Each allowed-card instruction includes the shared task-continuation wording in
 `shared/allowed-card-continuation.json`, which instructs the assistant to continue
 the original task until it finishes or needs user input.
 

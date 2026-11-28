@@ -91,9 +91,9 @@ function deletionDecision(page: Page) {
   });
 }
 
-async function submittedTurns(page: Page): Promise<{ text: string; acknowledgement_id?: string }[]> {
-  return page.evaluate(async () => {
-    const id = new URLSearchParams(location.search).get("c");
+async function submittedTurns(page: Page, sourceId?: string): Promise<{ text: string; acknowledgement_id?: string }[]> {
+  return page.evaluate(async (sourceId) => {
+    const id = sourceId ?? new URLSearchParams(location.search).get("c");
     const response = await globalThis.__nyxidAssistantHttpMock!({
       endpoint: `/assistant/nyxagent/conversations/${id}?limit=100`, init: { method: "GET" },
     });
@@ -103,8 +103,75 @@ async function submittedTurns(page: Page): Promise<{ text: string; acknowledgeme
     return history.messages.filter((message) => message.role === "user").map((message) => ({
       text: message.text, acknowledgement_id: message.continuation_of,
     }));
-  });
+  }, sourceId);
 }
+
+test("an allowed source settles once across the real crew route and return", async ({ page }) => {
+  await openAssistant(page, { faults: { nyxagentEnabled: true, markContinuations: true, progressStallMs: 7000 } });
+  await sendMessage(page, "Delete agent key ci-bot");
+  const card = deletionDecision(page);
+  await expect(card).toBeVisible();
+  const source = new URL(page.url()).searchParams.get("c")!;
+  await expect(stopButton(page)).toBeVisible();
+  await card.getByRole("button", { name: "Allow", exact: true }).click();
+  await expect(card).toHaveCount(0);
+  const sidebar = page.getByRole("navigation", { name: "Agents and conversations" });
+  await sidebar.getByRole("button", { name: "Create new agent", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Crew" }).click();
+  const dialog = page.getByRole("dialog", { name: "New crew", exact: true });
+  await dialog.getByRole("textbox", { name: "Name", exact: true }).fill("Decision route regression");
+  await dialog.getByRole("button", { name: "Create crew", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Decision route regression", exact: true })).toBeVisible();
+  const group = new URL(page.url()).searchParams.get("g");
+  expect(group).toBeTruthy();
+  await expect.poll(async () => (await submittedTurns(page, source)).length, { timeout: 12_000 }).toBe(2);
+  const turns = await submittedTurns(page, source);
+  expect(turns[1]?.text).toMatch(CONFIRMED);
+  expect(turns[1]?.text).toContain(`acknowledgement_id ${turns[1]?.acknowledgement_id}`);
+  expect(turns[1]?.acknowledgement_id).toMatch(/^[0-9a-f-]{36}$/);
+  expect(new URL(page.url()).searchParams.get("g")).toBe(group);
+  await page.evaluate(async (source) => {
+    const app = window as typeof window & { __nyxApp: { router: { navigate: (options: unknown) => Promise<void> } } };
+    await app.__nyxApp.router.navigate({ to: "/assistant", search: { c: source, mock: "1" } });
+  }, source);
+  await expect(page.getByText("Deleted agent key ci-bot.", { exact: true })).toBeVisible({ timeout: 12_000 });
+  expect(await submittedTurns(page, source)).toHaveLength(2);
+});
+
+test("an allowed source survives selecting a restricted specialist without taking its focus", async ({ page }) => {
+  await openAssistant(page, { faults: { nyxagentEnabled: true, markContinuations: true, progressStallMs: 7000 } });
+  await page.evaluate(() => {
+    const original = globalThis.__nyxidAssistantHttpMock!;
+    globalThis.__nyxidAssistantHttpMock = async (request) => {
+      const response = await original(request);
+      if (request.endpoint.startsWith("/assistant/nyxagent/agents?") && response?.ok) {
+        const body = await response.json() as { agents: { name: string; can_use?: boolean }[] };
+        body.agents.forEach((agent) => { if (agent.name === "researcher") agent.can_use = false; });
+        return new Response(JSON.stringify(body), { status: 200 });
+      }
+      return response;
+    };
+  });
+  await sendMessage(page, "Delete agent key ci-bot");
+  const source = new URL(page.url()).searchParams.get("c")!;
+  const card = deletionDecision(page);
+  await expect(card).toBeVisible();
+  await card.getByRole("button", { name: "Allow", exact: true }).click();
+  await expect(card).toHaveCount(0);
+  const target = agentsNav(page).getByRole("button", { name: /^researcher, specialist/ });
+  await target.click();
+  // Restricted thread navigation opens this specialist's profile.
+  const details = page.getByRole("dialog", { name: "Agent details", exact: true });
+  await expect(details).toBeVisible();
+  const targetInput = details.getByRole("textbox", { name: "Name", exact: true });
+  await expect(targetInput).toHaveValue("researcher");
+  await targetInput.focus();
+  const selected = new URL(page.url()).search;
+  await expect.poll(async () => (await submittedTurns(page, source)).length, { timeout: 12_000 }).toBe(2);
+  expect(new URL(page.url()).search).toBe(selected);
+  await expect(targetInput).toBeFocused();
+  expect((await submittedTurns(page, source))[1]?.text).toMatch(CONFIRMED);
+});
 
 test("every chat runs with Full access: services and account tools need no cards", async ({
   page,

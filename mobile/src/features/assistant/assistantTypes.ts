@@ -1,6 +1,7 @@
 import { historyEnum, isolateHistoryItems } from "./assistantHistoryCompat";
 import { z } from "zod";
 import { agentAvatarFieldSchema } from "../../lib/avatars/avatarSchema";
+import { assistantExecutionProposalSchema } from "./assistantApprovalReview";
 
 export const conversationIdSchema = z.string().regex(/^nyxa-[a-f0-9]{32}$/);
 export const activitySchema = z.object({
@@ -281,6 +282,8 @@ const historyApprovalSchema = z.object({
   approval_mode: z.enum(["per_request", "grant"]).optional(),
   agent_key_prefix: z.string().optional(),
   created_at: z.string().optional(),
+  execution_proposal: assistantExecutionProposalSchema.optional(),
+  review_path: z.string().nullish(),
 });
 const historyBodySchema = z.object({
   unsupported_history_items: z.number().int().positive().optional(),

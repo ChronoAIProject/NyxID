@@ -437,6 +437,20 @@ the bounded response, with conventional secret fields redacted. Errors before th
 an unavailable response reports unknown. Neither a receipt nor a TaskRef is
 bearer authority. The original caller's normal billing lane remains unchanged.
 
+Mobile assistant history retains proposal metadata and the server's `review_path`.
+Its normal thread card offers web Review instead of native approval/denial, and
+the native decision handler refuses proposals independently of the controls.
+Private reviews retain the exact `/assistant?c=<conversation>&card=<request>`
+destination, group reviews retain `/assistant?c=<group>`, and supported v2 sources
+retain `/assistant/approvals`. Links use the configured first-party frontend;
+external paths, duplicate selectors, mismatched card IDs or conflicting top-level
+and proposal paths are unusable. Unknown versions, malformed metadata and
+unsupported proposals remain non-decidable and expose no Review link. Supported
+terminal proposals keep their state and may link to their web record without
+granting a native decision action. Ordinary approvals keep their native controls.
+A failed browser launch shows retryable feedback and retains the exact Review
+destination; it never falls back to a native decision.
+
 ### Authoring rollout
 
 Deploy readers, dispatchers and authoring support to every replica; observed

@@ -1,5 +1,4 @@
 import { ApiError } from "@/lib/api-client";
-import allowedCardContinuation from "../../../shared/allowed-card-continuation.json";
 import { historyErrorMessage, HISTORY_UNSUPPORTED } from "@/schemas/assistant-history-compat";
 import type { UploadedMessage } from "@/lib/assistant/uploads";
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
@@ -8,7 +7,6 @@ import { nyxAgentTransport } from "@/lib/assistant/nyxagent-transport";
 import { getAssistantIdentityRevision } from "@/lib/assistant/identity";
 import type {
   AssistantAgent,
-  NyxAgentAcknowledgement,
   NyxAgentConversation,
   NyxAgentConversationAgent,
   NyxAgentHistory,
@@ -19,96 +17,9 @@ import { useDecideApproval } from "@/hooks/use-approvals";
 import { nyxBotQueryKeys, useNyxBotAgents } from "@/hooks/use-nyxbot-agents";
 import { useNyxAgentLive } from "@/hooks/use-nyxagent-live";
 import { livePollInterval, useNyxAgentLiveConnected } from "@/hooks/use-nyxagent-live-status";
-import {
-  currentCreditsActor,
-  isInsufficientCreditsCode,
-  notifyCreditsDenied,
-} from "@/lib/credits-denial";
-
-function notifyTurnCredits(
-  conversationId: string,
-  turnId: string,
-  code: string | null,
-  actorId: string | null,
-): void {
-  if (!isInsufficientCreditsCode(code)) return;
-  // SSE and the history poll can both deliver one failure; the key dedupes.
-  notifyCreditsDenied(
-    { key: `assistant:nyxagent:${conversationId}:${turnId}`, payer: "self" },
-    actorId,
-  );
-}
-
-/**
- * A foreground send whose live failure may open the out-of-credits dialog.
- * `agent` is only used when the send starts a new thread.
- */
-function liveSend(
-  conversationId: string | undefined,
-  text: string,
-  onAdopt: (id: string) => void,
-  agent?: NyxAgentConversationAgent,
-  attachmentIds?: string[],
-  attachments?: readonly import("@/schemas/assistant-nyxagent").NyxAgentAttachment[],
-  adoptExisting?: boolean,
-  acknowledgementId?: string,
-  model?: string,
-) {
-  const actorId = currentCreditsActor();
-  const onFailed = (id: string, turnId: string, code: string) =>
-    notifyTurnCredits(id, turnId, code, actorId);
-  if (attachmentIds?.length || acknowledgementId) {
-    return nyxAgentTransport.send(conversationId, text, onAdopt, onFailed, {
-      ...(!conversationId && agent ? { agent } : {}),
-      attachmentIds,
-      attachments,
-      adoptExisting,
-      acknowledgementId,
-      model,
-    });
-  }
-  if (!model && (conversationId || !agent)) {
-    return nyxAgentTransport.send(conversationId, text, onAdopt, onFailed);
-  }
-  return nyxAgentTransport.send(conversationId, text, onAdopt, onFailed, {
-    ...(!conversationId && agent ? { agent } : {}),
-    ...(model ? { model } : {}),
-  });
-}
-
-/** The user-visible turn that resumes the assistant after an allowed card. */
-export function continuationText(acknowledgement: NyxAgentAcknowledgement): string {
-  return `${continuationInstruction(acknowledgement)} ${allowedCardContinuation}`;
-}
-
-function continuationInstruction(acknowledgement: NyxAgentAcknowledgement): string {
-  switch (acknowledgement.kind) {
-    case "service":
-      return `Approved: this chat may use ${
-        acknowledgement.service_name ?? acknowledgement.service_slug ?? "the service"
-      }. Continue.`;
-    case "skills":
-      // An unrouted skills card attaches nothing and wakes nobody.
-      return acknowledgement.decider === "orchestrator"
-        ? `Skill proposal reviewed: ${acknowledgement.summary} NyxBot will resolve the exact version and apply the governing mode to attach it (automatic in Full access, otherwise an owner card). Do not request the skill again.`
-        : `Skill proposal reviewed: ${acknowledgement.summary} Nothing was attached and nobody else was asked; the user adds the skill from this agent's Skills editor. Do not request the skill again.`;
-    case "operations":
-      return `Approved: ${acknowledgement.summary} Continue within the updated operation scope.`;
-    case "machine":
-    case "saved_login":
-      return `Approved: ${acknowledgement.summary} Continue within the updated machine and saved-login grants.`;
-    case "account":
-      return "Approved: account management for this chat. Continue.";
-    case "action":
-      if (acknowledgement.authored_skill) return `The skill publication was allowed: ${acknowledgement.summary}. Check the attached skills and tell the user which skill/version was attached to which agent. Do not publish it again.`;
-      return `Confirmed: ${acknowledgement.summary} (acknowledgement_id ${acknowledgement.id}). Retry it now.`;
-  }
-}
-
-/** One continuation for every card allowed while a turn was running. */
-export function continuationForAll(acknowledgements: readonly NyxAgentAcknowledgement[]): string {
-  return acknowledgements.map(continuationText).join("\n");
-}
+import { liveSend, notifyTurnCredits } from "@/lib/assistant/nyxagent-continuation";
+import { nyxAgentDecisions, type AcknowledgementDecision, type DecisionSource, isCurrentDecisionActor } from "@/lib/assistant/nyxagent-decisions";
+export { continuationText, continuationForAll } from "@/lib/assistant/nyxagent-continuation";
 
 /**
  * Every mounted view sees the same agents change; only the first to see it
@@ -135,34 +46,6 @@ function agentsSignatureOf(agents: readonly AssistantAgent[] | undefined): strin
 }
 
 const NO_THREADS: readonly NyxAgentConversation[] = [];
-
-interface AcknowledgementDecision {
-  readonly id: string;
-  readonly choice: "allow" | "deny";
-  readonly acceptReducedScope?: boolean;
-}
-
-interface DecisionSource {
-  readonly conversationId: string | undefined;
-  readonly owner: string | undefined;
-  readonly identityRevision: number;
-  readonly turnId: string | undefined;
-  readonly messageSeq: number;
-}
-
-function isCurrentDecisionActor(source: DecisionSource): boolean {
-  return Boolean(source.owner) && source.owner === useAuthStore.getState().user?.id &&
-    source.identityRevision === getAssistantIdentityRevision();
-}
-
-/** Only a newly settled cancellation of this decision's turn suppresses resume. */
-function decisionTurnStopped(source: DecisionSource): boolean {
-  if (!source.turnId) return false;
-  return nyxAgentTransport.getHistory(source.conversationId)?.messages.some((message) =>
-    message.seq > source.messageSeq && message.turn_id === source.turnId &&
-    message.role === "assistant" && message.status === "failed" && message.error_code === "cancelled",
-  ) ?? false;
-}
 
 /**
  * `agentId`'s threads, newest first. Re-renders only when those rows change,
@@ -223,6 +106,7 @@ export function useNyxAgentAssistantChat({
   readonly draftAgent?: NyxAgentConversationAgent;
 }) {
   const userId = useAuthStore((state) => state.user?.id);
+  const identityRevision = getAssistantIdentityRevision();
   const queryClient = useQueryClient();
   const transportRevision = useSyncExternalStore(
     nyxAgentTransport.subscribe,
@@ -351,85 +235,27 @@ export function useNyxAgentAssistantChat({
   }, [agentsSignature]);
 
   const lastDecision = useRef(Number.NEGATIVE_INFINITY);
-  // Cards allowed while their conversation's turn was still running. The
-  // running turn cannot observe the decision (NyxAgent ends a turn on a card and
-  // answers same-turn repeats locally), so the continuation waits for settlement.
-  const pendingContinuations = useRef(
-    new Map<string, {
-      source: DecisionSource;
-      decisions: { source: DecisionSource; acknowledgement: NyxAgentAcknowledgement }[];
-    }>(),
-  );
-  const [pendingRevision, setPendingRevision] = useState(0);
-  const pendingHistoryReads = useRef(new Set<string>());
-  // A server-started turn has no local SSE subscription after navigation. Keep
-  // observing only queued sources, without relying on an active history query.
+  // Observation belongs to the view; accepted decisions belong to the transport.
   useEffect(() => {
-    if (!enabled) return;
-    const sources = [...pendingContinuations.current].filter(([conversationId, queued]) =>
-      conversationId !== selectedConversationId && isCurrentDecisionActor(queued.source));
-    if (!sources.length) return;
-    const timer = setInterval(() => {
-      for (const [conversationId, queued] of sources) {
-        const readKey = `${queued.source.identityRevision}:${conversationId}`;
-        if (!isCurrentDecisionActor(queued.source) || pendingHistoryReads.current.has(readKey)) continue;
-        pendingHistoryReads.current.add(readKey);
-        void nyxAgentTransport.history(conversationId).catch((error: unknown) => {
-          const current = pendingContinuations.current.get(conversationId);
-          if (error instanceof ApiError && (error.status === 403 || error.status === 404) &&
-            current?.source.identityRevision === queued.source.identityRevision &&
-            current.source.owner === queued.source.owner) {
-            // A second card may have joined this source during the read. The
-            // refusal fences all of this actor's queued work for that source.
-            pendingContinuations.current.delete(conversationId);
-            setPendingRevision((revision) => revision + 1);
-          }
-        }).finally(() => pendingHistoryReads.current.delete(readKey));
-      }
-    }, 2000);
-    return () => clearInterval(timer);
-  }, [enabled, selectedConversationId, pendingRevision]);
+    if ((historyDenied || !enabled) && selectedConversationId) nyxAgentDecisions.refuse(selectedConversationId);
+  }, [historyDenied, enabled, selectedConversationId]);
+  useEffect(() => {
+    if (!enabled || !userId || !selectedConversationId) return;
+    return nyxAgentDecisions.observe(selectedConversationId);
+  }, [enabled, userId, selectedConversationId]);
+  useEffect(() => nyxAgentDecisions.refresh(), [streaming, transportRevision]);
   const decision = useMutation({
     mutationFn: async ({ id, choice, acceptReducedScope, source }: AcknowledgementDecision & { source: DecisionSource }) => {
       if (!source.conversationId) throw new Error("Choose a conversation first.");
-      if (!isCurrentDecisionActor(source)) throw new DOMException("Identity changed", "AbortError");
+      if (!nyxAgentDecisions.isCurrentSource(source)) throw new DOMException("Identity changed", "AbortError");
       const now = Date.now();
       if (now - lastDecision.current < 750) {
         throw new Error("Please wait a moment before deciding again.");
       }
       lastDecision.current = now;
-      return nyxAgentTransport.decide(source.conversationId, id, choice, acceptReducedScope);
-    },
-    onSuccess: (acknowledgement, { choice, source }) => {
-      // An allowed card resumes the assistant: the refusal told it to retry after
-      // approval, and it cannot wait for the decision inside its own turn. A
-      // specialist's request routed to NyxBot is resumed by the server itself.
-      if (
-        acknowledgement.continuation_owner === "server" ||
-        acknowledgement.decider === "orchestrator" ||
-        acknowledgement.trigger_run_id
-      )
-        return;
-      const { conversationId } = source;
-      if (choice !== "allow" || !conversationId || !enabled || !isCurrentDecisionActor(source)) return;
-      if (historyDenied && conversationId === selectedConversationId) return;
-      if (decisionTurnStopped(source)) return;
-      if (nyxAgentTransport.isRunning(conversationId)) {
-        const previous = pendingContinuations.current.get(conversationId);
-        const queued = previous && isCurrentDecisionActor(previous.source) ? previous : undefined;
-        pendingContinuations.current.set(conversationId, {
-          source,
-          decisions: [...(queued?.decisions ?? []), {
-            source: { ...source, turnId: source.turnId ?? nyxAgentTransport.getActiveTurnId(conversationId) },
-            acknowledgement,
-          }],
-        });
-        setPendingRevision((revision) => revision + 1);
-        return;
-      }
-      // An existing thread needs no adoption; completion must not change selection.
-      void liveSend(conversationId, continuationText(acknowledgement), () => undefined,
-        undefined, undefined, undefined, undefined, acknowledgement.id).catch(() => undefined);
+      const acknowledgement = await nyxAgentTransport.decide(source.conversationId, id, choice, acceptReducedScope);
+      nyxAgentDecisions.complete(source, choice, acknowledgement);
+      return acknowledgement;
     },
     onSettled: async (_acknowledgement, _error, { source }) => {
       if (!isCurrentDecisionActor(source)) return;
@@ -441,39 +267,6 @@ export function useNyxAgentAssistantChat({
       ]);
     },
   });
-
-  // Recheck queued decisions when source history, selection or queue state changes.
-  // Each decision retains its own turn fence when several cards share the queue.
-  useEffect(() => {
-    let removed = false;
-    for (const [conversationId, queued] of pendingContinuations.current) {
-      if (!isCurrentDecisionActor(queued.source) || !enabled || (historyDenied && conversationId === selectedConversationId)) {
-        pendingContinuations.current.delete(conversationId);
-        removed = true;
-        continue;
-      }
-      const decisions = queued.decisions.filter((entry) => !decisionTurnStopped(entry.source));
-      if (!decisions.length) {
-        pendingContinuations.current.delete(conversationId);
-        removed = true;
-        continue;
-      }
-      if (decisions.length !== queued.decisions.length) {
-        pendingContinuations.current.set(conversationId, { ...queued, decisions });
-        removed = true;
-      }
-      if (nyxAgentTransport.isRunning(conversationId)) continue;
-      pendingContinuations.current.delete(conversationId);
-      removed = true;
-      void liveSend(
-        conversationId,
-        continuationForAll(decisions.map((entry) => entry.acknowledgement)),
-        () => undefined,
-        undefined, undefined, undefined, undefined, decisions[0]?.acknowledgement.id,
-      ).catch(() => undefined);
-    }
-    if (removed) setPendingRevision((revision) => revision + 1);
-  }, [enabled, historyDenied, selectedConversationId, pendingRevision, userId, transportRevision, streaming]);
 
   // Turns seen running on this page. Only their later failures may prompt, so
   // a transcript that loads already failed (or older pages) never does.
@@ -548,13 +341,7 @@ export function useNyxAgentAssistantChat({
     // so both the request and its callbacks retain the exact source of the click.
     decideAcknowledgement: (input: AcknowledgementDecision) => decision.mutateAsync({
       ...input,
-      source: {
-        conversationId: selectedConversationId,
-        owner: userId,
-        identityRevision: getAssistantIdentityRevision(),
-        turnId: nyxAgentTransport.getActiveTurnId(selectedConversationId),
-        messageSeq: nyxAgentTransport.getHistory(selectedConversationId)?.messages.at(-1)?.seq ?? 0,
-      },
+      source: nyxAgentDecisions.capture(selectedConversationId, userId, identityRevision),
     }),
     decidingAcknowledgement: decision.isPending ? decision.variables?.id : undefined,
     deleteConversation: (id: string) => nyxAgentTransport.delete(id),
