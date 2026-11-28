@@ -109,7 +109,7 @@ For node rotation:
 ✓ Node 'edge-tokyo' token rotated. New auth token + signing secret were shown in the browser.
   ID: 8d12-…
   Restart the node agent with the new credentials:
-    nyxid node rekey --auth-token <token-from-browser> --signing-secret <hex-from-browser>
+    nyxid node rekey
   The previous token is now revoked.
 ```
 

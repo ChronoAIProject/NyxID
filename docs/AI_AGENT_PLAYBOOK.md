@@ -1620,7 +1620,7 @@ nyxid node migrate --to file       # OS keychain -> file
 nyxid node register       --token <TOKEN> [--url <WS_URL>] [--config <PATH>] [--keychain]
 nyxid node start          [--config <PATH>] [--log-level <LEVEL>]   # foreground mode
 nyxid node agent-status   [--config <PATH>]                         # read-only local config check
-nyxid node rekey          --auth-token <TOKEN> --signing-secret <HEX> [--config <PATH>]
+nyxid node rekey [--config <PATH>]
 
 # Background service lifecycle (launchd on macOS, systemd on Linux)
 nyxid node daemon install    [--config <PATH>] [--log-level <LEVEL>] [--force]

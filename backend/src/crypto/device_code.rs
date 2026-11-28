@@ -30,6 +30,19 @@ pub fn generate_user_code() -> String {
     let mut random = [0u8; USER_CODE_CHARS];
     rand::thread_rng().fill_bytes(&mut random);
 
+    format_user_code(&random)
+}
+
+pub fn derived_user_code(device_code: &str, nonce: &str) -> String {
+    use hmac::{Hmac, Mac};
+    let mut mac = Hmac::<Sha256>::new_from_slice(device_code.as_bytes())
+        .expect("HMAC accepts any key length");
+    mac.update(b"nyxid:device-code:display:v1\0");
+    mac.update(nonce.as_bytes());
+    format_user_code(&mac.finalize().into_bytes()[..USER_CODE_CHARS])
+}
+
+fn format_user_code(random: &[u8]) -> String {
     let mut code = String::with_capacity(USER_CODE_CHARS + 2);
     for (idx, byte) in random.iter().enumerate() {
         if idx > 0 && idx % USER_CODE_GROUP == 0 {

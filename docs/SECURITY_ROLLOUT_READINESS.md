@@ -553,6 +553,23 @@ current dev baseline. Record fixture results and authorized live Telegram,
 Lark/Feishu and Discord acceptance separately.
 [Channel guest access specification](CHANNEL_BOT_GUEST_ACCESS_SPEC.md)
 
+## Device user code storage
+
+The release advertises `devices:user-code-hmac-v1` for headless device-code
+enrollment (`/api/v1/devices/code/*`). Every upgraded reader accepts both
+stored formats. Until every observed live generation supports the capability
+and readiness records durable activation, new enrollments keep the existing
+user code format.
+
+After activation, new enrollments and their rotations store a domain-separated
+HMAC of the user code in the existing indexed field, with a random display
+nonce. The signed poll rebuilds the current display code from the device code
+and nonce, and approval hashes the normalized code and accepts only the current
+generation. Enrollments created before activation stay redeemable for their
+15-minute approval window. After activation, wait for pending hash-format
+enrollments to expire before reintroducing older binaries, or have those
+devices start enrollment again. See [device-code binding](device-code-binding.md).
+
 ## MCP session identifier storage
 
 The release advertises `mcp:session-id-hash-v1`. Every upgraded reader accepts
