@@ -281,7 +281,7 @@ jobs:
           python3 cli/tests/machine_mount_denied_profile.py cli/resources/machine-container/seccomp.json /tmp/nyxid-machine-deny-mount.json
           docker run --rm --shm-size=256m --security-opt seccomp=/tmp/nyxid-machine-deny-mount.json nyxid-machine-e2e:ci
 
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         if: matrix.component == 'nyxid-machine-updater'
         with:
           node-version: '24'
