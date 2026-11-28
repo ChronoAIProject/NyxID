@@ -24,6 +24,7 @@ pub(super) struct CreatorAuth {
     delete_refusal: Arc<Mutex<Option<(u16, Value)>>>,
     record_absence: Arc<Mutex<Option<(u16, Value)>>>,
     create_cancellation: Arc<Mutex<Option<(u16, Value)>>>,
+    relay_recovery: Arc<AtomicBool>,
 }
 
 pub(super) async fn authorize(
@@ -71,6 +72,14 @@ pub(super) async fn authorize(
     }
     if !allowed {
         return StatusCode::FORBIDDEN.into_response();
+    }
+    if request_path == "/channel-capabilities"
+        && auth
+            .relay_recovery
+            .load(std::sync::atomic::Ordering::SeqCst)
+    {
+        return Json(json!({"relay_authoring":{"response_recovery_providers":["nyxbot"]}}))
+            .into_response();
     }
     if cancellation && let Some((status, receipt)) = auth.create_cancellation.lock().await.clone() {
         if method == "GET" {
@@ -221,6 +230,7 @@ async fn fixture(platform: &str) -> Fixture {
         delete_refusal: Default::default(),
         record_absence: Default::default(),
         create_cancellation: Default::default(),
+        relay_recovery: Default::default(),
     };
     let (gateway_calls, gateway) = mock_gateway_with_creator_auth(
         &mut state,
@@ -328,7 +338,7 @@ async fn provider_message(
     )
     .await;
     let raw = decrypt_agent_key(&f.state, row).await.unwrap().unwrap();
-    let response = respond(&f.state, &raw, &body, &id).await;
+    let response = respond(&f.state, &raw, &body, &format!("evt_{id}")).await;
     assert_eq!(response.status(), StatusCode::OK);
     body_text(response).await
 }
@@ -457,7 +467,7 @@ async fn provider_event(f: &Fixture, row: &NyxbotChannel, update: Value) -> (Val
                 f.state.config.base_url.trim_end_matches('/')
             )
         );
-        // CMAEG 9fd3537cb0a1: a relayed Telegram PhotoSize remains an image/photo,
+        // CMAEG 217d66fa36c0: a relayed Telegram PhotoSize remains an image/photo,
         // with a canonical activity platform and a relay attachment index.
         activity["kind"]["attachments"] = json!([{
             "kind":"image", "variant":"photo", "mime_type":"image/jpeg",
@@ -469,6 +479,34 @@ async fn provider_event(f: &Fixture, row: &NyxbotChannel, update: Value) -> (Val
         assert_eq!(payload.content.content_type, "text");
         assert!(payload.content.attachments.is_empty());
     }
+    // CMA 217d66fa36c0: turns/{preparation,render_input,render_media,metadata}.
+    // The created channel uses conversation_and_sender, whose serialized key
+    // joins the real chat and actor with U+001F (cmaeg-core activity.rs).
+    assert!(
+        f.gateway_calls
+            .lock()
+            .await
+            .iter()
+            .any(|(method, _, request)| {
+                method == "POST"
+                    && request["partition"] == json!({"version":1,"key":"conversation_and_sender"})
+            })
+    );
+    let partition_key = format!(
+        "{}\u{1f}{}",
+        payload.conversation.platform_id, payload.sender.platform_id
+    );
+    body["metadata"] = json!({
+        "cmaeg.channel": &sha256_hex(row.gateway_channel_id.as_deref().unwrap())[..16],
+        "cmaeg.event": payload.message_id,
+        "cmaeg.partition": &sha256_hex(partition_key)[..16],
+        "cmaeg.actor": payload.sender.platform_id,
+    });
+    // Real sealed event references exceed the metadata renderer's 512-byte cap;
+    // the opaque local reference stays in event_context, never command metadata.
+    body["event_context"]["event_ref"] = json!(format!("cmaeg1.ev.{}", sha256_hex(&id).repeat(10)));
+    body["input"][0]["content"][0]["text"] =
+        json!(photo::rendered_input(&body["event_context"]["activity"],));
     (body, id)
 }
 

@@ -1972,12 +1972,36 @@ a uniquely marked text turn followed by an own top-level Telegram photo for both
 `telegram-new` and `telegram`. Both turns use the selected personal specialist's
 saved home. The real adapter authenticates and parses each update; stored relay
 metadata supplies the file handle, and the photo activity uses CMAEG's
-`image`/`photo` shape with a canonical `telegram` source. With owner channel media
-enabled, the local model fixture verifies the complete emitted image URL against
-the configured base and reads the exact JPEG through the production private
-router with the received live thread bearer. Assertions bind both answers to the
-saved owner, specialist, event, turn and reply destination, and exact command
-replay starts no new turn.
+`image`/`photo` shape with a canonical `telegram` source, `mime_type` and
+`size_bytes`. The fixture models CMA `217d66fa36c0`'s ordinary relay command:
+one user `input_text` contains the callback caption and the complete rendered
+attachment block, including the per-turn fence nonce, declared photo dimensions,
+MIME, byte size and default NyxBot audience's image limitation hint. These
+caption and descriptor assertions are independent of the later JPEG fetch.
+With owner channel media enabled, the local model fixture verifies the complete
+emitted image URL against the configured base and reads the exact JPEG through
+the production private router with the received live thread bearer. Assertions bind both answers to the
+saved owner, specialist, event, turn and reply destination.
+
+The command carries all four recovery identity fields: `cmaeg.channel` hashes
+the saved gateway channel ID; `cmaeg.partition` hashes the serialized
+`conversation_and_sender` partition key; `cmaeg.event` retains the literal source
+UUID; and `cmaeg.actor` retains the actual sender ID. Both hashes use the first
+16 lowercase SHA-256 hex characters. The ordinary relay's `Idempotency-Key` is
+`evt_<UUID>`, distinct from `cmaeg.event`. Each fixture source has its own opaque
+reference longer than the metadata renderer's 512-byte cap, retained only in its
+event context. Authenticated context reads before and after replay retain the
+original source's exact reference without printing it.
+
+With the existing owner recovery opt-in, readiness and gateway advertisement
+enabled locally, each command returns a queued acceptance frame and
+`X-CMA-Response-ID`. The fixture drops that POST observer while the model is
+paused, reads the in-progress snapshot, then resumes numbered events after
+cursor `0` to the single answer and terminal success. Snapshot, encrypted
+stored payload, exact metadata and same-key POST replay agree; a replay after
+the terminal cursor is empty. Repeated commands start no new turn, add no
+transcript messages and download no further photo bytes.
+
 These local fixtures do not verify CMAEG media admission or Telegram delivery;
 own top-level media additionally requires the gateway's media setting described
 in [Telegram forwarding](TELEGRAM_NEW.md#telegram-forwarding-and-secure-pairing).
