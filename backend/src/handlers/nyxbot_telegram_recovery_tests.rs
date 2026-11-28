@@ -73,6 +73,25 @@ impl Reader {
         serde_json::from_str(&body_text(response).await).unwrap()
     }
 
+    async fn dispatch(&self, key: &str) -> Value {
+        let response = self
+            .router
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/nyxbot/dispatches")
+                    .header("authorization", self.authorization.clone())
+                    .header("idempotency-key", key)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        serde_json::from_str(&body_text(response).await).unwrap()
+    }
+
     async fn context(&self, row: &NyxbotChannel, command: &Value, event_id: &str) {
         let binding = row.binding_id.as_deref().unwrap();
         let response = self
@@ -204,6 +223,10 @@ pub(super) async fn answer(
     assert_identity(&pending, accepted, command);
     assert_eq!(pending["status"], "in_progress");
     assert_eq!(pending["output"], json!([]));
+    assert_eq!(
+        reader.dispatch(&key).await,
+        json!({"state":"in_progress","response_id":id}),
+    );
     reader.context(row, command, event_id).await;
     let replay = reader
         .get(&format!(
@@ -258,16 +281,70 @@ pub(super) async fn answer(
         saved.snapshot == completed && saved.frames == lifecycle,
         "Stored recovery snapshot and frames must match the protocol readback"
     );
-    let event = f
-        .state
-        .db
-        .collection::<NyxbotEvent>(EVENTS)
+    let events = f.state.db.collection::<bson::Document>(EVENTS);
+    let source = events
         .find_one(doc! {"_id":&stored.event_key,"channel_id":&row.id,"event_id":event_id})
         .await
         .unwrap()
         .unwrap();
+    assert_eq!(source.get_bool("gateway_replay_claimed"), Ok(true));
+    assert_eq!(source.get_str("gateway_response_id"), Ok(id.as_str()));
+    let event: NyxbotEvent = bson::from_document(source.clone()).unwrap();
     assert_eq!(event.conversation_id.as_deref(), Some(f.home.id.as_str()));
-    assert_eq!(event.delivery.as_ref().unwrap().state, "replay");
+    let delivery = event.delivery.as_ref().unwrap();
+    assert_eq!(delivery.version, 1);
+    assert_eq!(delivery.state, "replay");
+    assert!(delivery.claim_id.is_none());
+    assert_eq!(delivery.source_route_id, row.route_id);
+    assert_eq!(
+        delivery.source_route_api_key_id.as_deref(),
+        Some(row.route_api_key_id.as_str())
+    );
+    // A replay-owned event can retain its admission status. Completion comes
+    // from the exact terminal transcript/response, through the public contract.
+    let finished = json!({"state":"finished","outcome":"completed","response_id":id,
+        "stored_response":true,"provider_delivery":"none"});
+    assert_eq!(reader.dispatch(&key).await, finished);
+    let observed = events
+        .find_one(doc! {"_id":&event.id})
+        .await
+        .unwrap()
+        .unwrap();
+    // An observer-drop cleanup can independently record its detached marker;
+    // the immutable binding and complete delivery fence must stay byte-identical.
+    for field in [
+        "dispatch_identity",
+        "gateway_response_id",
+        "gateway_replay_claimed",
+        "conversation_id",
+        "turn_id",
+        "delivery",
+        "event_context_ciphertext",
+        "event_context_version",
+    ] {
+        assert!(
+            source.get(field) == observed.get(field),
+            "Dispatch lookup changed {field}"
+        );
+    }
+    // Use the actual worker filters: the retained admission marker must not
+    // leave any local send, receipt poll or response refresh eligible.
+    for mut due in [
+        crate::services::channel_turn_preparation::due(),
+        crate::services::channel_turn_preparation::gateway::due(Utc::now()),
+    ] {
+        due.insert("_id", &event.id);
+        assert_eq!(events.count_documents(due).await.unwrap(), 0);
+    }
+    assert_eq!(
+        f.state
+            .db
+            .collection::<bson::Document>(crate::models::nyxbot_gateway_response::COLLECTION_NAME)
+            .count_documents(doc! {"channel_id":&row.id,"terminal":false})
+            .await
+            .unwrap(),
+        0,
+    );
     reader.context(row, command, event_id).await;
     let repeated = reader.submit(command, &key).await;
     assert_eq!(repeated.status(), StatusCode::OK);
@@ -275,6 +352,7 @@ pub(super) async fn answer(
         frames(&body_text(repeated).await) == lifecycle,
         "Same-key replay must retain the same response"
     );
+    assert_eq!(reader.dispatch(&key).await, finished);
     reader.context(row, command, event_id).await;
     let drained = reader
         .get(&format!(

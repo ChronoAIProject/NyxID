@@ -492,7 +492,8 @@ pub(super) async fn text_and_own_photo(f: &mut Fixture, row: &NyxbotChannel) {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(event.status, "completed");
+        // The authenticated dispatch lookup in recovery::answer verifies the
+        // terminal outcome; the event retains its source/admission identity.
         assert_eq!(event.user_id, OWNER);
         assert_eq!(event.partition, PARTITION);
         assert_eq!(event.relay_message_id.as_deref(), Some(id.as_str()));
@@ -548,6 +549,7 @@ pub(super) async fn text_and_own_photo(f: &mut Fixture, row: &NyxbotChannel) {
     }
     let saved = engine::get(&f.state.db, OWNER, &f.home.id).await.unwrap();
     assert!(saved.active_turn.is_none());
+    assert!(saved.pending_events.is_empty());
     assert_eq!(saved.agent_id, row.agent_id);
     let reply = saved.reply_channel.unwrap();
     assert_eq!(reply.nyxbot_channel_id, row.id);

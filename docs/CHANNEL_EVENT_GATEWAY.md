@@ -1999,7 +1999,13 @@ enabled locally, each command returns a queued acceptance frame and
 paused, reads the in-progress snapshot, then resumes numbered events after
 cursor `0` to the single answer and terminal success. Snapshot, encrypted
 stored payload, exact metadata and same-key POST replay agree; a replay after
-the terminal cursor is empty. Repeated commands start no new turn, add no
+the terminal cursor is empty. Authenticated dispatch lookup reports the same
+response as `in_progress` while the model waits, then `finished` with outcome
+`completed`, `stored_response: true` and `provider_delivery: none`. Execution
+completion comes from the exact terminal transcript and response; a
+replay-owned event can retain its admission status. Its replay claim and source
+links remain intact, with no eligible local-send, receipt or response-refresh
+work and no pending assistant turn. Repeated commands start no new turn, add no
 transcript messages and download no further photo bytes.
 
 These local fixtures do not verify CMAEG media admission or Telegram delivery;
