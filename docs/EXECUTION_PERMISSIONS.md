@@ -490,14 +490,18 @@ For a continuation handoff to release, every request has a successful, available
 receipt and a version-3 `owner_continuation` marker. Each marker retains its own
 original decision group (`batch` and `batch_turn_id`). Fresh decisions co-admitted
 with recovery events form their own group; they never rewrite an older group's
-proof. Before any provider dispatch, one worker-fenced transaction binds fresh
-groups and joins compatible unreleased groups into a separate `handoff` containing
-its version, sorted request IDs and the actual joining turn ID. The same
-transaction fences the marked root, live task, source, actor, conversation,
-credential, worker and lease, and validates every original group and any previous
-handoff before extending it. A crash cannot expose a newly bound group without
-the corresponding joined proof. A complete historical version-2 proof can be
-adopted under these fences while retaining its original decision group. Proof
+proof. The normal named-event admission transaction binds fresh groups and joins
+compatible unreleased groups into a separate `handoff` containing its version,
+sorted request IDs and the actual joining turn ID. It commits these facts with
+the exact admitted events and turn/worker claim, before fallible resume or optional
+continuation-readiness work. The same transaction fences the live task, source,
+actor, conversation and credential and validates every original group and previous
+handoff before extending it. An eligible unblocked proof also requires the marked
+original root. A crash cannot expose a newly bound group without the corresponding
+joined proof. Resume revalidates the exact stored named-event set, worker, task,
+source, key, stop and database-time lease fences; a fresh proof update also matches
+the current effect state and preparation claim. A complete historical version-2
+proof can be adopted under these fences while retaining its original decision group. Proof
 binding is independent of outcome readiness: denied or expired unsent decisions
 can retain their group proof, but never authorize execution or model release.
 Concurrent identical resumes reload proof state inside each transaction attempt;
@@ -518,10 +522,17 @@ A concurrent, fenced handoff extension is observed again through recovery instea
 of being blocked using a stale smaller snapshot.
 
 Denied, waiting, failed, unknown, missing or contradictory original-group proofs
-block the handoff; so does ordinary-event coalescence. Fresh successes co-admitted
-with ordinary events acquire no eligible decision proof, and existing pending
-proofs are blocked. Already released or delivered observations cannot join a new
-launch; independent new proofs remain pending for their own recovery. Historical
+block the handoff; so does ordinary-event coalescence. In the named-event admission
+transaction, each fresh eligible member of such a wake receives a blocked
+receipt-only marker, and existing unreleased proofs are blocked. This includes an
+approved member co-admitted with a denied member or an ordinary event. The refusal
+is durable before the first send, between sibling sends and after failed execution
+or settlement; individually admitted maintenance wakes cannot replace it with an
+unblocked proof. Refusal metadata requires no optional continuation-readiness read
+and also protects unmarked legacy roots without enrolling them in automatic
+continuation. Their approved operations retain the normal single-send receipt
+path. Unsupported source lanes retain their existing admission and resume paths.
+Already released or delivered observations cannot join a new launch; independent new proofs remain pending for their own recovery. Historical
 proofs without the original admitted turn ID remain receipt-only. Successful
 final settlement marks every receipt in the atomically released handoff delivered,
 including members absent from that final wake, so maintenance cannot publish a

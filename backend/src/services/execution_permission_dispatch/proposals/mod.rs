@@ -19,6 +19,7 @@ mod resume;
 use record::{Arm, Field, Slot};
 pub(crate) mod v2;
 pub(crate) mod v3;
+pub(crate) use batch::record_admission as record_owner_admission;
 pub(crate) use continuation::ResumeOutcome;
 pub(crate) use effects::ensure_indexes as ensure_owner_continuation_indexes;
 pub(crate) use lifecycle::{cancel_in_session, sweep};
@@ -1020,7 +1021,7 @@ pub(super) async fn existing_effect(
                 && p.task.actor_user_id == task.actor_user_id
                 && row.activity_outcome.as_deref() == Some("completed")
                 && p.owner_continuation.as_ref().is_some_and(|marker| {
-                    matches!(marker.version, 1 | 2 | 3)
+                    matches!(marker.version, 1..=3)
                         && !marker.blocked
                         && marker.released_turn_id.is_some()
                         && marker.released_turn_id == chat.turn_id

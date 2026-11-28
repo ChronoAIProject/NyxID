@@ -1,9 +1,259 @@
 //! Fenced handoffs retain independent decision proofs; IDs never become sends.
 use super::*;
+use crate::models::assistant_conversation::{AgentEvent, TurnOrigin};
 use crate::models::execution_proposal::OwnerContinuationHandoff as Handoff;
 
 fn canonical(ids: &[String]) -> bool {
     !ids.is_empty() && ids.len() <= 64 && ids.windows(2).all(|pair| pair[0] < pair[1])
+}
+
+fn request_ids(events: &[AgentEvent]) -> Vec<String> {
+    let mut ids: Vec<_> = events
+        .iter()
+        .filter_map(|event| {
+            event
+                .id
+                .strip_prefix("execution-decision:")
+                .map(str::to_owned)
+        })
+        .collect();
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+pub(super) fn typed_wake(events: &[AgentEvent]) -> bool {
+    events.iter().all(|event| {
+        event.kind == "permission_decided" && event.id.starts_with("execution-decision:")
+    })
+}
+
+/// A later successful subset cannot erase an ordinary, denied or waiting member
+/// of the server-admitted wake. This decision needs no optional readiness read.
+fn receipt_only(row: &AssistantConversation, requests: &[ApprovalRequest], typed: bool) -> bool {
+    !typed
+        || requests.iter().any(|request| {
+            !proposal(request).is_ok_and(|p| {
+                request.status == "approved"
+                    && AssistantVersion::of(request)
+                        .is_ok_and(|version| continuation::eligible(row, p, version))
+                    && !p.delivery_abandoned
+                    && p.owner_continuation
+                        .as_ref()
+                        .is_none_or(|proof| !proof.blocked)
+                    && (matches!(p.state.as_str(), "queued" | "preparing" | "dispatched")
+                        || (p.state == "completed"
+                            && request.activity_outcome.as_deref() == Some("completed")
+                            && p.result.is_some()
+                            && p.claim_id.is_some()))
+            })
+        })
+}
+
+/// The admission transaction owns the turn/worker claim and removes these exact
+/// named events from the queue. Persist their intent before any resume/readiness
+/// work can fail. Unmarked legacy roots only need durable refusal evidence.
+pub(crate) async fn record_admission(
+    db: &Database,
+    session: &mut ClientSession,
+    row: &AssistantConversation,
+) -> AppResult<()> {
+    let Some(task) = continuation::owner_task(row) else {
+        return Ok(());
+    };
+    let turn = row.active_turn.as_ref().ok_or_else(refused)?;
+    if turn.origin != TurnOrigin::Event {
+        return Ok(());
+    }
+    let ids = request_ids(&turn.events);
+    if ids.is_empty() {
+        return Ok(());
+    }
+    if !canonical(&ids) {
+        return Err(refused());
+    }
+    let current = load(db, session, row, &ids).await?;
+    if current.len() != ids.len()
+        || current
+            .iter()
+            .any(|request| !proposal(request).is_ok_and(|p| p.task == *task))
+    {
+        return Err(refused());
+    }
+    if !current.iter().any(|request| {
+        proposal(request).is_ok_and(|p| {
+            AssistantVersion::of(request)
+                .is_ok_and(|version| continuation::eligible(row, p, version))
+        })
+    }) {
+        return Ok(());
+    }
+    let blocked = receipt_only(row, &current, typed_wake(&turn.events));
+    let mut source = tasks::live_filter(task)?;
+    source.extend(doc! {"user_id":&row.user_id,"conversation_id":&row.id});
+    let root = db
+        .collection::<Document>("assistant_messages")
+        .find_one(source)
+        .projection(doc! {"execution_dispatch_evidence_version":1})
+        .session(&mut *session)
+        .await?
+        .ok_or_else(refused)?;
+    if !blocked && root.get_i32("execution_dispatch_evidence_version").ok() != Some(2) {
+        return Ok(());
+    }
+    stamp_fresh(db, session, row, &current, blocked).await?;
+    let current = load(db, session, row, &ids).await?;
+    if blocked {
+        block_in(db, session, &current).await
+    } else {
+        join_handoff(db, session, row, &current).await
+    }
+}
+
+async fn stamp_fresh(
+    db: &Database,
+    session: &mut ClientSession,
+    row: &AssistantConversation,
+    requests: &[ApprovalRequest],
+    blocked: bool,
+) -> AppResult<()> {
+    let mut fresh: Vec<_> = requests
+        .iter()
+        .filter(|request| proposal(request).is_ok_and(|p| p.owner_continuation.is_none()))
+        .map(|request| request.id.clone())
+        .collect();
+    fresh.sort();
+    let turn = row.active_turn.as_ref().ok_or_else(refused)?;
+    for request in requests {
+        let p = proposal(request)?;
+        let version = AssistantVersion::of(request)?;
+        let actionable =
+            request.status == "approved" && matches!(p.state.as_str(), "queued" | "preparing");
+        let unsent_decision = matches!(request.status.as_str(), "rejected" | "expired")
+            && matches!(p.state.as_str(), "denied" | "expired" | "cancelled");
+        if p.owner_continuation.is_some()
+            || !(blocked || actionable || unsent_decision)
+            || !continuation::eligible(row, p, version)
+        {
+            continue;
+        }
+        if db
+            .collection::<Document>(REQUESTS)
+            .update_one(
+                version.selector(doc! {
+                    "_id":&request.id,"user_id":&row.user_id,
+                    "execution_proposal.v1.key_id":&row.credential_api_key_id,
+                    "execution_proposal.v1.conversation_id":&row.id,
+                    "execution_proposal.v1.owner_continuation":null,
+                    "execution_proposal.v1.state":&p.state,"status":&request.status,
+                    "execution_proposal.v1.claim_id":&p.claim_id,
+                    "execution_proposal.v1.resume_turn_id":&p.resume_turn_id,
+                }),
+                version.update(doc! {"$set":{"execution_proposal.v1.owner_continuation":{
+                    "version":3,"batch":&fresh,"batch_turn_id":&turn.turn_id,"blocked":blocked,
+                    "released_turn_id":bson::Bson::Null,
+                    "handoff":{"version":1,"request_ids":&fresh,"turn_id":&turn.turn_id},
+                }}}),
+            )
+            .session(&mut *session)
+            .await?
+            .matched_count
+            != 1
+        {
+            return Err(conflict());
+        }
+    }
+    Ok(())
+}
+
+/// Extend only receipt evidence. Admission and resume use the same atomic
+/// grouping, so optional readiness failure cannot split a co-admitted handoff.
+async fn join_handoff(
+    db: &Database,
+    session: &mut ClientSession,
+    row: &AssistantConversation,
+    current: &[ApprovalRequest],
+) -> AppResult<()> {
+    let task = continuation::owner_task(row).ok_or_else(refused)?;
+    let turn = row.active_turn.as_ref().ok_or_else(refused)?;
+    // Already released/delivered observations cannot join another
+    // launch. Preserve the independent new group's recovery proof.
+    if current.iter().any(|request| {
+        proposal(request).is_ok_and(|p| {
+            p.delivered_turn_id.is_some()
+                || p.owner_continuation
+                    .as_ref()
+                    .is_some_and(|proof| proof.released_turn_id.is_some())
+        })
+    }) {
+        return Ok(());
+    }
+    let mut union = Vec::new();
+    for request in current {
+        let Some(group) = cohort(request)? else {
+            block_in(db, session, current).await?;
+            return Ok(());
+        };
+        union.extend(group.request_ids);
+    }
+    union.sort();
+    union.dedup();
+    if !canonical(&union) {
+        block_in(db, session, current).await?;
+        return Ok(());
+    }
+    let all = load(db, session, row, &union).await?;
+    if !valid_proofs(row, &all, &union)? {
+        block_in(db, session, current).await?;
+        let own: Vec<_> = all
+            .iter()
+            .filter(|request| proposal(request).is_ok_and(|p| p.task == *task))
+            .cloned()
+            .collect();
+        block_in(db, session, &own).await?;
+        return Ok(());
+    }
+    let joined = Handoff {
+        version: 1,
+        request_ids: union.clone(),
+        turn_id: turn.turn_id.clone(),
+    };
+    let unchanged = all.iter().all(|request| {
+        proposal(request).is_ok_and(|p| {
+            p.owner_continuation
+                .as_ref()
+                .is_some_and(|proof| proof.version == 3)
+        })
+    });
+    let first = all.first().map(cohort).transpose()?.flatten();
+    if unchanged
+        && first
+            .as_ref()
+            .is_some_and(|first| first.request_ids == union)
+        && all
+            .iter()
+            .all(|request| cohort(request).ok().flatten() == first)
+    {
+        return Ok(());
+    }
+    for request in &all {
+        let p = proposal(request)?;
+        let version = AssistantVersion::of(request)?;
+        let proof = p.owner_continuation.as_ref().ok_or_else(conflict)?;
+        if db.collection::<Document>(REQUESTS).update_one(version.selector(doc! {
+            "_id":&request.id,"user_id":&row.user_id,
+            "execution_proposal.v1.key_id":&row.credential_api_key_id,
+            "execution_proposal.v1.conversation_id":&row.id,
+            "execution_proposal.v1.owner_continuation.version":proof.version as i32,
+            "execution_proposal.v1.owner_continuation.batch":bson::to_bson(&proof.batch).map_err(encoding)?,
+            "execution_proposal.v1.owner_continuation.batch_turn_id":&proof.batch_turn_id,
+            "execution_proposal.v1.owner_continuation.released_turn_id":null,
+            "execution_proposal.v1.delivered_turn_id":null,
+        }), version.update(doc! {"$set":{"execution_proposal.v1.owner_continuation.version":3,
+            "execution_proposal.v1.owner_continuation.handoff":bson::to_bson(&joined).map_err(encoding)?}}))
+            .session(&mut *session).await?.matched_count != 1 { return Err(conflict()); }
+    }
+    Ok(())
 }
 
 fn cohort(request: &ApprovalRequest) -> AppResult<Option<Handoff>> {
@@ -220,9 +470,9 @@ fn validate(
     Ok(state)
 }
 
-/// Bind fresh decisions to their own original proof, then atomically join all
-/// compatible, unreleased groups co-admitted on this live task. No crash can
-/// expose a fresh proof without the corresponding joined handoff.
+/// Verify admitted proofs and their joined handoff. Older already-admitted
+/// turns also persist refusal intent before sending; mixed wakes never need
+/// optional continuation readiness to retain that refusal.
 pub(super) async fn admit(
     state: &crate::AppState,
     row: &AssistantConversation,
@@ -253,149 +503,143 @@ pub(super) async fn admit(
             .owner_continuation
             .as_ref()
             .filter(|proof| !proof.blocked && proof.released_turn_id.is_none())
+            && let Some(group) = cohort(request)?
         {
-            if let Some(group) = cohort(request)? {
-                work |= proof.version == 2
-                    && request.status == "approved"
-                    && p.delivered_turn_id.is_none()
-                    && p.state == "completed"
-                    && request.activity_outcome.as_deref() == Some("completed")
-                    && p.result.is_some()
-                    && p.claim_id.is_some()
-                    && continuation::eligible(row, p, AssistantVersion::of(request)?);
-                if !groups.contains(&group) {
-                    groups.push(group);
-                }
+            work |= proof.version == 2
+                && request.status == "approved"
+                && p.delivered_turn_id.is_none()
+                && p.state == "completed"
+                && request.activity_outcome.as_deref() == Some("completed")
+                && p.result.is_some()
+                && p.claim_id.is_some()
+                && continuation::eligible(row, p, AssistantVersion::of(request)?);
+            if !groups.contains(&group) {
+                groups.push(group);
             }
         }
     }
-    if !typed_wake {
-        // Mixed ordinary events cannot regain eligibility after a lost wake.
-        block(&state.db, requests).await?;
-        return Ok(None);
-    }
+    let blocked = receipt_only(row, requests, typed_wake);
     work |= groups.len() > 1
         || groups
             .iter()
             .any(|group| !admitted.iter().all(|id| group.request_ids.contains(id)));
     if !work {
+        if blocked {
+            block(&state.db, requests).await?;
+        }
         return Ok(None);
     }
-    // The optional dependency is never consulted for an unmarked legacy root.
-    if state
-        .db
-        .collection::<Document>("assistant_messages")
-        .find_one(doc! {
-            "_id":&task.task.root_id,"user_id":&row.user_id,"conversation_id":&row.id,
-            "execution_dispatch_evidence_version":2,
-        })
-        .projection(doc! {"_id":1})
-        .await?
-        .is_none()
+    // Receipt-only intent is persisted even on an older admitted turn and an
+    // unmarked legacy root. It never depends on optional model readiness.
+    if !blocked
+        && state
+            .db
+            .collection::<Document>("assistant_messages")
+            .find_one(doc! {
+                "_id":&task.task.root_id,"user_id":&row.user_id,"conversation_id":&row.id,
+                "execution_dispatch_evidence_version":2,
+            })
+            .projection(doc! {"_id":1})
+            .await?
+            .is_none()
     {
         return Ok(None);
     }
-    let ready = crate::services::security_readiness_service::serving_report(
-        &state.db,
-        continuation::READINESS,
-    )
-    .await?
-    .serving_ready;
-    if !ready {
-        if !groups.is_empty() {
-            return Err(AppError::SecurityReadinessUnavailable);
+    if !blocked {
+        let ready = crate::services::security_readiness_service::serving_report(
+            &state.db,
+            continuation::READINESS,
+        )
+        .await?
+        .serving_ready;
+        if !ready {
+            if !groups.is_empty() {
+                return Err(AppError::SecurityReadinessUnavailable);
+            }
+            return Ok(Some(false));
         }
-        return Ok(Some(false));
     }
     let mut session = state.db.client().start_session().await?;
-    session.start_transaction().and_run((&state.db,row,task,admitted),
-        |session,(db,row,task,admitted)| Box::pin(async move {
-            let result: AppResult<()> = async {
-                tasks::fence(db, session, task).await?;
-                let mut root = tasks::live_filter(task)?;
-                root.extend(doc! {"user_id":&row.user_id,"conversation_id":&row.id,"execution_dispatch_evidence_version":2});
-                if db.collection::<Document>("assistant_messages").update_one(root,
-                    doc! {"$inc":{"execution_dispatch_fence":1_i64}}).session(&mut *session).await?.matched_count != 1 { return Err(refused()); }
-                let mut fence = crate::services::assistant_nyxagent::WorkerFence::capture(row)?.filter();
-                fence.extend(continuation::current_task_filter(task)?);
-                fence.extend(doc! {"credential_api_key_id":&row.credential_api_key_id,
-                    "active_turn.stop_requested":false,"$expr":continuation::unexpired_turn()});
-                if db.collection::<Document>("assistant_conversations").update_one(fence,
-                    doc! {"$inc":{"execution_dispatch_fence":1_i64}}).session(&mut *session).await?.matched_count != 1 { return Err(refused()); }
-                let mut current = load(db, session, row, admitted).await?;
-                if current.len() != admitted.len() || current.iter().any(|request|
-                    !proposal(request).is_ok_and(|p| p.task == **task)) { return Err(refused()); }
-                let mut fresh: Vec<_> = current.iter().filter(|request| proposal(request).is_ok_and(|p| p.owner_continuation.is_none()))
-                    .map(|request| request.id.clone()).collect();
-                fresh.sort();
-                let turn = row.active_turn.as_ref().ok_or_else(refused)?;
-                for request in &current {
-                    let p = proposal(request)?;
-                    let version = AssistantVersion::of(request)?;
-                    let actionable = request.status == "approved" && matches!(p.state.as_str(), "queued" | "preparing");
-                    let unsent_decision = matches!(request.status.as_str(), "rejected" | "expired")
-                        && matches!(p.state.as_str(), "denied" | "expired" | "cancelled");
-                    if p.owner_continuation.is_none() && (actionable || unsent_decision)
-                        && continuation::eligible(row, p, version) {
-                        if db.collection::<Document>(REQUESTS).update_one(version.selector(doc! {
-                            "_id":&request.id,"execution_proposal.v1.owner_continuation":null,
-                            "execution_proposal.v1.state":&p.state,"status":&request.status,
-                        }), version.update(doc! {"$set":{"execution_proposal.v1.owner_continuation":{
-                            "version":3,"batch":&fresh,"batch_turn_id":&turn.turn_id,"blocked":false,
-                            "released_turn_id":bson::Bson::Null,
-                            "handoff":{"version":1,"request_ids":&fresh,"turn_id":&turn.turn_id},
-                        }}})).session(&mut *session).await?.matched_count != 1 { return Err(conflict()); }
+    session
+        .start_transaction()
+        .and_run(
+            (&state.db, row, task, admitted, typed_wake, blocked),
+            |session, (db, row, task, admitted, typed_wake, blocked)| {
+                Box::pin(async move {
+                    let result: AppResult<()> = async {
+                        tasks::fence(db, session, task).await?;
+                        let mut root = tasks::live_filter(task)?;
+                        root.extend(doc! {"user_id":&row.user_id,"conversation_id":&row.id});
+                        if !*blocked {
+                            root.insert("execution_dispatch_evidence_version", 2);
+                        }
+                        if db
+                            .collection::<Document>("assistant_messages")
+                            .update_one(root, doc! {"$inc":{"execution_dispatch_fence":1_i64}})
+                            .session(&mut *session)
+                            .await?
+                            .matched_count
+                            != 1
+                        {
+                            return Err(refused());
+                        }
+                        let mut fence =
+                            crate::services::assistant_nyxagent::WorkerFence::capture(row)?
+                                .filter();
+                        fence.extend(continuation::current_task_filter(task)?);
+                        fence.extend(doc! {"credential_api_key_id":&row.credential_api_key_id,
+                        "active_turn.stop_requested":false,"$expr":continuation::unexpired_turn()});
+                        let bound = db
+                            .collection::<Document>("assistant_conversations")
+                            .find_one_and_update(
+                                fence,
+                                doc! {"$inc":{"execution_dispatch_fence":1_i64}},
+                            )
+                            .return_document(mongodb::options::ReturnDocument::After)
+                            .projection(doc! {"active_turn.events":1})
+                            .session(&mut *session)
+                            .await?
+                            .ok_or_else(refused)?;
+                        let events: Vec<AgentEvent> = bson::from_bson(
+                            bound
+                                .get_document("active_turn")
+                                .map_err(encoding)?
+                                .get("events")
+                                .cloned()
+                                .ok_or_else(refused)?,
+                        )
+                        .map_err(encoding)?;
+                        if request_ids(&events).as_slice() != *admitted
+                            || super::batch::typed_wake(&events) != *typed_wake
+                        {
+                            return Err(refused());
+                        }
+                        let mut current = load(db, session, row, admitted).await?;
+                        if current.len() != admitted.len()
+                            || current
+                                .iter()
+                                .any(|request| !proposal(request).is_ok_and(|p| p.task == **task))
+                        {
+                            return Err(refused());
+                        }
+                        // Retry contenders reload both effect claims and refusal intent.
+                        // A concurrent winner cannot have its blocked proof overwritten.
+                        let blocked = *blocked || receipt_only(row, &current, *typed_wake);
+                        stamp_fresh(db, session, row, &current, blocked).await?;
+                        current = load(db, session, row, admitted).await?;
+                        if blocked {
+                            block_in(db, session, &current).await?;
+                            return Ok(());
+                        }
+                        join_handoff(db, session, row, &current).await
                     }
-                }
-                current = load(db, session, row, admitted).await?;
-                // Already released/delivered observations cannot join another
-                // launch. Preserve the independent new group's recovery proof.
-                if current.iter().any(|request| proposal(request).is_ok_and(|p|
-                    p.delivered_turn_id.is_some() || p.owner_continuation.as_ref().is_some_and(|proof| proof.released_turn_id.is_some()))) { return Ok(()); }
-                let mut union = Vec::new();
-                for request in &current {
-                    let Some(group) = cohort(request)? else {
-                        block_in(db, session, &current).await?;
-                        return Ok(());
-                    };
-                    union.extend(group.request_ids);
-                }
-                union.sort(); union.dedup();
-                if !canonical(&union) { block_in(db,session,&current).await?; return Ok(()); }
-                let all = load(db, session, row, &union).await?;
-                if !valid_proofs(row, &all, &union)? {
-                    block_in(db,session,&current).await?;
-                    let own: Vec<_> = all.iter().filter(|request| proposal(request).is_ok_and(|p| p.task == **task)).cloned().collect();
-                    block_in(db,session,&own).await?;
-                    return Ok(());
-                }
-                let joined = Handoff {version:1,request_ids:union.clone(),turn_id:turn.turn_id.clone()};
-                let unchanged = all.iter().all(|request| proposal(request).is_ok_and(|p|
-                    p.owner_continuation.as_ref().is_some_and(|proof| proof.version == 3)));
-                let first = all.first().map(cohort).transpose()?.flatten();
-                if unchanged && first.as_ref().is_some_and(|first| first.request_ids == union)
-                    && all.iter().all(|request| cohort(request).ok().flatten() == first) { return Ok(()); }
-                for request in &all {
-                    let p = proposal(request)?;
-                    let version = AssistantVersion::of(request)?;
-                    let proof = p.owner_continuation.as_ref().ok_or_else(conflict)?;
-                    if db.collection::<Document>(REQUESTS).update_one(version.selector(doc! {
-                        "_id":&request.id,"user_id":&row.user_id,
-                        "execution_proposal.v1.key_id":&row.credential_api_key_id,
-                        "execution_proposal.v1.conversation_id":&row.id,
-                        "execution_proposal.v1.owner_continuation.version":proof.version as i32,
-                        "execution_proposal.v1.owner_continuation.batch":bson::to_bson(&proof.batch).map_err(encoding)?,
-                        "execution_proposal.v1.owner_continuation.batch_turn_id":&proof.batch_turn_id,
-                        "execution_proposal.v1.owner_continuation.released_turn_id":null,
-                        "execution_proposal.v1.delivered_turn_id":null,
-                    }), version.update(doc! {"$set":{"execution_proposal.v1.owner_continuation.version":3,
-                        "execution_proposal.v1.owner_continuation.handoff":bson::to_bson(&joined).map_err(encoding)?}}))
-                        .session(&mut *session).await?.matched_count != 1 { return Err(conflict()); }
-                }
-                Ok(())
-            }.await;
-            crate::services::api_key_mutation_service::transaction_result(result)
-        })).await.map_err(crate::services::api_key_mutation_service::map_transaction_error)?;
+                    .await;
+                    crate::services::api_key_mutation_service::transaction_result(result)
+                })
+            },
+        )
+        .await
+        .map_err(crate::services::api_key_mutation_service::map_transaction_error)?;
     Ok(Some(true))
 }
 

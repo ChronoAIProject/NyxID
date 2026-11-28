@@ -253,6 +253,24 @@ async fn owner_permission_resume_recovered_and_fresh_decisions_preserve_independ
                     .any(|event| event.id == stale_id)
             );
             let joined_id = joined.active_turn.as_ref().unwrap().turn_id.clone();
+            // The actual admission commits the independent originals and their
+            // common handoff before any optional resume dependency or B's GET.
+            let mut admitted_union = vec![a.id.clone(), b.id.clone()];
+            admitted_union.sort();
+            for request in [a, b] {
+                let receipt = stored(&f, &request.id).await;
+                let proof = proposals::proposal(&receipt)
+                    .unwrap()
+                    .owner_continuation
+                    .as_ref()
+                    .unwrap();
+                assert!(!proof.blocked);
+                assert!(proof.released_turn_id.is_none());
+                assert_eq!(proof.batch.as_ref().unwrap(), &vec![request.id.clone()]);
+                let handoff = proof.handoff.as_ref().unwrap();
+                assert_eq!(handoff.request_ids, admitted_union);
+                assert_eq!(handoff.turn_id, joined_id);
+            }
             let final_turn = if crash_joined {
                 proposals::continuation::FAIL_AFTER_RECEIPT
                     .scope(true, run(&f, &joined))

@@ -576,8 +576,39 @@ async fn owner_permission_resume_partial_batch_crash_reconciles_success_without_
         "credential_drift",
     ] {
         let (f, row) = assistant("owner_resume_batch_crash").await;
+        // Defaults are part of the proposal authority digest. Materialize them
+        // before either effect captures its snapshot; do not mutate live policy
+        // while trying to reach the post-provider-success fault boundary.
+        crate::services::notification_service::get_or_create_channel(&f.state.db, &f.owner)
+            .await
+            .unwrap();
+        let independent = if sibling == "waiting" {
+            Some(
+                crate::services::approval_service::create_tool_approval_request(
+                    &f.state.db,
+                    &f.state.config,
+                    &f.state.http_client,
+                    None,
+                    None,
+                    &f.owner,
+                    "independent-review-fixture",
+                    None,
+                    None,
+                    false,
+                    "agent",
+                    &f.key,
+                    None,
+                    Default::default(),
+                )
+                .await
+                .unwrap()
+                .id,
+            )
+        } else {
+            None
+        };
         set_task(&f, &row).await;
-        sheet(&f, 200).await;
+        let cells = sheet(&f, 200).await;
         let model = model(&f, sibling == "queued").await;
         assert_eq!(
             call(f.router(), &f.raw, "PUT").await.0,
@@ -594,7 +625,7 @@ async fn owner_permission_resume_partial_batch_crash_reconciles_success_without_
             .state
             .db
             .collection::<ApprovalRequest>("approval_requests")
-            .find(doc! {"status":"pending"})
+            .find(doc! {"status":"pending","execution_proposal":{"$ne":null}})
             .await
             .unwrap()
             .try_collect()
@@ -624,24 +655,6 @@ async fn owner_permission_resume_partial_batch_crash_reconciles_success_without_
                 .unwrap();
         }
         let mut resumed = event_turn(&f, &row).await;
-        let independent = crate::services::approval_service::create_tool_approval_request(
-            &f.state.db,
-            &f.state.config,
-            &f.state.http_client,
-            None,
-            None,
-            &f.owner,
-            "independent-review-fixture",
-            None,
-            None,
-            false,
-            "agent",
-            &f.key,
-            None,
-            Default::default(),
-        )
-        .await
-        .unwrap();
         let egress = WaitForIndependentReview {
             inner: crate::handlers::assistant_nyxagent::http_egress(
                 f.state.clone(),
@@ -652,7 +665,7 @@ async fn owner_permission_resume_partial_batch_crash_reconciles_success_without_
             } else {
                 String::new()
             },
-            independent: independent.id,
+            independent: independent.unwrap_or_default(),
         };
         // Prime the waiting branch first; the other branches crash before even
         // considering their sibling. All IDs are real admitted decision events.
@@ -694,6 +707,15 @@ async fn owner_permission_resume_partial_batch_crash_reconciles_success_without_
         let error = interrupted.unwrap_err();
         assert_eq!(error.stage, "permission_resume");
         let committed = stored(&f, &success.id).await;
+        let receipt = proposals::proposal(&committed).unwrap();
+        assert_eq!(receipt.state, "completed");
+        assert_eq!(committed.activity_outcome.as_deref(), Some("completed"));
+        let attempts = f.server.received_requests().await.unwrap();
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0].method.as_str(), "PUT");
+        assert_eq!(attempts[0].url.path(), RANGE);
+        assert_eq!(attempts[0].body_json::<Value>().unwrap(), values());
+        assert_eq!(*cells.lock().unwrap(), Some(values()));
         let marker = proposals::proposal(&committed)
             .unwrap()
             .owner_continuation
@@ -701,7 +723,8 @@ async fn owner_permission_resume_partial_batch_crash_reconciles_success_without_
             .unwrap();
         assert_eq!(marker.version, 3);
         assert_eq!(marker.batch.as_ref().unwrap().len(), 2);
-        assert!(!marker.blocked);
+        // Denial is durable at admission, before even the first provider send.
+        assert_eq!(marker.blocked, sibling == "denied");
         assert!(marker.released_turn_id.is_none());
         if sibling != "denied" {
             let partner = stored(&f, &other.id).await;
@@ -1022,67 +1045,327 @@ async fn owner_permission_resume_http_202_is_pending_without_readback_or_resend(
     f.cleanup().await;
 }
 
-// A successful decision co-admitted with an ordinary event never acquires a
-// release marker, even if its ordinary partner is absent from later recovery.
-#[tokio::test]
-async fn owner_permission_resume_mixed_ordinary_event_never_becomes_success_only() {
-    let (f, row) = assistant("owner_resume_mixed_ordinary").await;
+// Round four: refusal intent is already durable when normal admission returns,
+// before resume/readiness, any send, or failed-turn settlement can lose the wake.
+async fn mixed_admission_recovery(ordinary: bool, unmarked: bool, between: bool) {
+    let (f, row) = assistant("owner_mixed_admission_recovery").await;
+    crate::services::notification_service::get_or_create_channel(&f.state.db, &f.owner)
+        .await
+        .unwrap();
     set_task(&f, &row).await;
-    sheet(&f, 200).await;
+    let cells = sheet(&f, 200).await;
+    wiremock::Mock::given(wiremock::matchers::method("PUT"))
+        .and(wiremock::matchers::path(
+            "/v4/spreadsheets/book/values/Other!A1:B1",
+        ))
+        .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(json!({"updatedCells":2})))
+        .mount(&f.server)
+        .await;
     let model = model(&f, false).await;
-    run(&f, &row).await;
-    let request = pending(&f, None).await;
-    proposals::decide(
-        &f.state,
-        &f.owner,
-        &request.id,
-        &decision(&request, "persistent"),
-    )
-    .await
-    .unwrap();
-    let mut follow = crate::services::assistant_team_service::event(
-        "followup",
-        "Continue the admitted task".into(),
-        None,
+    assert_eq!(
+        call(f.router(), &f.raw, "PUT").await.0,
+        StatusCode::FORBIDDEN
     );
-    follow.execution_task = row.active_turn.as_ref().unwrap().execution_task.clone();
-    engine::push_events(&f.state.db, &f.owner, &row.id, vec![follow])
+    assert_eq!(
+        sheet_call(&f, "PUT", "Other!A1:B1", Some(&values()))
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+    run(&f, &row).await;
+    let mut requests: Vec<_> = f
+        .state
+        .db
+        .collection::<ApprovalRequest>("approval_requests")
+        .find(doc! {"status":"pending"})
         .await
         .unwrap()
+        .try_collect()
+        .await
         .unwrap();
-    let mut resumed = event_turn(&f, &row).await;
-    assert_eq!(resumed.active_turn.as_ref().unwrap().events.len(), 2);
-    assert!(
-        execute(&f, &resumed)
+    assert_eq!(requests.len(), 2);
+    requests.sort_by_key(|request| {
+        proposals::proposal(request)
+            .unwrap()
+            .review
+            .operation
+            .contains("Other!")
+    });
+    for (index, request) in requests.iter().enumerate() {
+        let mut input = decision(request, "persistent");
+        if !ordinary && index == 1 {
+            input.approved = false;
+            input.choice_id = None;
+            input.choice_digest = None;
+        }
+        proposals::decide(&f.state, &f.owner, &request.id, &input)
+            .await
+            .unwrap();
+    }
+    if ordinary {
+        let mut follow = crate::services::assistant_team_service::event(
+            "followup",
+            "Continue the admitted task".into(),
+            None,
+        );
+        follow.execution_task = row.active_turn.as_ref().unwrap().execution_task.clone();
+        engine::push_events(&f.state.db, &f.owner, &row.id, vec![follow])
             .await
             .unwrap()
-            .text
-            .contains("HTTP 200")
-    );
+            .unwrap();
+    }
+    let task = row
+        .active_turn
+        .as_ref()
+        .unwrap()
+        .execution_task
+        .as_ref()
+        .unwrap();
+    if unmarked {
+        f.state.db.collection::<Document>("assistant_messages").update_one(
+            doc! {"_id":&task.task.root_id},
+            doc! {"$unset":{"execution_dispatch_evidence_version":"","execution_dispatches":""}})
+            .await.unwrap();
+    }
+    // Isolate a broken optional capability before actual named-event admission.
+    // Authoring/source/key readiness remains intact. Refusal needs no new grant.
+    readiness_dependency(&f, true).await;
     assert!(
-        proposals::proposal(&stored(&f, &request.id).await)
-            .unwrap()
+        crate::services::security_readiness_service::serving_report(
+            &f.state.db,
+            proposals::continuation::READINESS
+        )
+        .await
+        .is_err()
+    );
+    let resumed = event_turn(&f, &row).await;
+    let turn = resumed.active_turn.as_ref().unwrap();
+    assert_eq!(turn.events.len(), if ordinary { 3 } else { 2 });
+    let mut batch: Vec<_> = requests.iter().map(|request| request.id.clone()).collect();
+    batch.sort();
+    // Required BEFORE interruption: neither absence nor post-send blocking is
+    // acceptable. Both genuine decision rows carry the actual admission proof.
+    for request in &requests {
+        let saved = stored(&f, &request.id).await;
+        let p = proposals::proposal(&saved).unwrap();
+        let proof = p
             .owner_continuation
             .as_ref()
-            .is_none_or(|proof| proof.blocked)
+            .expect("admission must persist receipt-only intent");
+        assert_eq!(proof.version, 3);
+        assert!(proof.blocked);
+        assert_eq!(proof.batch.as_ref(), Some(&batch));
+        assert_eq!(proof.batch_turn_id.as_deref(), Some(turn.turn_id.as_str()));
+        assert_eq!(proof.handoff.as_ref().unwrap().request_ids, batch);
+        assert!(proof.released_turn_id.is_none());
+        assert_eq!(p.task, *task);
+        assert_eq!(p.key_id, row.credential_api_key_id);
+        assert!(p.claim_id.is_none());
+        assert_eq!(
+            p.state,
+            if !ordinary && request.id == requests[1].id {
+                "denied"
+            } else {
+                "queued"
+            }
+        );
+    }
+    assert!(f.server.received_requests().await.unwrap().is_empty());
+    assert_eq!(model.calls.lock().unwrap().len(), 1);
+    if between {
+        proposals::continuation::FAIL_AFTER_RECEIPT
+            .scope(true, run(&f, &resumed))
+            .await;
+    } else {
+        proposals::continuation::FAIL_BEFORE_SEND
+            .scope(true, run(&f, &resumed))
+            .await;
+    }
+    let messages = engine::messages(&f.state.db, &f.owner, &row.id, 20, None)
+        .await
+        .unwrap();
+    assert_eq!(messages.last().unwrap().status, "failed");
+    assert_eq!(
+        messages
+            .last()
+            .unwrap()
+            .error_detail
+            .as_ref()
+            .unwrap()
+            .stage,
+        "permission_resume"
     );
-    resumed
-        .active_turn
-        .as_mut()
-        .unwrap()
-        .events
-        .retain(|e| e.id.starts_with("execution-decision:"));
     assert!(
-        execute(&f, &resumed)
+        engine::get(&f.state.db, &f.owner, &row.id)
             .await
             .unwrap()
-            .text
-            .contains("HTTP 200")
+            .active_turn
+            .is_none()
     );
-    assert_eq!(f.server.received_requests().await.unwrap().len(), 1);
+    assert_eq!(
+        f.server.received_requests().await.unwrap().len(),
+        usize::from(between)
+    );
     assert_eq!(model.calls.lock().unwrap().len(), 1);
+    if between {
+        assert_eq!(
+            proposals::proposal(&stored(&f, &requests[0].id).await)
+                .unwrap()
+                .state,
+            "completed"
+        );
+        assert_eq!(
+            proposals::proposal(&stored(&f, &requests[1].id).await)
+                .unwrap()
+                .state,
+            "queued"
+        );
+    }
+    // Each recovery is a genuine independently queued/admitted maintenance
+    // wake. No cloned turn removes an ordinary or denied event to prove this.
+    let order: Vec<_> = if ordinary {
+        requests.iter().collect()
+    } else {
+        requests.iter().rev().collect()
+    };
+    for request in order {
+        for sibling in &requests {
+            let version = proposals::v3::AssistantVersion::of(sibling).unwrap();
+            f.state
+                .db
+                .collection::<Document>("approval_requests")
+                .update_one(
+                    doc! {"_id":&sibling.id},
+                    version.update(doc! {"$set":{"execution_proposal.v1.maintenance_at":
+                    bson::DateTime::from_chrono(Utc::now()+chrono::Duration::hours(1))}}),
+                )
+                .await
+                .unwrap();
+        }
+        let before = stored(&f, &request.id).await;
+        let pending_send = proposals::proposal(&before).unwrap().state == "queued";
+        let version = proposals::v3::AssistantVersion::of(request).unwrap();
+        f.state.db.collection::<Document>("approval_requests").update_one(doc! {"_id":&request.id},
+            version.update(doc! {"$set":{"execution_proposal.v1.wake_at":
+                bson::DateTime::from_chrono(Utc::now()-chrono::Duration::minutes(1)),
+                "execution_proposal.v1.maintenance_at":bson::DateTime::from_chrono(Utc::now()-chrono::Duration::minutes(1))}}))
+            .await.unwrap();
+        proposals::sweep(&f.state).await.unwrap();
+        let recovered = event_turn(&f, &row).await;
+        let events = &recovered.active_turn.as_ref().unwrap().events;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].id, format!("execution-decision:{}", request.id));
+        let attempts = f.server.received_requests().await.unwrap().len();
+        run(&f, &recovered).await;
+        assert_eq!(
+            f.server.received_requests().await.unwrap().len(),
+            attempts + usize::from(pending_send)
+        );
+        assert_eq!(model.calls.lock().unwrap().len(), 1);
+        let saved = stored(&f, &request.id).await;
+        let p = proposals::proposal(&saved).unwrap();
+        assert_eq!(
+            p.state,
+            if before.status == "approved" {
+                "completed"
+            } else {
+                "denied"
+            }
+        );
+        assert!(p.delivered_turn_id.is_some());
+        let proof = p.owner_continuation.as_ref().unwrap();
+        assert!(proof.blocked);
+        assert!(proof.released_turn_id.is_none());
+        assert_eq!(proof.batch.as_ref(), Some(&batch));
+        assert_eq!(proof.batch_turn_id.as_deref(), Some(turn.turn_id.as_str()));
+        let messages = engine::messages(&f.state.db, &f.owner, &row.id, 20, None)
+            .await
+            .unwrap();
+        assert_eq!(messages.last().unwrap().status, "completed");
+        assert!(
+            messages
+                .last()
+                .unwrap()
+                .text
+                .contains(if before.status == "approved" {
+                    "HTTP 200"
+                } else {
+                    "denied"
+                })
+        );
+    }
+    assert_eq!(
+        f.server.received_requests().await.unwrap().len(),
+        if ordinary { 2 } else { 1 }
+    );
+    assert!(
+        f.server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .all(|request| request.method == "PUT")
+    );
+    let attempts = f.server.received_requests().await.unwrap();
+    let mut paths: Vec<_> = attempts
+        .iter()
+        .map(|request| request.url.path().to_owned())
+        .collect();
+    paths.sort();
+    let expected = if ordinary {
+        vec![
+            RANGE.to_owned(),
+            "/v4/spreadsheets/book/values/Other!A1:B1".to_owned(),
+        ]
+    } else {
+        vec![RANGE.to_owned()]
+    };
+    assert_eq!(paths, expected);
+    for attempt in attempts {
+        assert_eq!(attempt.body_json::<Value>().unwrap(), values());
+    }
+    assert_eq!(count(&f, "approval_requests").await, 2);
+    if unmarked {
+        let root = f
+            .state
+            .db
+            .collection::<Document>("assistant_messages")
+            .find_one(doc! {"_id":&task.task.root_id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!root.contains_key("execution_dispatch_evidence_version"));
+        assert!(!root.contains_key("execution_dispatches"));
+    }
+    assert_eq!(*cells.lock().unwrap(), Some(values()));
+    assert!(model.reads.lock().unwrap().is_empty());
+    assert_eq!(model.calls.lock().unwrap().len(), 1);
+    proposals::sweep(&f.state).await.unwrap();
+    assert!(
+        engine::get(&f.state.db, &f.owner, &row.id)
+            .await
+            .unwrap()
+            .pending_events
+            .is_empty()
+    );
     drop(model);
     f.cleanup().await;
+}
+
+#[tokio::test]
+async fn owner_permission_resume_mixed_ordinary_event_never_becomes_success_only() {
+    for unmarked in [false, true] {
+        for between in [false, true] {
+            mixed_admission_recovery(true, unmarked, between).await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn owner_permission_resume_denied_admission_survives_optional_failure_and_split_recovery() {
+    for unmarked in [false, true] {
+        mixed_admission_recovery(false, unmarked, false).await;
+    }
 }
 
 // Round two: ordinary historical/readiness-off coverage has no v2 evidence cap.

@@ -295,6 +295,7 @@ pub(crate) fn admit<'a>(
             fence(db, session, &task).await?;
         }
         row.active_turn.as_mut().unwrap().execution_task = Some(task);
+        proposals::record_owner_admission(db, session, row).await?;
         Ok(())
     })
 }

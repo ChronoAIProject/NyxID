@@ -128,9 +128,7 @@ pub(crate) async fn resume_turn(
     if batch.len() > 64 {
         return Err(refused());
     }
-    let typed_wake = turn.events.iter().all(|event| {
-        event.kind == "permission_decided" && event.id.starts_with("execution-decision:")
-    });
+    let typed_wake = super::batch::typed_wake(&turn.events);
     let filter = assistant_selector(doc! {"_id":{"$in":&batch}, "user_id":&row.user_id,
     "execution_proposal.v1.conversation_id":&row.id,
     "execution_proposal.v1.key_id":&row.credential_api_key_id});
@@ -156,6 +154,13 @@ pub(crate) async fn resume_turn(
             .await?
             .try_collect()
             .await?;
+    }
+    #[cfg(test)]
+    if continuation::FAIL_BEFORE_SEND
+        .try_with(|fail| *fail)
+        .unwrap_or(false)
+    {
+        return Err(AppError::Internal("Injected pre-send interruption".into()));
     }
     let mut notes = Vec::new();
     let mut owner_source = None;

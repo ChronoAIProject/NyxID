@@ -74,6 +74,7 @@ tokio::task_local! {
     pub(crate) static FAIL_BEFORE_RELEASE: bool;
     pub(crate) static FAIL_AFTER_RELEASE: bool;
     pub(crate) static FAIL_AFTER_RECEIPT: bool;
+    pub(crate) static FAIL_BEFORE_SEND: bool;
 }
 
 pub(crate) enum ResumeOutcome {
