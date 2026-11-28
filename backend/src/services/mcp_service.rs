@@ -1853,20 +1853,30 @@ async fn load_user_tools_with_grants(
             }
         }
         if let Some(catalog_id) = us.catalog_service_id.as_deref() {
-            let rows: Vec<_> = eps_by_svc.get(catalog_id)
-                .into_iter().flatten().copied()
+            let rows: Vec<_> = eps_by_svc
+                .get(catalog_id)
+                .into_iter()
+                .flatten()
+                .copied()
                 .filter(|row| row.name == super::image_publication::OPERATION)
                 .collect();
             super::image_publication::append_catalog_operation(
-                &mut published.endpoints, &rows, catalog_policy,
+                &mut published.endpoints,
+                &rows,
+                catalog_policy,
             );
-            let added: Vec<_> = rows.into_iter().filter(|row| {
-                published.endpoints.iter().any(|endpoint| {
-                    endpoint.endpoint_id == row.id && super::image_publication::candidate(endpoint)
+            let added: Vec<_> = rows
+                .into_iter()
+                .filter(|row| {
+                    published.endpoints.iter().any(|endpoint| {
+                        endpoint.endpoint_id == row.id
+                            && super::image_publication::candidate(endpoint)
+                    })
                 })
-            }).collect();
+                .collect();
             let metadata = service_endpoint_durable_metadata(
-                &added, catalog_policy.map(|catalog| catalog.slug.as_str()),
+                &added,
+                catalog_policy.map(|catalog| catalog.slug.as_str()),
             );
             published.durable_metadata.extend(metadata);
         }
@@ -3313,7 +3323,7 @@ pub async fn load_public_tools(db: &mongodb::Database) -> AppResult<Vec<McpToolS
             })
             .filter(|endpoint| {
                 !super::lark_attachment_tool::is_attachment_operation(endpoint)
-                        && !super::image_publication::candidate(endpoint)
+                    && !super::image_publication::candidate(endpoint)
                     && !super::lark_im_tool::image_candidate(endpoint)
             })
             .collect();
@@ -4329,7 +4339,9 @@ impl PreparedProxyCall {
         endpoint: &McpToolEndpoint,
         args: &serde_json::Value,
     ) -> Option<serde_json::Value> {
-        if let Some(publication) = &self.image_publication { return Some(publication.binding()); }
+        if let Some(publication) = &self.image_publication {
+            return Some(publication.binding());
+        }
         let binding = self.attachment_binding.as_ref()?;
         use sha2::Digest;
         let body_sha256 = hex::encode(sha2::Sha256::digest(
@@ -4355,9 +4367,11 @@ impl PreparedProxyCall {
     }
 
     pub(crate) fn attachment_policy_floor(&self) -> bool {
-        self.image_publication.as_ref().is_some_and(|p|p.upload()) || self.attachment_binding
-            .as_ref()
-            .is_some_and(super::lark_attachment_tool::Binding::is_raw)
+        self.image_publication.as_ref().is_some_and(|p| p.upload())
+            || self
+                .attachment_binding
+                .as_ref()
+                .is_some_and(super::lark_attachment_tool::Binding::is_raw)
     }
 
     pub(crate) fn attachment_summary(
@@ -4365,7 +4379,9 @@ impl PreparedProxyCall {
         endpoint: &McpToolEndpoint,
         args: &serde_json::Value,
     ) -> Option<String> {
-        if let Some(publication) = &self.image_publication { return Some(publication.summary()); }
+        if let Some(publication) = &self.image_publication {
+            return Some(publication.summary());
+        }
         let display = self.attachment_binding.as_ref()?.display()?;
         let parameters = args
             .as_object()
@@ -4490,7 +4506,11 @@ impl PreparedProxyCall {
     pub(crate) fn effects(&self) -> OperationEffects {
         if let Some(publication) = &self.image_publication {
             let reads = publication.read_only();
-            return OperationEffects { reads, uses: !reads, destructive: false };
+            return OperationEffects {
+                reads,
+                uses: !reads,
+                destructive: false,
+            };
         }
         let metadata = self.approval_metadata;
         let method_override = (metadata.append_only || metadata.generic_spec_key.is_some())
@@ -4733,7 +4753,9 @@ pub fn prepare_proxy_tool_call(
     endpoint: &McpToolEndpoint,
     args: &serde_json::Value,
 ) -> AppResult<PreparedProxyCall> {
-    if super::image_publication::candidate(endpoint) { return Err(super::image_publication::refused("live_chat_required")); }
+    if super::image_publication::candidate(endpoint) {
+        return Err(super::image_publication::refused("live_chat_required"));
+    }
     if super::lark_attachment_tool::is_attachment_operation(endpoint)
         || matches!(
             endpoint.attachment_input,
@@ -4875,9 +4897,10 @@ pub fn prepare_chat_proxy_tool_call<'a>(
             prepared.authorize_agent_operations(scopes, service, endpoint)?;
             let input = serde_json::from_slice(prepared.body.as_deref().unwrap_or_default())
                 .map_err(|_| super::image_publication::refused("arguments"))?;
-            prepared.image_publication = Some(super::image_publication::prepare(
-                db, keys, chat, service, endpoint, &input,
-            ).await?);
+            prepared.image_publication = Some(
+                super::image_publication::prepare(db, keys, chat, service, endpoint, &input)
+                    .await?,
+            );
             return Ok(prepared);
         }
         if let Some(validated) =
@@ -6623,8 +6646,15 @@ async fn execute_tool_resolved_inner(
         super::lark_attachment_tool::validate_binding(db, service, endpoint, binding).await?;
     }
     if let Some(publication) = &prepared.image_publication {
-        if exec_ctx.api_key_id != Some(publication.chat.api_key_id.as_str()) || publication.chat.user_id != user_id || node_route.is_some() || prepared.async_submission.is_some() || prepared.async_continuation.is_some() {
-            return Err(super::image_publication::refused("live_hosted_chat_required"));
+        if exec_ctx.api_key_id != Some(publication.chat.api_key_id.as_str())
+            || publication.chat.user_id != user_id
+            || node_route.is_some()
+            || prepared.async_submission.is_some()
+            || prepared.async_continuation.is_some()
+        {
+            return Err(super::image_publication::refused(
+                "live_hosted_chat_required",
+            ));
         }
     }
     if let Some(base) = &prepared.managed_base {

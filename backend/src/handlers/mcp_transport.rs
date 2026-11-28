@@ -2513,9 +2513,16 @@ async fn handle_tools_list(
         return rpc_error(request.id.clone(), -32603, "Failed to load tools");
     }
     if let Err(error) = crate::services::image_publication::filter_discovery(
-        &state.db, auth.chat.as_ref(), &mut services,
-    ).await {
-        tracing::warn!(code = error.error_code(), "Failed to filter connector tools");
+        &state.db,
+        auth.chat.as_ref(),
+        &mut services,
+    )
+    .await
+    {
+        tracing::warn!(
+            code = error.error_code(),
+            "Failed to filter connector tools"
+        );
         return rpc_error(request.id.clone(), -32603, "Failed to load tools");
     }
     crate::services::agent_operation_scope_service::filter_catalog(
@@ -6657,8 +6664,11 @@ async fn load_all_services_for_meta_tools(
     )
     .await?;
     crate::services::image_publication::filter_discovery(
-        &state.db, auth.chat.as_ref(), &mut services,
-    ).await?;
+        &state.db,
+        auth.chat.as_ref(),
+        &mut services,
+    )
+    .await?;
     crate::services::agent_operation_scope_service::filter_catalog(
         &auth.assistant_operation_scopes,
         &mut services,

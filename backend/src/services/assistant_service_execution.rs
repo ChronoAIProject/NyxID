@@ -440,7 +440,10 @@ async fn check_inner(
         )
         .await?;
         let gate = super::image_publication::publication_gate(
-            operation, gate, facts, instruction_required,
+            operation,
+            gate,
+            facts,
+            instruction_required,
         );
         let gate = super::execution_permission_dispatch::risk_gate(chat, connection_id, gate);
         if let Some(need) = gate.ask() {

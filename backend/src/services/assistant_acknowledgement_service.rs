@@ -987,8 +987,18 @@ pub async fn confirm_action_with(
         Some(
             crate::models::assistant_acknowledgement::ActionConfirmation {
                 image_publication: if tool == "nyxid.service_execution" {
-                    args["operation"]["image_publication_review"].as_object().map(|_|serde_json::from_value(args["operation"]["image_publication_review"].clone()).map_err(|_|AppError::BadRequest("Invalid publication review".into()))).transpose()?
-                } else {None},
+                    args["operation"]["image_publication_review"]
+                        .as_object()
+                        .map(|_| {
+                            serde_json::from_value(
+                                args["operation"]["image_publication_review"].clone(),
+                            )
+                            .map_err(|_| AppError::BadRequest("Invalid publication review".into()))
+                        })
+                        .transpose()?
+                } else {
+                    None
+                },
                 risk: need.class.as_str().into(),
                 access_mode: need.mode,
                 reason: if need.org_instruction == OrgInstructionRequirement::Required {
