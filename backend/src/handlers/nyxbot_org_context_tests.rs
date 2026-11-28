@@ -5,7 +5,7 @@ use crate::models::org_membership::OrgRole;
 
 const GROUP_PARTITION: &str = "conv_11111111111111111111111111111111";
 
-async fn member(state: &AppState, row: &NyxbotChannel, org_id: &str) -> String {
+pub(super) async fn member(state: &AppState, row: &NyxbotChannel, org_id: &str) -> String {
     let id = Uuid::new_v4().to_string();
     state
         .db

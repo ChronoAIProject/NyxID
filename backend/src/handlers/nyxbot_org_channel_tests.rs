@@ -5,6 +5,8 @@ use crate::services::{feature_flag_service as flags, org_channel_service as org}
 
 #[path = "nyxbot_org_context_tests.rs"]
 mod context_2187;
+#[path = "nyxbot_org_dm_continuity_tests.rs"]
+mod dm_continuity_2641;
 
 #[tokio::test]
 async fn org_channel_transport_moves_wait_for_member_and_guest_execution_actors() {
