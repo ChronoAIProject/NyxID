@@ -309,6 +309,7 @@ async fn inventory_release_refuses_receipts_live_windows_and_stale_edits_before_
         (PARENTS, &route.creation.sandbox_ref_id, "cma_sandbox_id"),
         (COLLECTION_NAME, &route.creation.id, "operation_id"),
         (COLLECTION_NAME, &route.creation.id, "cma_agent_id"),
+        (COLLECTION_NAME, &route.creation.id, "covered_key"),
         (COLLECTION_NAME, &route.creation.id, "cma_sandbox_id"),
     ] {
         let rows = f.db.collection::<Document>(collection);

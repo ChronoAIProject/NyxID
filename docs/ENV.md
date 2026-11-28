@@ -943,7 +943,7 @@ serve historical versions. See [the explicit migration API procedure](SECURITY.m
 
 ### CMA covered creation evidence
 
-`CMA_CREATION_OUTCOME_EPOCH` is unset by default. When set to the current 32-digit lowercase hexadecimal CMA coverage epoch, NyxID journals a separate covered upstream idempotency key before first dispatch of a new slot-allocating CMA request. The key and exact wire fingerprint remain immutable across retries and across later flag changes. Existing legacy creation identities retain their original recovery behavior.
+`CMA_CREATION_OUTCOME_EPOCH` is unset by default. When set to the current 32-digit lowercase hexadecimal CMA coverage epoch, NyxID commits the slot and its separate covered upstream idempotency key in the same transaction before first dispatch of a new slot-allocating CMA request. The key and exact wire fingerprint remain immutable across retries and across later flag changes. Existing legacy creation identities retain their original recovery behavior.
 
 Activate this writer only after every eligible NyxID and CMA reader/writer supports the covered identity, CMA's creation-outcome lookup and terminal settlement are enabled, and its coverage epoch and deployment fingerprint match the catalog execution target. Wait until the configured first covered UTC day. Disable the environment setting to stop new covered writes while retaining recovery of existing covered requests. The reservation recovery worker and owner cancellation use the original saved identity and never release unknown outcomes from operation status or inventory absence.
 

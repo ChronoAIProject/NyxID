@@ -861,9 +861,7 @@ pub async fn admit(
             if previous.covered_key.is_some()
                 && previous.submission_state == "confirmed_not_created"
             {
-                return Err(AppError::Conflict(
-                    "CMA creation has settled; use a new Idempotency-Key for a new creation".into(),
-                ));
+                return Err(sandboxes::covered_creation_settled());
             }
         }
         Ok(())
@@ -891,53 +889,30 @@ pub async fn admit(
         permit.creation = Some(previous.clone());
         return Ok(permit);
     }
-    let sandbox = if creates_sandbox {
-        sandboxes::begin_creation(
-            &db,
-            keys,
-            &permit.gateway,
-            owner,
-            permit.key.as_deref().ok_or_else(invalid)?,
-            body,
-        )
-        .await?
+    let existing_parent = if creates_sandbox {
+        None
     } else {
         let Some(parent) = resolve_proxy_parent(&permit, true).await? else {
             return Ok(permit);
         };
-        parent
+        if creates_agent
+            || matches!(
+                &operation,
+                Operation::Sandbox {
+                    admission: true,
+                    ..
+                } | Operation::Agent {
+                    admission: true,
+                    ..
+                }
+            )
+        {
+            require_available_parent(&parent)?;
+        }
+        Some(parent)
     };
-    let admits_work = creates_agent
-        || matches!(
-            &operation,
-            Operation::Sandbox {
-                admission: true,
-                ..
-            } | Operation::Agent {
-                admission: true,
-                ..
-            }
-        );
-    if admits_work {
-        require_available_parent(&sandbox)?;
-    }
-    if creates_sandbox && (sandbox.cma_sandbox_id.is_some() || !sandbox.occupies_account_slot) {
-        return Err(drift());
-    }
     if creates_sandbox || creates_agent {
         let normalized = sandboxes::prepare_creation_request(body)?;
-        let id = pending_creation
-            .as_ref()
-            .map(|row| row.id.clone())
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        let context = RecordContext::new(COLLECTION_NAME, &id, owner, &["request_ciphertext"])?;
-        let request_ciphertext =
-            crate::crypto::record_field::encrypt_context(keys, &context, body).await?;
-        let expected_workspace_id = match &operation {
-            Operation::CreateAgent { workspace, .. } => workspace.clone(),
-            Operation::WorkspaceAgent { id } => Some(id.clone()),
-            _ => None,
-        };
         let covered_key = if let Some(previous) = &pending_creation {
             previous.covered_key.clone()
         } else if creates_sandbox {
@@ -957,20 +932,34 @@ pub async fn admit(
         } else {
             None
         };
-        let candidate = AssistantCmaCreation {
-            id,
+        let id = pending_creation
+            .as_ref()
+            .map(|row| row.id.clone())
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let context = RecordContext::new(COLLECTION_NAME, &id, owner, &["request_ciphertext"])?;
+        let request_ciphertext =
+            crate::crypto::record_field::encrypt_context(keys, &context, body).await?;
+        let expected_workspace_id = match &operation {
+            Operation::CreateAgent { workspace, .. } => workspace.clone(),
+            Operation::WorkspaceAgent { id } => Some(id.clone()),
+            _ => None,
+        };
+        let idempotency_key = permit.key.as_deref().ok_or_else(invalid)?;
+        let new_covered_intent = pending_creation.is_none() && covered_key.is_some();
+        let journal_for = |sandbox: &AssistantCmaSandbox| AssistantCmaCreation {
+            id: id.clone(),
             user_id: owner.into(),
             cma_service_id: target.service.id.clone(),
-            deployment_fingerprint,
+            deployment_fingerprint: deployment_fingerprint.clone(),
             method: method.into(),
             path: path.into(),
-            idempotency_key: permit.key.clone().ok_or_else(invalid)?,
-            covered_key,
-            request_hash: normalized.hash,
+            idempotency_key: idempotency_key.into(),
+            covered_key: covered_key.clone(),
+            request_hash: normalized.hash.clone(),
             sandbox_ref_id: sandbox.id.clone(),
             sandbox_generation: sandbox.generation,
             creates_sandbox,
-            expected_workspace_id,
+            expected_workspace_id: expected_workspace_id.clone(),
             released_by_inventory: false,
             submission_state: "pending".into(),
             operation_id: None,
@@ -982,7 +971,7 @@ pub async fn admit(
                 .map_or(0, |row| row.submission_generation),
             recovery_checked_at: None,
             first_dispatched_at: None,
-            request_ciphertext: Some(request_ciphertext),
+            request_ciphertext: Some(request_ciphertext.clone()),
             request_context_version: keys.contextual_record_writes().then_some(3),
             created_at: Utc::now(),
             updated_at: Utc::now(),
@@ -990,9 +979,53 @@ pub async fn admit(
         db.collection::<AssistantCmaCreation>(COLLECTION_NAME)
             .create_indexes(indexes())
             .await?;
-        permit.creation = Some(store_creation(&db, &candidate).await?);
+        let sandbox = match existing_parent {
+            Some(parent) => parent,
+            None if new_covered_intent => {
+                sandboxes::begin_creation_with_journal(
+                    &db,
+                    keys,
+                    &permit.gateway,
+                    owner,
+                    idempotency_key,
+                    body,
+                    Some(&journal_for),
+                )
+                .await?
+            }
+            None => {
+                sandboxes::begin_creation(&db, keys, &permit.gateway, owner, idempotency_key, body)
+                    .await?
+            }
+        };
+        if creates_sandbox {
+            require_available_parent(&sandbox)?;
+            if sandbox.cma_sandbox_id.is_some() || !sandbox.occupies_account_slot {
+                return Err(drift());
+            }
+        }
+        let mut candidate = journal_for(&sandbox);
+        let creation = if new_covered_intent {
+            if let Some(saved) = reservation_admin::creation_for_sandbox(&db, &sandbox).await? {
+                same_request(&saved, &candidate)?;
+                saved
+            } else {
+                // A parent left pending by the legacy two-write path keeps
+                // the caller's original upstream key when explicitly retried.
+                if sandbox.submission_state != "pending" {
+                    return Err(drift());
+                }
+                candidate.covered_key = None;
+                store_creation(&db, &candidate).await?
+            }
+        } else {
+            store_creation(&db, &candidate).await?
+        };
+        permit.creation = Some(creation);
+        permit.sandbox = Some(sandbox);
+    } else {
+        permit.sandbox = existing_parent;
     }
-    permit.sandbox = Some(sandbox);
     Ok(permit)
 }
 
@@ -1370,6 +1403,8 @@ impl super::service_dispatch_guard::ServiceDispatchGuard for CmaDispatchPermit {
                     {
                         return Err(error);
                     }
+                // Covered writes settle from the exact CMA outcome. In
+                // particular, a pre-ledger refusal cannot close a covered key.
                 } else if creation.covered_key.is_none()
                     && let Some(change) = creation_refusal(creation, status.as_u16(), &value)
                 {
@@ -1598,10 +1633,10 @@ fn recover_occupied_sandbox<'a>(
             .await?
             .filter(|row| row.covered_key.is_some())
         {
-            reservation_admin::recover_covered(db, gateway, &parent, &covered).await?;
+            let _ = reservation_admin::recover_covered(db, gateway, &parent, &covered).await;
             let current = sandboxes::get_owned(db, owner, &parent.id).await?;
             if current.occupies_account_slot {
-                return Err(recovery_slot_occupied());
+                return Err(sandboxes::occupied(db, &current, RECOVERY_SLOT_OCCUPIED).await);
             }
             return Ok(());
         }

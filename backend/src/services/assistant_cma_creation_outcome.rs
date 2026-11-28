@@ -226,14 +226,7 @@ fn parse(row: &AssistantCmaCreation, id: &Identity<'_>, value: Value) -> CmaResu
             if row.operation_id.is_none()
                 && row.cma_agent_id.is_none()
                 && row.cma_sandbox_id.is_none()
-                && proof_id
-                    == hash_fields(&[
-                        "cma-creation-proof-v1",
-                        &id.digest,
-                        id.epoch,
-                        id.day,
-                        "never_received",
-                    ]) =>
+                && proof_id == never_received_proof(id) =>
         {
             Ok(Evidence::Absent { operation: None })
         }
@@ -246,6 +239,16 @@ fn parse(row: &AssistantCmaCreation, id: &Identity<'_>, value: Value) -> CmaResu
         _ => Err(invalid_reply()),
     }
 }
+fn never_received_proof(id: &Identity<'_>) -> String {
+    hash_fields(&[
+        "cma-creation-proof-v1",
+        &id.digest,
+        id.epoch,
+        id.day,
+        "never_received",
+    ])
+}
+
 pub(crate) async fn lookup(
     gateway: &dyn CmaGateway,
     row: &AssistantCmaCreation,
@@ -268,4 +271,10 @@ pub(crate) async fn lookup(
 pub(super) fn fixture_response(row: &AssistantCmaCreation, result: Value) -> Value {
     let id = identity(row).unwrap();
     serde_json::json!({"version":1,"deployment":row.deployment_fingerprint,"operation":id.operation,"identity_digest":id.digest,"result":result})
+}
+
+#[cfg(test)]
+pub(super) fn fixture_never_received(row: &AssistantCmaCreation) -> Value {
+    let id = identity(row).unwrap();
+    serde_json::json!({"kind":"never_received","proof_id":never_received_proof(&id)})
 }

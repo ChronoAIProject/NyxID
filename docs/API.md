@@ -10232,7 +10232,9 @@ Request ciphertext, request bytes, idempotency keys, and request hashes are omit
 ### POST `/api/v1/admin/cma-sandbox-reservations/{id}/inspect`
 
 No request body. Performs exact owner-authenticated CMA GET observations using
-saved Sandbox, lifecycle operation and Agent identities. Never lists to infer
+saved Sandbox, lifecycle operation and Agent identities. For a covered creation
+it can also query CMA's read-only creation-outcome endpoint using the original
+request identity. Never lists to infer
 absence, replays a creation, or sends a lifecycle mutation. It writes only an
 admin-attributed audit. Sandbox/creation documents, observation timestamps,
 recovery cooldown and revision fences stay unchanged, on success or failure. Response:
@@ -10243,6 +10245,8 @@ contains owner-retry guidance when applicable), where `outcome.kind` is:
 - `proven_absent`: `evidence: "confirmed_not_created"`, the durable non-creation
   state already established by normal admission/recovery. Legacy rows do not
   retain which accepted refusal produced that state; no subtype is invented.
+  `covered_creation_outcome` identifies authoritative evidence for the original
+  covered creation. Release after an inventory check has its own inspection and audit result.
 - `unknown`: a closed `reason`, such as `resource_not_found_without_creation_proof`,
   `idempotency_window_passed`, `creation_dispatch_time_unknown`, `operation_without_resource`,
   `creation_identity_not_observable_without_replay`, or `gateway_unavailable`.
@@ -10313,8 +10317,10 @@ with this diagnostic write. No field is added to existing models.
 An old unknown creation cannot be released on a 404, list omission, timeout or
 elapsed time. CMA must supply durable, owner-authenticated evidence tied to that
 exact creation identity that neither a resource nor a pending creation exists.
-The current read contract cannot supply this proof when every remote receipt is
-missing; inspection reports unknown and leaves the slot held.
+For a covered creation, NyxID can use CMA's terminal refusal or closed-period
+`never_received` result for that exact request. An uncovered creation without
+a remote receipt stays unknown. The separately fenced inventory release has its
+own eligibility checks and records an inventory decision.
 
 ## CMA Sandbox billing producer API
 

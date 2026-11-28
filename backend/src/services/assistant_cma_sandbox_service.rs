@@ -27,9 +27,12 @@ use crate::{
         record_field::{self, RecordContext},
     },
     errors::{AppError, AppResult},
-    models::assistant_cma_sandbox::{
-        AssistantCmaSandbox, COLLECTION_NAME, SandboxAdmissionState, SandboxCapacitySource,
-        SandboxObservationState,
+    models::{
+        assistant_cma_creation::{self, AssistantCmaCreation},
+        assistant_cma_sandbox::{
+            AssistantCmaSandbox, COLLECTION_NAME, SandboxAdmissionState, SandboxCapacitySource,
+            SandboxObservationState,
+        },
     },
 };
 
@@ -49,6 +52,11 @@ fn invalid_request() -> AppError {
 }
 fn stale() -> AppError {
     AppError::Conflict("cma_sandbox_generation_changed".into())
+}
+pub(super) fn covered_creation_settled() -> AppError {
+    AppError::Conflict(
+        "CMA creation has settled; use a new Idempotency-Key for a new creation".into(),
+    )
 }
 const OCCUPIED: &str = "cma_sandbox_account_slot_occupied";
 
@@ -309,7 +317,7 @@ fn same_creation(
 
 /// Reserve before dispatch. This method never sends a remote create request.
 /// The same owner/key/hash returns its original identity. Only an explicit
-/// confirmed-not-created outcome can reacquire local capacity. A retired
+/// confirmed-not-created legacy outcome can reacquire local capacity. A retired
 /// resource can never allocate a replacement. External resources use no slot.
 pub async fn begin_creation(
     db: &Database,
@@ -318,6 +326,29 @@ pub async fn begin_creation(
     owner_id: &str,
     idempotency_key: &str,
     request: &[u8],
+) -> AppResult<AssistantCmaSandbox> {
+    begin_creation_with_journal(
+        db,
+        encryption_keys,
+        gateway,
+        owner_id,
+        idempotency_key,
+        request,
+        None,
+    )
+    .await
+}
+
+type CreationJournal<'a> = dyn Fn(&AssistantCmaSandbox) -> AssistantCmaCreation + Send + Sync + 'a;
+
+pub(super) async fn begin_creation_with_journal(
+    db: &Database,
+    encryption_keys: &EncryptionKeys,
+    gateway: &dyn CmaGateway,
+    owner_id: &str,
+    idempotency_key: &str,
+    request: &[u8],
+    journal_for: Option<&CreationJournal<'_>>,
 ) -> AppResult<AssistantCmaSandbox> {
     validate_idempotency_key(idempotency_key)?;
     let normalized = prepare_creation_request(request)?;
@@ -412,13 +443,31 @@ pub async fn begin_creation(
         filter.insert("request_hash", normalized.hash.clone());
         let mut replacement = bson::to_document(&row).map_err(|_| invalid_request())?;
         replacement.remove("_id");
-        let context = (db.clone(), owner_id.to_owned(), filter, replacement);
+        let context = (db.clone(), previous, filter, replacement);
         match super::transaction_service::run_db_only(
             &db,
             &context,
-            |tx, (db, owner, filter, replacement)| {
+            |tx, (db, previous, filter, replacement)| {
                 Box::pin(async move {
-                    super::erasure_admission::fence_in_session(db, owner, tx).await?;
+                    super::erasure_admission::fence_in_session(db, &previous.user_id, tx).await?;
+                    // Recovery may have closed the key since proxy admission
+                    // read its journal. Check it before reacquiring the slot.
+                    if db
+                        .collection::<Document>(assistant_cma_creation::COLLECTION_NAME)
+                        .find_one(doc! {
+                            "user_id": &previous.user_id,
+                            "sandbox_ref_id": &previous.id,
+                            "sandbox_generation": previous.generation,
+                            "idempotency_key": &previous.idempotency_key,
+                            "covered_key": {"$ne": Bson::Null},
+                        })
+                        .projection(doc! {"_id": 1})
+                        .session(&mut *tx)
+                        .await?
+                        .is_some()
+                    {
+                        return Err(covered_creation_settled());
+                    }
                     Ok(db
                         .collection::<AssistantCmaSandbox>(COLLECTION_NAME)
                         .find_one_and_update(filter.clone(), doc! {"$set":replacement})
@@ -446,8 +495,30 @@ pub async fn begin_creation(
             Err(error) => return Err(error),
         }
     }
-    match super::erasure_admission::insert_owned(&db, COLLECTION_NAME, owner_id, &row).await {
-        Ok(_) => Ok(row),
+    let inserted = if let Some(journal_for) = journal_for {
+        let context = (&db, &row, journal_for(&row));
+        super::transaction_service::run_db_only(&db, &context, |tx, (db, row, journal)| {
+            Box::pin(async move {
+                super::erasure_admission::fence_in_session(db, &row.user_id, tx).await?;
+                db.collection::<AssistantCmaSandbox>(COLLECTION_NAME)
+                    .insert_one(*row)
+                    .session(&mut *tx)
+                    .await?;
+                db.collection::<AssistantCmaCreation>(assistant_cma_creation::COLLECTION_NAME)
+                    .insert_one(journal)
+                    .session(tx)
+                    .await?;
+                Ok(())
+            })
+        })
+        .await
+    } else {
+        super::erasure_admission::insert_owned(&db, COLLECTION_NAME, owner_id, &row)
+            .await
+            .map(|_| ())
+    };
+    match inserted {
+        Ok(()) => Ok(row),
         Err(error) if duplicate_app_key(&error) => {
             if let Some(row) = creation_by_key(&db, owner_id, idempotency_key).await? {
                 same_creation(row, &service_id, &normalized.hash)

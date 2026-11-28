@@ -286,10 +286,16 @@ async fn observe(
     if creation.is_some_and(|c| c.released_by_inventory) {
         return (unknown("released_after_inventory_check"), None);
     }
-    if parent.cma_sandbox_id.is_none() && creation.is_some_and(has_non_creation_proof) {
+    if parent.cma_sandbox_id.is_none()
+        && let Some(creation) = creation.filter(|row| has_non_creation_proof(row))
+    {
         return (
             InspectionOutcome::ProvenAbsent {
-                evidence: "confirmed_not_created",
+                evidence: if creation.covered_key.is_some() {
+                    "covered_creation_outcome"
+                } else {
+                    "confirmed_not_created"
+                },
             },
             None,
         );
@@ -297,7 +303,13 @@ async fn observe(
     if let Some(creation) = creation.filter(|row| row.covered_key.is_some()) {
         use super::assistant_cma_admission::creation_outcome::{self, Evidence};
         match creation_outcome::lookup(gateway, creation).await {
-            Ok(Evidence::Absent { .. }) if parent.cma_sandbox_id.is_none() => {
+            Ok(Evidence::Absent { operation })
+                if parent.cma_sandbox_id.is_none()
+                    && parent
+                        .operation_id
+                        .as_deref()
+                        .is_none_or(|id| Some(id) == operation.as_deref()) =>
+            {
                 return (
                     InspectionOutcome::ProvenAbsent {
                         evidence: "covered_creation_outcome",
@@ -329,7 +341,9 @@ async fn observe(
             Ok(Evidence::Progress { operation: None }) if creation.operation_id.is_none() => {
                 return (unknown("covered_creation_in_progress"), None);
             }
-            Ok(Evidence::Unknown) => return (unknown("covered_creation_outcome_unknown"), None),
+            Ok(Evidence::Unknown | Evidence::Absent { .. }) => {
+                return (unknown("covered_creation_outcome_unknown"), None);
+            }
             Err(error) => return (unknown_reason(error), None),
             _ => {}
         }

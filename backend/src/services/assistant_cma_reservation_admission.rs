@@ -333,22 +333,27 @@ pub(crate) async fn recover_covered(
                 .collection::<AssistantCmaCreation>(COLLECTION_NAME)
                 .find_one(creation_filter(creation))
                 .await?;
-            if observed.generation == parent.generation
-                && saved.as_ref().is_some_and(|row| {
-                    row.revision > creation.revision
-                        && row.operation_id == expected_operation
-                        && ((reason == "creation_in_progress"
-                            && observed.occupies_account_slot
-                            && observed.operation_id == expected_operation)
-                            || (reason == "creation_confirmed_not_created"
-                                && row.submission_state == "confirmed_not_created"
-                                && !observed.occupies_account_slot)
-                            || (reason == "creation_confirmed"
-                                && row.cma_sandbox_id.is_some()
-                                && row.cma_sandbox_id == expected_sandbox
-                                && row.cma_sandbox_id == observed.cma_sandbox_id))
-                })
-            {
+            if saved.as_ref().is_some_and(|row| {
+                require_parent(row, &observed).is_ok()
+                    && observed.idempotency_key.as_deref() == Some(&row.idempotency_key)
+                    && observed.request_hash.as_deref() == Some(&row.request_hash)
+                    && !row.released_by_inventory
+                    && row.revision > creation.revision
+                    && row.operation_id == expected_operation
+                    && observed.operation_id == expected_operation
+                    && ((reason == "creation_in_progress" && observed.occupies_account_slot)
+                        || (reason == "creation_confirmed_not_created"
+                            && row.submission_state == "confirmed_not_created"
+                            && observed.submission_state == "confirmed_not_created"
+                            && row.cma_agent_id.is_none()
+                            && row.cma_sandbox_id.is_none()
+                            && observed.cma_sandbox_id.is_none()
+                            && !observed.occupies_account_slot)
+                        || (reason == "creation_confirmed"
+                            && row.cma_sandbox_id.is_some()
+                            && row.cma_sandbox_id == expected_sandbox
+                            && row.cma_sandbox_id == observed.cma_sandbox_id))
+            }) {
                 Ok(reason)
             } else {
                 Err(error)
