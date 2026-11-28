@@ -6,7 +6,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "@/lib/api-client";
 import type { KeyInfo } from "@/types/keys";
 import { useAuthStore } from "@/stores/auth-store";
-import type { User } from "@/types/api";
+import type { ApiKey, User } from "@/types/api";
 import type { OwnershipResource } from "@/types/ownership-transfers";
 import { appI18n } from "@/i18n";
 
@@ -36,6 +36,7 @@ const {
     updateExternalApiKey: vi.fn(),
     updateUserService: vi.fn(),
     catalogEntry: undefined as unknown,
+    apiKeys: [] as ApiKey[],
     nodes: [] as { id: string; name: string }[],
   };
   return {
@@ -122,7 +123,7 @@ vi.mock("@/hooks/use-nodes", () => ({
 // the "Create your first Agent Key →" affordance and tests stay focused
 // on the page-level behavior.
 vi.mock("@/hooks/use-api-keys", () => ({
-  useApiKeys: () => ({ data: [], isLoading: false }),
+  useApiKeys: () => ({ data: hooks.apiKeys, isLoading: false }),
 }));
 
 // `useBreadcrumbLabel` lives in the dashboard layout module, which pulls in
@@ -249,8 +250,33 @@ beforeEach(() => {
     refetch: vi.fn(),
   };
   hooks.catalogEntry = undefined;
+  hooks.apiKeys = [];
   hooks.nodes = [];
   mockCopyToClipboard.mockResolvedValue(undefined);
+});
+
+it.each([
+  ["api-github", "api-github"],
+  ["api-github-2", "api-github"],
+  ["api-github-pat-3", "api-github-pat"],
+  ["my-github", "api-github"],
+])("copies a read-only GitHub recipe on the actual connection %s", async (slug, catalogSlug) => {
+  hooks.key.data = makeKey({ slug, catalog_service_slug: catalogSlug, label: "GitHub", endpoint_url: "https://api.github.com" });
+  hooks.apiKeys = [{ id: "ak-1", name: "My Agent", key_prefix: "nyxid_ag_preview", is_active: true }] as ApiKey[];
+  render(<KeyDetailPage />);
+  const example = await waitFor(() => {
+    const pre = Array.from(document.querySelectorAll("pre")).find((element) => element.textContent?.includes("X-API-Key: nyxid_ag_preview"));
+    expect(pre).toBeDefined();
+    return pre!;
+  });
+  const command = example.textContent ?? "";
+  expect(command).toContain(`${window.location.origin}/api/v1/proxy/s/${slug}/user`);
+  expect(command).toContain("nyxid_ag_preview••••••••");
+  expect(command).not.toMatch(/POST|chat\/completions|messages|gpt-4o| -d /);
+  expect(screen.getByText(/replace the masked preview or nyx_\.\.\. placeholder/)).toBeInTheDocument();
+  await userEvent.click(example.parentElement!.querySelector("button")!);
+  expect(mockCopyToClipboard).toHaveBeenCalledWith(command);
+  expect(document.body.textContent).not.toContain("chat/completions");
 });
 
 it("opens a linked credential subsection and updates the URL when switching tabs", async () => {

@@ -5,8 +5,13 @@ import type { ComponentProps } from "react";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
 import type { ApiKeyCreateResponse } from "@/types/api";
 import { ConnectVerifyStep, type CreatedKey } from "./connect-verify-step";
+import { act, renderHook } from "@testing-library/react";
+import { useAuthStore } from "@/stores/auth-store";
+import type { User } from "@/types/api";
 import {
   FIRST_PROXY_CALL_SUCCEEDED_EVENT,
+  FIRST_PROXY_CALL_SUCCEEDED_KEY,
+  useProxyOnboarding,
   VERIFY_KEY_LOADING_END_EVENT,
   VERIFY_KEY_LOADING_START_EVENT,
 } from "@/hooks/use-proxy-onboarding";
@@ -111,6 +116,8 @@ async function mintKey(user: ReturnType<typeof userEvent.setup>) {
 beforeEach(() => {
   vi.clearAllMocks();
   vi.spyOn(window, "fetch").mockReset();
+  localStorage.clear();
+  useAuthStore.setState({ user: { id: "user-a" } as User, isAuthenticated: true });
 });
 
 describe("ConnectVerifyStep — initial phase (connected)", () => {
@@ -243,6 +250,7 @@ describe("ConnectVerifyStep — probe (downstream OK)", () => {
       expect(screen.getByText(/End-to-end verified/i)).toBeInTheDocument(),
     );
     expect(succeededSpy).toHaveBeenCalledTimes(1);
+    expect(localStorage.getItem(`${FIRST_PROXY_CALL_SUCCEEDED_KEY}:user-a`)).toBe("1");
     expect(screen.getByRole("button", { name: /^Done$/i })).toBeEnabled();
 
     window.removeEventListener(FIRST_PROXY_CALL_SUCCEEDED_EVENT, succeededSpy);
@@ -250,7 +258,7 @@ describe("ConnectVerifyStep — probe (downstream OK)", () => {
 });
 
 describe("ConnectVerifyStep — probe (agent key VALID despite downstream failure)", () => {
-  it("NEW SEMANTICS: 401 WITH agent-id header → agent key valid, warn tone, still fires success event", async () => {
+  it("401 WITH agent-id header retains key evidence and offers retry without activation", async () => {
     // This is the case the OLD probe got wrong: telegram-bot,
     // openclaw, and any service where a 4xx from downstream doesn't
     // mean the Agent Key is broken. The header proves NyxID accepted
@@ -280,7 +288,7 @@ describe("ConnectVerifyStep — probe (agent key VALID despite downstream failur
     // the dashboard "first proxy call succeeded" checklist on that.
     // Matches the VerifyKeyCard twin-probe's stricter semantic.
     expect(succeededSpy).not.toHaveBeenCalled();
-    // Done, not Retry — because the key IS valid.
+    expect(screen.getByRole("button", { name: /Retry test/i })).toBeEnabled();
     expect(screen.getByRole("button", { name: /^Done$/i })).toBeEnabled();
 
     window.removeEventListener(FIRST_PROXY_CALL_SUCCEEDED_EVENT, succeededSpy);
@@ -301,6 +309,41 @@ describe("ConnectVerifyStep — probe (agent key VALID despite downstream failur
     );
     expect(screen.getByRole("button", { name: /^Done$/i })).toBeEnabled();
   });
+});
+
+it("records a late inline success for its initiating user after unmount and account switch", async () => {
+  let resolveProbe!: (response: Response) => void;
+  const pending = new Promise<Response>((resolve) => { resolveProbe = resolve; });
+  vi.spyOn(window, "fetch").mockReturnValue(pending);
+  const user = userEvent.setup();
+  const view = renderStep();
+  await mintKey(user);
+  await user.click(screen.getByRole("button", { name: /Test Agent Key/i }));
+  view.unmount();
+  useAuthStore.setState({ user: { id: "user-b" } as User, isAuthenticated: true });
+  const { result } = renderHook(useProxyOnboarding);
+  await act(async () => { resolveProbe(proxied(200)); await pending; });
+  expect(localStorage.getItem(`${FIRST_PROXY_CALL_SUCCEEDED_KEY}:user-a`)).toBe("1");
+  expect(localStorage.getItem(`${FIRST_PROXY_CALL_SUCCEEDED_KEY}:user-b`)).toBeNull();
+  expect(result.current.firstProxyCallSucceeded).toBe(false);
+});
+
+it("recognizes pending authentication, retains the minted key and retries the real connection", async () => {
+  const fetch = vi.spyOn(window, "fetch")
+    .mockResolvedValueOnce(Response.json({ error: "bad_request", error_code: 1000, message: "Bad request: API key is pending_auth" }, { status: 400 }))
+    .mockResolvedValueOnce(proxied(200));
+  const user = userEvent.setup();
+  renderStep({ createdKey: { ...CREATED_KEY, slug: "api-github-2", completionMode: "oauth" } });
+  await mintKey(user);
+  await user.click(screen.getByRole("button", { name: /Test Agent Key/i }));
+  expect(await screen.findByText(/choose Continue authentication/)).toBeInTheDocument();
+  expect(localStorage.getItem(`${FIRST_PROXY_CALL_SUCCEEDED_KEY}:user-a`)).toBeNull();
+  await user.click(screen.getByRole("button", { name: /Retry test/i }));
+  expect(await screen.findByText(/End-to-end verified/)).toBeInTheDocument();
+  expect(createApiKeyMutate).toHaveBeenCalledTimes(1);
+  expect(fetch.mock.calls.map(([url]) => url)).toEqual([
+    "/api/v1/proxy/s/api-github-2/user", "/api/v1/proxy/s/api-github-2/user",
+  ]);
 });
 
 describe("ConnectVerifyStep — probe (agent key INVALID: NyxID-layer rejection)", () => {
