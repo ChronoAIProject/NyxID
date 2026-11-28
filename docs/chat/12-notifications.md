@@ -299,7 +299,8 @@ action also remains available below matching results while older pages exist.
 An empty search result is final only after the server's cursor is exhausted.
 Searching and opening Notification options do not mark rows read. The mark-all
 menu action retains the global `as_of` fence and is disabled while offline,
-pending, or when there is nothing unread.
+pending, or when there is nothing unread. On Android the **Notification options**
+button itself is disabled whenever **Mark all as read** is unavailable.
 
 The existing owner live stream emits identifiers only:
 

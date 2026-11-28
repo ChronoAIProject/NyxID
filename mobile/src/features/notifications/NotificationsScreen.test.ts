@@ -47,6 +47,7 @@ function setup(options: {
   const pushed: unknown[] = [];
   const filters: NotificationFilter[] = [];
   const fetched: string[] = [];
+  const alerts: { text: string; onPress?: () => void }[][] = [];
   let headerOptions: any;
   let sheet: { options: any; select: (index: number) => void } | undefined;
   let epoch = 1;
@@ -58,6 +59,7 @@ function setup(options: {
       jsxs: (type: unknown, props: unknown) => ({ type, props }),
     },
     "react-native": {
+      Alert: { alert: (_title: string, _message: undefined, buttons: typeof alerts[number]) => alerts.push(buttons) },
       ActionSheetIOS: { showActionSheetWithOptions: (options: any, select: (index: number) => void) => { sheet = { options, select }; } },
       Platform: { OS: options.platform ?? "ios" },
       Keyboard: { dismiss() {} },
@@ -145,7 +147,7 @@ function setup(options: {
       cancel: () => current.select(1),
     };
   };
-  return { h, module, all, list, renderedRows, reads, opened, pushed, filters, fetched, menuReadAction, optionsButton, options, changeEpoch: () => { epoch++; } };
+  return { h, module, all, list, renderedRows, reads, opened, pushed, filters, fetched, alerts, menuReadAction, optionsButton, options, changeEpoch: () => { epoch++; } };
 
 }
 
@@ -436,6 +438,35 @@ test("Android filters expose the server summary counts with their labels", () =>
     { id: "automations", label: "Automations", count: 46, accessibilityLabel: "Automations, 46" },
     { id: "chats", label: "Chats", count: 6, accessibilityLabel: "Chats, 6" },
   ]);
+  x.h.unmount();
+});
+
+test("Android notification options open only while mark-all is available", () => {
+  const x = setup({
+    platform: "android",
+    pages: [{ items: [], as_of: AS_OF, next_cursor: null }],
+    summary: { unread_count: 0 },
+  });
+  const openOptions = x.optionsButton().props.onPress;
+  assert.equal(x.optionsButton().props.disabled, true);
+  openOptions();
+  assert.equal(x.alerts.length, 0);
+
+  x.options.summary = { unread_count: 2 };
+  x.h.render();
+  assert.equal(x.optionsButton().props.disabled, false, "only the global unread count matters");
+  openOptions();
+  assert.equal(x.alerts.length, 1);
+  const buttons = x.alerts[0]!;
+  assert.deepEqual(Array.from(buttons, button => button.text), ["Mark all as read", "Cancel"]);
+  buttons[0]!.onPress!();
+  assert.deepEqual(JSON.parse(JSON.stringify(x.reads)), [{ all: true, before: AS_OF }]);
+
+  x.options.summary = { unread_count: 0 };
+  x.h.render();
+  assert.equal(x.optionsButton().props.disabled, true);
+  openOptions();
+  assert.equal(x.alerts.length, 1, "a delayed press cannot open an empty menu");
   x.h.unmount();
 });
 

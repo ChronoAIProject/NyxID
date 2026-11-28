@@ -1,7 +1,7 @@
 import { AttachmentSourcePicker } from "./AttachmentSourcePicker";
 import { localizedError } from "../../i18n/localizedError";
 import { useLocalizedState } from "../../i18n/useLocalizedState";
-import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { AssistantRightPanel } from "./AssistantRightPanel";
 import {
   RightPanelProvider,
@@ -2433,7 +2433,8 @@ function Sheet({
       onRequestClose={onClose}
       onDismiss={onDismiss}
     >
-      <View
+      <SafeAreaView
+        edges={Platform.OS === "android" ? ["top"] : []}
         style={[
           styles.sheet,
           {
@@ -2473,7 +2474,7 @@ function Sheet({
         ) : (
           <View style={styles.fill}>{children}</View>
         )}
-      </View>
+      </SafeAreaView>
     </Modal>
   );
 }

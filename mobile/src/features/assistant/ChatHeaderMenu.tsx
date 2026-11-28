@@ -21,7 +21,7 @@ import {
   useWindowDimensions,
 } from "react-native";
 import type { LucideIcon } from "lucide-react-native";
-import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { FloatingCapsule } from "../../components/FloatingControl";
 import { FLOATING_CONTROL_SIZE } from "../../components/floatingControlTokens";
 import { FLOATING_SURFACE_SHADOW } from "../../components/workspace/workspaceFloatingSurface";
@@ -272,127 +272,132 @@ export function ChatHeaderMenu({
         }}
       >
         {menu ? (
-          <View
+          <SafeAreaView
+            edges={Platform.OS === "android" ? ["top"] : []}
             style={styles.overlay}
-            accessibilityViewIsModal
-            onAccessibilityEscape={() => closeMenu()}
-            onLayout={({ nativeEvent }) =>
-              setOverlayHeight(nativeEvent.layout.height)
-            }
           >
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel={t("Close menu")}
-              style={StyleSheet.absoluteFill}
-              onPress={() => closeMenu()}
-            />
-            <Animated.View
-              testID="chat-header-menu"
-              accessibilityRole="menu"
+            <View
+              style={styles.overlay}
+              accessibilityViewIsModal
               onAccessibilityEscape={() => closeMenu()}
-              style={[
-                styles.menu,
-                mode === "light" && FLOATING_SURFACE_SHADOW,
-                {
-                  backgroundColor: colors.menuFill,
-                  borderColor: colors.border,
-                  shadowColor: colors.shadowColor,
-                  top: menu.top,
-                  right: menu.right,
-                  width: progress.interpolate({
-                    inputRange: [0, 1],
-                    outputRange: [menu.width, menuWidth],
-                  }),
-                  height: progress.interpolate({
-                    inputRange: [0, 1],
-                    outputRange: [menu.height, menuHeight],
-                  }),
-                },
-              ]}
+              onLayout={({ nativeEvent }) =>
+                setOverlayHeight(nativeEvent.layout.height)
+              }
             >
-              <FloatingCapsule style={styles.surface}>
-                <Animated.View
-                  pointerEvents="none"
-                  accessibilityElementsHidden
-                  importantForAccessibility="no-hide-descendants"
-                  style={[
-                    styles.source,
-                    {
-                      width: menu.width,
-                      height: menu.height,
-                      opacity: progress.interpolate({
-                        inputRange: [0, 1],
-                        outputRange: [1, 0],
-                      }),
-                    },
-                  ]}
-                >
-                  {controls(() => {}, null)}
-                </Animated.View>
-                <Animated.View
-                  style={[
-                    styles.options,
-                    {
-                      width: menuWidth,
-                      height: menuHeight,
-                      opacity: progress.interpolate({
-                        inputRange: [0, 0.3, 1],
-                        outputRange: [0, 0, 1],
-                      }),
-                    },
-                  ]}
-                >
-                  <ScrollView
-                    bounces={false}
-                    showsVerticalScrollIndicator={false}
-                    onContentSizeChange={(_width, measuredHeight) =>
-                      setContentHeight(measuredHeight)
-                    }
-                    keyboardShouldPersistTaps="always"
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={t("Close menu")}
+                style={StyleSheet.absoluteFill}
+                onPress={() => closeMenu()}
+              />
+              <Animated.View
+                testID="chat-header-menu"
+                accessibilityRole="menu"
+                onAccessibilityEscape={() => closeMenu()}
+                style={[
+                  styles.menu,
+                  mode === "light" && FLOATING_SURFACE_SHADOW,
+                  {
+                    backgroundColor: colors.menuFill,
+                    borderColor: colors.border,
+                    shadowColor: colors.shadowColor,
+                    top: menu.top,
+                    right: menu.right,
+                    width: progress.interpolate({
+                      inputRange: [0, 1],
+                      outputRange: [menu.width, menuWidth],
+                    }),
+                    height: progress.interpolate({
+                      inputRange: [0, 1],
+                      outputRange: [menu.height, menuHeight],
+                    }),
+                  },
+                ]}
+              >
+                <FloatingCapsule style={styles.surface}>
+                  <Animated.View
+                    pointerEvents="none"
+                    accessibilityElementsHidden
+                    importantForAccessibility="no-hide-descendants"
+                    style={[
+                      styles.source,
+                      {
+                        width: menu.width,
+                        height: menu.height,
+                        opacity: progress.interpolate({
+                          inputRange: [0, 1],
+                          outputRange: [1, 0],
+                        }),
+                      },
+                    ]}
                   >
-                    {options.map((option, index) => (
-                      <Pressable
-                        key={option.id}
-                        ref={index === 0 ? firstOption : undefined}
-                        accessibilityRole="menuitem"
-                        accessibilityLabel={
-                          option.accessibilityLabel ?? option.label
-                        }
-                        disabled={option.disabled}
-                        accessibilityState={{ disabled: !!option.disabled }}
-                        onAccessibilityEscape={() => closeMenu()}
-                        onPress={() => closeMenu(option.id)}
-                        style={({ pressed }) => [
-                          styles.row,
-                          index > 0 && {
-                            borderTopWidth: StyleSheet.hairlineWidth,
-                            borderTopColor: colors.borderSoft,
-                          },
-                          pressed && { backgroundColor: colors.navActive },
-                          option.disabled && styles.disabled,
-                        ]}
-                      >
-                        <option.Icon size={19} color={colors.textPrimary} />
-                        <Text
-                          style={[styles.label, { color: colors.textPrimary }]}
+                    {controls(() => {}, null)}
+                  </Animated.View>
+                  <Animated.View
+                    style={[
+                      styles.options,
+                      {
+                        width: menuWidth,
+                        height: menuHeight,
+                        opacity: progress.interpolate({
+                          inputRange: [0, 0.3, 1],
+                          outputRange: [0, 0, 1],
+                        }),
+                      },
+                    ]}
+                  >
+                    <ScrollView
+                      bounces={false}
+                      showsVerticalScrollIndicator={false}
+                      onContentSizeChange={(_width, measuredHeight) =>
+                        setContentHeight(measuredHeight)
+                      }
+                      keyboardShouldPersistTaps="always"
+                    >
+                      {options.map((option, index) => (
+                        <Pressable
+                          key={option.id}
+                          ref={index === 0 ? firstOption : undefined}
+                          accessibilityRole="menuitem"
+                          accessibilityLabel={
+                            option.accessibilityLabel ?? option.label
+                          }
+                          disabled={option.disabled}
+                          accessibilityState={{ disabled: !!option.disabled }}
+                          onAccessibilityEscape={() => closeMenu()}
+                          onPress={() => closeMenu(option.id)}
+                          style={({ pressed }) => [
+                            styles.row,
+                            index > 0 && {
+                              borderTopWidth: StyleSheet.hairlineWidth,
+                              borderTopColor: colors.borderSoft,
+                            },
+                            pressed && { backgroundColor: colors.navActive },
+                            option.disabled && styles.disabled,
+                          ]}
                         >
-                          {option.label}
-                        </Text>
-                        {option.badge ? (
+                          <option.Icon size={19} color={colors.textPrimary} />
                           <Text
-                            numberOfLines={1}
-                            style={[styles.badge, { color: option.badgeColor }]}
+                            style={[styles.label, { color: colors.textPrimary }]}
                           >
-                            {option.badge}
+                            {option.label}
                           </Text>
-                        ) : null}
-                      </Pressable>
-                    ))}
-                  </ScrollView>
-                </Animated.View>
-              </FloatingCapsule>
-            </Animated.View>
-          </View>
+                          {option.badge ? (
+                            <Text
+                              numberOfLines={1}
+                              style={[styles.badge, { color: option.badgeColor }]}
+                            >
+                              {option.badge}
+                            </Text>
+                          ) : null}
+                        </Pressable>
+                      ))}
+                    </ScrollView>
+                  </Animated.View>
+                </FloatingCapsule>
+              </Animated.View>
+            </View>
+          </SafeAreaView>
         ) : null}
       </Modal>
     </>

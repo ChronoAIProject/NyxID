@@ -513,6 +513,8 @@ The mobile interface localizes the exact default “New conversation” title fo
 provisional drafts with zero messages. It preserves titles from sent messages,
 users, providers and legacy or generated rows. Agent
 profile status, approval policy and credit units use the selected app language.
+Saved connector details also localize their tabs and the explanation of what
+happens when a connection is removed.
 Unknown server diagnostics retain the server text. Messages, names, provider voice labels, URLs,
 credentials and protocol values are preserved. Legal content stays in its
 authored language. App language does not change dictation recognition or the
