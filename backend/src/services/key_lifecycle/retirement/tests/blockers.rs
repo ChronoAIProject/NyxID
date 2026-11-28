@@ -108,7 +108,7 @@ async fn environmental_blockers_are_independent_of_release_certification() {
             .unwrap();
         assert!(reasons(&db, &f).await.contains("restore_required"));
         assert!(
-            step(&db, &f.config, &f.actor, &f.request, &CertifiedRelease)
+            step(&db, &f.config, &f.actor, &f.request, &CertifiedRelease::Rehearsal)
                 .await
                 .is_err()
         );
@@ -172,7 +172,7 @@ async fn old_binary_cannot_admit_the_survivor_before_or_after_publication() {
         probe(&db, false, false).await;
         for _ in 0..5 {
             f.request.expected_step_revision =
-                step(&db, &f.config, &f.actor, &f.request, &CertifiedRelease)
+                step(&db, &f.config, &f.actor, &f.request, &CertifiedRelease::Rehearsal)
                     .await
                     .unwrap()
                     .revision;
@@ -215,7 +215,7 @@ async fn legacy_plaintext_unresolved_values_and_old_envelopes_block_the_marker()
         for (case, reason) in [("plaintext","legacy_reader_required"),("malformed","unresolved_rows"),("previous","unresolved_rows")] {
             let db=connect_transaction_test_database("retire_material").await;
             let mut f=fixture(&db).await;
-            let work=step(&db,&f.config,&f.actor,&f.request,&CertifiedRelease);
+            let work=step(&db,&f.config,&f.actor,&f.request,&CertifiedRelease::Rehearsal);
             resume_after("retirement_claimed",work,async {
                 match case {
                     "plaintext" => {
@@ -233,7 +233,7 @@ async fn legacy_plaintext_unresolved_values_and_old_envelopes_block_the_marker()
                 }
             }).await;
             f.request.expected_step_revision+=1;
-            let failure=step(&db,&f.config,&f.actor,&f.request,&CertifiedRelease).await.err().unwrap();
+            let failure=step(&db,&f.config,&f.actor,&f.request,&CertifiedRelease::Rehearsal).await.err().unwrap();
             assert!(failure.to_string().contains(reason),"{case}: {failure}");
             assert!(!head(&db).await.contains_key("published_retirement"));
             db.drop().await.unwrap();
@@ -314,7 +314,7 @@ async fn dated_nonzero_retiring_bucket_blocks_an_otherwise_current_decision() {
         f.request.expected_step_revision = revision;
         f.request.report_revision = result.report_revision.unwrap();
         assert!(
-            step(&db, &f.config, &f.actor, &f.request, &CertifiedRelease)
+            step(&db, &f.config, &f.actor, &f.request, &CertifiedRelease::Rehearsal)
                 .await
                 .is_err()
         );

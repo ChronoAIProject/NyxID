@@ -57,7 +57,7 @@ async fn fixture(db: &Database) -> Fixture {
         .insert_one(doc! {"_id":"native-entry-v2","state":"ready","schema_version":2})
         .await
         .unwrap();
-    fleet::observe_retirement_test_replica(db, cohort(&receipt.scope)).await;
+    fleet::observe_retirement_test_replica(db, layout_cohort(&head(db).await).await.unwrap()).await;
     db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
         .insert_one(crate::test_utils::test_user(
             &actor.user_id,
@@ -167,9 +167,9 @@ async fn witnessed_consumption_replay_and_exact_survivor_admission() {
         for phase in [Phase::Decision,Phase::Approved,Phase::Consume,Phase::Consumed,Phase::Published]{
             let dual_ticket = admit_enrolled(&db,&db,&f.config,f.request.expected_step_revision,"release-9").await.unwrap();
             assert!(admit_enrolled(&db,&db,&survivor,f.request.expected_step_revision,"release-9").await.is_err());
-            let progress=step(&db,&f.config,&f.actor,&f.request,&CertifiedRelease).await.unwrap();
+            let progress=step(&db,&f.config,&f.actor,&f.request,&CertifiedRelease::Rehearsal).await.unwrap();
             assert_eq!(progress.phase,phase);
-            let replay=step(&db,&f.config,&f.actor,&f.request,&CertifiedRelease).await.unwrap();
+            let replay=step(&db,&f.config,&f.actor,&f.request,&CertifiedRelease::Rehearsal).await.unwrap();
             assert_eq!((replay.phase,replay.revision),(phase,progress.revision));
             let row=head(&db).await;
             assert_eq!(row.contains_key("published_retirement"),phase==Phase::Published);
@@ -267,7 +267,7 @@ async fn each_evidence_class_and_immutable_partition_is_required_at_consumption(
                 BTreeSet::from([LOAD_BLOCKER, "census_evidence_unavailable"])
             );
             assert!(
-                step(&db, &f.config, &f.actor, &f.request, &CertifiedRelease)
+                step(&db, &f.config, &f.actor, &f.request, &CertifiedRelease::Rehearsal)
                     .await
                     .is_err()
             );
@@ -278,7 +278,7 @@ async fn each_evidence_class_and_immutable_partition_is_required_at_consumption(
                 .unwrap();
         }
         let mut request = f.request;
-        let first = step(&db, &f.config, &f.actor, &request, &CertifiedRelease)
+        let first = step(&db, &f.config, &f.actor, &request, &CertifiedRelease::Rehearsal)
             .await
             .unwrap();
         request.expected_step_revision = first.revision;
@@ -299,7 +299,7 @@ async fn each_evidence_class_and_immutable_partition_is_required_at_consumption(
         .await
         .unwrap();
         assert!(
-            step(&db, &f.config, &f.actor, &request, &CertifiedRelease)
+            step(&db, &f.config, &f.actor, &request, &CertifiedRelease::Rehearsal)
                 .await
                 .is_err()
         );
@@ -325,7 +325,7 @@ async fn lease_loss_at_every_transition_and_response_loss_after_every_commit() {
         let mut f=fixture(&db).await;
         for phase in [Phase::Decision,Phase::Approved,Phase::Consume,Phase::Consumed,Phase::Published] {
             let previous=f.request.expected_step_revision;
-            let outcome=async {assert!(step(&db,&f.config,&f.actor,&f.request,&CertifiedRelease).await.is_err());};
+            let outcome=async {assert!(step(&db,&f.config,&f.actor,&f.request,&CertifiedRelease::Rehearsal).await.is_err());};
             resume_after("retirement_claimed",outcome,async {
                 let changed=db.collection::<Document>(report::REPORTS).update_one(
                     doc!{"_id":&f.request.target.generation,"claim":{"$exists":true}},
@@ -333,8 +333,8 @@ async fn lease_loss_at_every_transition_and_response_loss_after_every_commit() {
                 assert_eq!(changed.modified_count,1);
             }).await;
             assert_eq!(head(&db).await.get_i64("revision"),Ok(previous));
-            drop_after("retirement_committed",step(&db,&f.config,&f.actor,&f.request,&CertifiedRelease)).await;
-            let recovered=step(&db,&f.config,&f.actor,&f.request,&CertifiedRelease).await.unwrap();
+            drop_after("retirement_committed",step(&db,&f.config,&f.actor,&f.request,&CertifiedRelease::Rehearsal)).await;
+            let recovered=step(&db,&f.config,&f.actor,&f.request,&CertifiedRelease::Rehearsal).await.unwrap();
             assert_eq!(recovered.phase,phase);
             assert_eq!(recovered.revision,previous+1);
             f.request.expected_step_revision=recovered.revision;
@@ -384,7 +384,7 @@ async fn stale_source_copy_and_current_writes_across_all_markers() {
             Phase::Published,
         ] {
             let work = async {
-                let result = step(&db, &f.config, &f.actor, &f.request, &CertifiedRelease)
+                let result = step(&db, &f.config, &f.actor, &f.request, &CertifiedRelease::Rehearsal)
                     .await
                     .unwrap();
                 assert_eq!(result.phase, phase);
