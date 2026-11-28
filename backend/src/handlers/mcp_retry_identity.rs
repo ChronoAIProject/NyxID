@@ -60,7 +60,7 @@ pub(super) fn digest(params: &Value) -> String {
     )
 }
 
-pub(super) fn provider_name(params: &Value) -> Option<&str> {
+fn business_name(params: &Value) -> Option<&str> {
     let name = params["name"].as_str()?;
     let name = if name == "nyx__call_tool" {
         params["arguments"]["tool_name"]
@@ -69,7 +69,48 @@ pub(super) fn provider_name(params: &Value) -> Option<&str> {
     } else {
         name
     };
+    Some(name)
+}
+
+pub(super) fn provider_name(params: &Value) -> Option<&str> {
+    let name = business_name(params)?;
     (!super::native_activity_names().contains(name)).then_some(name)
+}
+
+/// Preserve the base reader's normalized native evidence for every accepted
+/// wrapper. Older readers consume retry_identity, not the additive v2 field.
+pub(super) fn legacy_writer_digest(params: &Value) -> String {
+    if matches!(
+        business_name(params),
+        Some("nyxid__create_schedule" | "nyxid__remember")
+    ) && let Some(call) = business_call(params)
+    {
+        return super::legacy_chat_retry_digest(&call);
+    }
+    super::legacy_chat_retry_digest(params)
+}
+
+/// Historical generic labels cannot distinguish native writes either. Only
+/// established native reads avoid that ambiguity gate; provider calls retain
+/// their canonical name regardless of slug prefix or guessed HTTP semantics.
+pub(super) fn review_tool(params: &Value) -> Option<&str> {
+    if let Some(name) = provider_name(params) {
+        return Some(name);
+    }
+    let name = business_name(params)?;
+    let decoded;
+    let args = if params["name"] == "nyx__call_tool" {
+        decoded = match decode_arguments(&params["arguments"]) {
+            Ok(args) => args,
+            Err(_) => return Some(name),
+        };
+        &decoded
+    } else {
+        &params["arguments"]
+    };
+    (crate::services::assistant_acknowledgement_service::known_action_class(name, args)
+        != Some(crate::services::assistant_acknowledgement_service::OwnerActionClass::Read))
+    .then_some(name)
 }
 
 /// Old persisted activities retain their exact digests. Match the supplied form
@@ -122,6 +163,34 @@ pub(super) fn matching_digests(params: &Value) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retry_historical_review_exceptions_require_closed_reads() {
+        for name in [
+            "nyxid__run_schedule_now",
+            "nyxid__remember",
+            "nyxid__future_write",
+            "nyx-provider__read",
+        ] {
+            assert_eq!(
+                review_tool(&json!({"name":name,"arguments":{}})),
+                Some(name)
+            );
+            assert_eq!(
+                review_tool(&json!({"name":"nyx__call_tool","arguments":{
+                "tool_name":name,"arguments_json":"{malformed"}})),
+                Some(name)
+            );
+        }
+        for name in ["nyxid__list_schedules", "nyxid__get_agent_skills"] {
+            assert_eq!(review_tool(&json!({"name":name,"arguments":{}})), None);
+            assert_eq!(
+                review_tool(&json!({"name":"nyx__call_tool","arguments":{
+                "tool_name":name,"arguments":{}}})),
+                None
+            );
+        }
+    }
 
     #[test]
     fn retry_provider_identity_decoding_preserves_business_semantics() {

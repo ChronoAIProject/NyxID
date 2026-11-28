@@ -7072,9 +7072,20 @@ pub async fn activity_started_with_digest(
     label: &str,
     digest: Option<&str>,
 ) -> AppResult<Option<String>> {
-    activity_started_with_identity(db, user_id, conversation_id, turn_id, label, digest, None).await
+    activity_started_with_identity(
+        db,
+        user_id,
+        conversation_id,
+        turn_id,
+        label,
+        digest,
+        None,
+        None,
+    )
+    .await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn activity_started_with_identity(
     db: &Database,
     user_id: &str,
@@ -7083,6 +7094,7 @@ pub async fn activity_started_with_identity(
     label: &str,
     digest: Option<&str>,
     retry_identity: Option<&str>,
+    business_identity: Option<&str>,
 ) -> AppResult<Option<String>> {
     let id = Uuid::new_v4().to_string();
     let label = if label
@@ -7099,6 +7111,7 @@ pub async fn activity_started_with_identity(
         "label": label,
         "digest": digest,
         "retry_identity": retry_identity,
+        "business_identity": business_identity,
         "status": "running",
         "started_at": bson::DateTime::now(),
         "ended_at": bson::Bson::Null,
@@ -7149,6 +7162,8 @@ struct RetryActivityEvidence {
     digest: Option<String>,
     #[serde(default)]
     retry_identity: Option<String>,
+    #[serde(default)]
+    business_identity: Option<String>,
     status: String,
 }
 
@@ -7189,6 +7204,7 @@ impl From<&AssistantMessage> for RetryEvidence {
                     label: a.label.clone(),
                     digest: a.digest.clone(),
                     retry_identity: a.retry_identity.clone(),
+                    business_identity: a.business_identity.clone(),
                     status: a.status.clone(),
                 })
                 .collect(),
@@ -7201,7 +7217,7 @@ fn retry_evidence_projection() -> bson::Document {
         "turn_id": 1, "seq": 1, "role": 1, "status": 1, "error_code": 1,
         "origin": 1, "retry_of": 1, "retry_claimed_by": 1,
         "activity_count": 1, "activities.label": 1,
-        "activities.digest": 1, "activities.retry_identity": 1, "activities.status": 1,
+        "activities.digest": 1, "activities.retry_identity": 1, "activities.business_identity": 1, "activities.status": 1,
     }
 }
 
@@ -7281,23 +7297,37 @@ fn retry_evidence(
             {
                 digests.push(identity.to_owned());
             }
-            if let Some(identity) = identity.filter(|value| value.starts_with("v2:")) {
-                matches.identities.push(identity.to_owned());
+            // The first v2 release used retry_identity itself. Read both
+            // layouts, but keep legacy hashes out of modern literal matching.
+            let business = activity
+                .business_identity
+                .as_deref()
+                .or_else(|| identity.filter(|value| value.starts_with("v2:")));
+            if let Some(business) = business.filter(|value| value.starts_with("v2:")) {
+                if !digests.iter().any(|seen| seen == business) {
+                    digests.push(business.to_owned());
+                }
+                matches.identities.push(business.to_owned());
             } else {
                 matches.historical_digests.push(digest.to_owned());
                 if let Some(identity) = identity {
                     matches.historical_digests.push(identity.to_owned());
                 }
-                // A legacy provider activity retains hashes, not the decoded
-                // request. Ignored wrapper extras cannot be reconstructed.
+                // Legacy activities retain hashes, not the decoded request.
+                // Ignored extras and retired handles cannot be reconstructed.
                 if matches!(
                     activity.label.as_str(),
                     "tool" | "service_tool" | "nyx__call_tool"
                 ) {
                     matches.provider_review_required = true;
-                } else if !super::assistant_continuation::native_activity_names()
+                } else if super::assistant_continuation::native_activity_names()
                     .contains(&activity.label)
                 {
+                    // Historical hashes cannot reveal ignored decorations or
+                    // retired handles. Only the current call's closed read
+                    // classifier can establish a safe ambiguity exception.
+                    matches.historical_native_tools.push(activity.label.clone());
+                } else {
                     matches
                         .historical_provider_tools
                         .push(activity.label.clone());
@@ -7636,7 +7666,7 @@ pub async fn retry_duplicate_any(
     conversation_id: &str,
     turn_id: &str,
     identity: &str,
-    provider_tool: Option<&str>,
+    review_tool: Option<&str>,
     historical: impl FnOnce() -> Vec<String>,
 ) -> AppResult<bool> {
     let row = db
@@ -7659,12 +7689,16 @@ pub async fn retry_duplicate_any(
                 bson::from_document(value.clone())
                     .map_err(|_| AppError::Internal("Invalid retry evidence".into()))?;
             let review = value.provider_review_required
-                || provider_tool.is_some_and(|name| {
-                    value.historical_provider_tools.iter().any(|label| {
-                        name == label
-                            || (label.chars().count() == MAX_ACTIVITY_LABEL_CHARS
-                                && name.starts_with(label))
-                    })
+                || review_tool.is_some_and(|name| {
+                    value
+                        .historical_provider_tools
+                        .iter()
+                        .chain(&value.historical_native_tools)
+                        .any(|label| {
+                            name == label
+                                || (label.chars().count() == MAX_ACTIVITY_LABEL_CHARS
+                                    && name.starts_with(label))
+                        })
                 });
             (value.identities, value.historical_digests, review)
         }
@@ -7690,8 +7724,8 @@ pub async fn retry_duplicate_any(
             return Ok(true);
         }
     }
-    if provider_tool.is_some() && review {
-        return Err(AppError::Conflict("Historical provider effects cannot be distinguished from this request. Review completed actions before starting new work; no provider call was sent.".into()));
+    if review_tool.is_some() && review {
+        return Err(AppError::Conflict("Historical completed effects cannot be distinguished from this request. Review completed actions before starting new work; no call was dispatched.".into()));
     }
     Ok(false)
 }
@@ -7699,6 +7733,7 @@ pub async fn retry_duplicate_any(
 /// Record a refused duplicate on the live turn. It is listed as completed:
 /// the action did complete, in the retried turn, and a later retry of this
 /// turn inherits the fence through it.
+#[allow(clippy::too_many_arguments)]
 pub async fn record_retry_duplicate(
     db: &Database,
     user_id: &str,
@@ -7707,6 +7742,7 @@ pub async fn record_retry_duplicate(
     label: &str,
     digest: &str,
     retry_identity: Option<&str>,
+    business_identity: Option<&str>,
 ) -> AppResult<()> {
     let now = bson::DateTime::now();
     let label: String = label.chars().take(MAX_ACTIVITY_LABEL_CHARS).collect();
@@ -7715,6 +7751,7 @@ pub async fn record_retry_duplicate(
         "label": label,
         "digest": digest,
         "retry_identity": retry_identity,
+        "business_identity": business_identity,
         "status": "completed",
         // Retain the completed digest for retry ancestry, but make clear this
         // turn did not execute the action again. Additive metadata for readers.

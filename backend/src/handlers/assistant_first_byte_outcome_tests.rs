@@ -100,7 +100,18 @@ async fn first_byte_outcome_schedule_created_before_timeout_and_retry_is_fenced(
     assert_eq!(failed.turn_metadata.as_ref().unwrap().attempts, Some(1));
     assert!(failed.text.is_empty());
     assert_eq!(failed.activity_count, Some(1), "{:?}", results.lock().await);
-    assert!(failed.activities[0].retry_identity.is_some());
+    assert!(
+        failed.activities[0]
+            .retry_identity
+            .as_deref()
+            .is_some_and(|d| !d.starts_with("v2:"))
+    );
+    assert!(
+        failed.activities[0]
+            .business_identity
+            .as_deref()
+            .is_some_and(|d| d.starts_with("v2:"))
+    );
     assert_ne!(
         failed.activities[0].digest,
         failed.activities[0].retry_identity
@@ -255,6 +266,7 @@ fn first_byte_outcome_legacy_uncertain_and_truncated_evidence() {
             memory_recovery: None,
             decision: None,
             retry_identity: None,
+            business_identity: None,
             id: "a".into(),
             label: "nyxid__create_schedule".into(),
             status: "error".into(),

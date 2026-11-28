@@ -2802,6 +2802,7 @@ async fn refuse_retry_duplicate(
         chat.turn_id.as_deref().unwrap_or_default(),
         &label,
         digest,
+        Some(&retry_identity::legacy_writer_digest(params)),
         Some(&chat_retry_digest(params)),
     )
     .await
@@ -3089,14 +3090,14 @@ async fn handle_tools_call_inner(
     {
         let identity = chat_retry_digest(params);
         let legacy = chat_activity_digest(params);
-        let provider = retry_identity::provider_name(params);
+        let review_tool = retry_identity::review_tool(params);
         match crate::services::assistant_nyxagent::retry_duplicate_any(
             &state.db,
             &chat.user_id,
             &chat.conversation_id,
             chat.turn_id.as_deref().unwrap_or_default(),
             &identity,
-            provider,
+            review_tool,
             || retry_identity::matching_digests(params),
         )
         .await
@@ -3146,6 +3147,7 @@ async fn handle_tools_call_inner(
                 chat.turn_id.as_deref().unwrap_or_default(),
                 &chat_activity_label(params),
                 Some(&chat_activity_digest(params)),
+                Some(&retry_identity::legacy_writer_digest(params)),
                 Some(&chat_retry_digest(params)),
             )
             .await
