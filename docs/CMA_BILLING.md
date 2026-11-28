@@ -59,8 +59,12 @@ is the authority for allocation prices; editing a service credential lane does
 not edit the CMA rate card.
 
 The effective subscription must be active, bound to the accepted customer and
-configured plan, monthly calendar billing, explicit customer timezone `UTC`, and
-USD denomination. Readback verifies exactly one standard
+configured plan, monthly calendar billing, effective customer billing timezone
+`UTC`, and USD denomination. Readback uses Lago's `applicable_timezone`, allowing
+an inherited UTC timezone with a null customer override. Only when
+`applicable_timezone` is absent does it fall back to an explicit `timezone: "UTC"`;
+a present null, malformed or non-UTC effective timezone fails closed.
+Readback verifies exactly one standard
 charge per metric, the accepted exact price, no charge filters/minimums/proration,
 and nonrecurring `sum_agg(quantity)` definitions. Missing proof, stale cache,
 partial sync and provider failures deny new admission.
