@@ -28,6 +28,49 @@ pub(super) fn typed_wake(events: &[AgentEvent]) -> bool {
     })
 }
 
+/// Drop only invalid entries in the retained-execution event namespace. This
+/// read shares the source conversation's admission transaction and key snapshot;
+/// no foreign proposal data is rendered or changed, and unrelated events remain.
+pub(crate) async fn filter_decisions(
+    db: &Database,
+    session: &mut ClientSession,
+    row: &AssistantConversation,
+    mut events: Vec<AgentEvent>,
+) -> AppResult<Vec<AgentEvent>> {
+    if row.guest_turn
+        || row.shared_agent_thread
+        || row.agent_owner_id.is_some()
+        || row.group_id.is_some()
+        || row.collaboration.is_some()
+        || row.platform_thread.is_some()
+        || row.automation_thread
+        || row.invocation_controlled
+        || row.voice_parent_conversation_id.is_some()
+    {
+        return Ok(events);
+    }
+    let ids = request_ids(&events);
+    if ids.is_empty() {
+        return Ok(events);
+    }
+    if ids.len() > 64 {
+        return Err(refused());
+    }
+    let current = load(db, session, row, &ids).await?;
+    events.retain(|event| {
+        let Some(id) = event.id.strip_prefix("execution-decision:") else {
+            return true;
+        };
+        event.kind == "permission_decided"
+            && current.iter().any(|request| {
+                request.id == id
+                    && proposal(request)
+                        .is_ok_and(|p| event.execution_task.as_ref() == Some(&p.task))
+            })
+    });
+    Ok(events)
+}
+
 /// A later successful subset cannot erase an ordinary, denied or waiting member
 /// of the server-admitted wake. This decision needs no optional readiness read.
 fn receipt_only(row: &AssistantConversation, requests: &[ApprovalRequest], typed: bool) -> bool {
@@ -73,10 +116,15 @@ pub(crate) async fn record_admission(
         return Err(refused());
     }
     let current = load(db, session, row, &ids).await?;
-    if current.len() != ids.len()
-        || current
-            .iter()
-            .any(|request| !proposal(request).is_ok_and(|p| p.task == *task))
+    if current.len() != ids.len() {
+        // Credential resolution can adopt a successor after queue filtering.
+        // Do not roll back consumption of an old-key event; resume's exact-key
+        // lookup returns a safe terminal failure before any send or model call.
+        return Ok(());
+    }
+    if current
+        .iter()
+        .any(|request| !proposal(request).is_ok_and(|p| p.task == *task))
     {
         return Err(refused());
     }
@@ -106,7 +154,7 @@ pub(crate) async fn record_admission(
     if blocked {
         block_in(db, session, &current).await
     } else {
-        join_handoff(db, session, row, &current).await
+        join_handoff(db, session, row, &current, false).await
     }
 }
 
@@ -150,9 +198,9 @@ async fn stamp_fresh(
                     "execution_proposal.v1.resume_turn_id":&p.resume_turn_id,
                 }),
                 version.update(doc! {"$set":{"execution_proposal.v1.owner_continuation":{
-                    "version":3,"batch":&fresh,"batch_turn_id":&turn.turn_id,"blocked":blocked,
-                    "released_turn_id":bson::Bson::Null,
-                    "handoff":{"version":1,"request_ids":&fresh,"turn_id":&turn.turn_id},
+                    "version":0,"batch":&fresh,"batch_turn_id":&turn.turn_id,"blocked":blocked,
+                    "released_turn_id":bson::Bson::Null,"handoff":bson::Bson::Null,
+                    "admission_handoff":{"version":1,"request_ids":&fresh,"turn_id":&turn.turn_id},
                 }}}),
             )
             .session(&mut *session)
@@ -167,12 +215,14 @@ async fn stamp_fresh(
 }
 
 /// Extend only receipt evidence. Admission and resume use the same atomic
-/// grouping, so optional readiness failure cannot split a co-admitted handoff.
+/// intent, so optional readiness failure cannot split a co-admitted group.
+/// Only the ready resume path promotes that intent into an eligible handoff.
 async fn join_handoff(
     db: &Database,
     session: &mut ClientSession,
     row: &AssistantConversation,
     current: &[ApprovalRequest],
+    promote: bool,
 ) -> AppResult<()> {
     let task = continuation::owner_task(row).ok_or_else(refused)?;
     let turn = row.active_turn.as_ref().ok_or_else(refused)?;
@@ -213,33 +263,37 @@ async fn join_handoff(
         block_in(db, session, &own).await?;
         return Ok(());
     }
-    let joined = Handoff {
+    let first = all.first().map(cohort).transpose()?.flatten();
+    let shared = first.as_ref().filter(|first| {
+        first.request_ids == union
+            && all
+                .iter()
+                .all(|request| cohort(request).ok().flatten().as_ref() == Some(*first))
+    });
+    let joined = shared.cloned().unwrap_or_else(|| Handoff {
         version: 1,
         request_ids: union.clone(),
         turn_id: turn.turn_id.clone(),
-    };
-    let unchanged = all.iter().all(|request| {
-        proposal(request).is_ok_and(|p| {
-            p.owner_continuation
-                .as_ref()
-                .is_some_and(|proof| proof.version == 3)
-        })
     });
-    let first = all.first().map(cohort).transpose()?.flatten();
-    if unchanged
-        && first
-            .as_ref()
-            .is_some_and(|first| first.request_ids == union)
-        && all
-            .iter()
-            .all(|request| cohort(request).ok().flatten() == first)
-    {
+    if all.iter().all(|request| {
+        proposal(request).is_ok_and(|p| {
+            p.owner_continuation.as_ref().is_some_and(|proof| {
+                proof.admission_handoff.as_ref() == Some(&joined)
+                    && (!promote || (proof.version == 3 && proof.handoff.as_ref() == Some(&joined)))
+            })
+        })
+    }) {
         return Ok(());
     }
     for request in &all {
         let p = proposal(request)?;
         let version = AssistantVersion::of(request)?;
         let proof = p.owner_continuation.as_ref().ok_or_else(conflict)?;
+        let mut set = doc! {"execution_proposal.v1.owner_continuation.admission_handoff":bson::to_bson(&joined).map_err(encoding)?};
+        if promote {
+            set.extend(doc! {"execution_proposal.v1.owner_continuation.version":3,
+                "execution_proposal.v1.owner_continuation.handoff":bson::to_bson(&joined).map_err(encoding)?});
+        }
         if db.collection::<Document>(REQUESTS).update_one(version.selector(doc! {
             "_id":&request.id,"user_id":&row.user_id,
             "execution_proposal.v1.key_id":&row.credential_api_key_id,
@@ -247,11 +301,10 @@ async fn join_handoff(
             "execution_proposal.v1.owner_continuation.version":proof.version as i32,
             "execution_proposal.v1.owner_continuation.batch":bson::to_bson(&proof.batch).map_err(encoding)?,
             "execution_proposal.v1.owner_continuation.batch_turn_id":&proof.batch_turn_id,
+            "execution_proposal.v1.owner_continuation.admission_handoff":bson::to_bson(&proof.admission_handoff).map_err(encoding)?,
             "execution_proposal.v1.owner_continuation.released_turn_id":null,
             "execution_proposal.v1.delivered_turn_id":null,
-        }), version.update(doc! {"$set":{"execution_proposal.v1.owner_continuation.version":3,
-            "execution_proposal.v1.owner_continuation.handoff":bson::to_bson(&joined).map_err(encoding)?}}))
-            .session(&mut *session).await?.matched_count != 1 { return Err(conflict()); }
+        }), version.update(doc! {"$set":set})).session(&mut *session).await?.matched_count != 1 { return Err(conflict()); }
     }
     Ok(())
 }
@@ -271,6 +324,14 @@ fn cohort(request: &ApprovalRequest) -> AppResult<Option<Handoff>> {
     let Some(turn) = proof.batch_turn_id.as_ref().filter(|turn| !turn.is_empty()) else {
         return Ok(None);
     };
+    if let Some(intent) = &proof.admission_handoff {
+        return Ok((matches!(proof.version, 0 | 2 | 3)
+            && intent.version == 1
+            && !intent.turn_id.is_empty()
+            && canonical(&intent.request_ids)
+            && original.iter().all(|id| intent.request_ids.contains(id)))
+        .then(|| intent.clone()));
+    }
     Ok(match proof.version {
         2 if proof.handoff.is_none() => Some(Handoff {
             version: 1,
@@ -331,6 +392,7 @@ async fn block_in(
             "execution_proposal.v1.owner_continuation.version":marker.version as i32,
             "execution_proposal.v1.owner_continuation.batch":bson::to_bson(&marker.batch).map_err(encoding)?,
             "execution_proposal.v1.owner_continuation.batch_turn_id":&marker.batch_turn_id,
+            "execution_proposal.v1.owner_continuation.admission_handoff":bson::to_bson(&marker.admission_handoff).map_err(encoding)?,
             "execution_proposal.v1.owner_continuation.released_turn_id":null,
         };
         if let Some(handoff) = &marker.handoff {
@@ -483,11 +545,26 @@ pub(super) async fn admit(
     let Some(task) = continuation::owner_task(row) else {
         return Ok(None);
     };
-    if requests
-        .iter()
-        .any(|request| !proposal(request).is_ok_and(|p| p.task == *task))
-    {
-        return Err(refused());
+    // Displaying a terminal receipt does not need a live root, credential,
+    // optional readiness or full execution-task equality.
+    let active = requests.iter().any(|request| {
+        proposal(request).is_ok_and(|p| {
+            request.status == "approved"
+                && (matches!(p.state.as_str(), "queued" | "preparing")
+                    || (p.state == "completed"
+                        && request.activity_outcome.as_deref() == Some("completed")
+                        && p.result.is_some()
+                        && p.claim_id.is_some()
+                        && p.delivered_turn_id.is_none()
+                        && p.owner_continuation.as_ref().is_some_and(|proof| {
+                            matches!(proof.version, 2 | 3)
+                                && !proof.blocked
+                                && proof.released_turn_id.is_none()
+                        })))
+        })
+    });
+    if !active {
+        return Ok(None);
     }
     let mut groups = Vec::new();
     let mut work = false;
@@ -505,7 +582,8 @@ pub(super) async fn admit(
             .filter(|proof| !proof.blocked && proof.released_turn_id.is_none())
             && let Some(group) = cohort(request)?
         {
-            work |= proof.version == 2
+            work |= (proof.version == 2
+                || (proof.version == 3 && proof.admission_handoff != proof.handoff))
                 && request.status == "approved"
                 && p.delivered_turn_id.is_none()
                 && p.state == "completed"
@@ -529,6 +607,12 @@ pub(super) async fn admit(
         }
         return Ok(None);
     }
+    if requests
+        .iter()
+        .any(|request| !proposal(request).is_ok_and(|p| p.task == *task))
+    {
+        return Err(refused());
+    }
     // Receipt-only intent is persisted even on an older admitted turn and an
     // unmarked legacy root. It never depends on optional model readiness.
     if !blocked
@@ -546,21 +630,30 @@ pub(super) async fn admit(
         return Ok(None);
     }
     if !blocked {
-        let ready = crate::services::security_readiness_service::serving_report(
+        let pending = requests.iter().any(|request| {
+            proposal(request).is_ok_and(|p| {
+                p.delivered_turn_id.is_none()
+                    && p.owner_continuation.as_ref().is_some_and(|proof| {
+                        matches!(proof.version, 2 | 3)
+                            && !proof.blocked
+                            && proof.released_turn_id.is_none()
+                    })
+            })
+        });
+        match crate::services::security_readiness_service::serving_report(
             &state.db,
             continuation::READINESS,
         )
-        .await?
-        .serving_ready;
-        if !ready {
-            if !groups.is_empty() {
-                return Err(AppError::SecurityReadinessUnavailable);
-            }
-            return Ok(Some(false));
+        .await
+        {
+            Ok(report) if report.serving_ready => {}
+            Err(error) if pending => return Err(error),
+            _ if pending => return Err(AppError::SecurityReadinessUnavailable),
+            _ => return Ok(Some(false)),
         }
     }
     let mut session = state.db.client().start_session().await?;
-    session
+    let bound = session
         .start_transaction()
         .and_run(
             (&state.db, row, task, admitted, typed_wake, blocked),
@@ -631,7 +724,7 @@ pub(super) async fn admit(
                             block_in(db, session, &current).await?;
                             return Ok(());
                         }
-                        join_handoff(db, session, row, &current).await
+                        join_handoff(db, session, row, &current, true).await
                     }
                     .await;
                     crate::services::api_key_mutation_service::transaction_result(result)
@@ -639,8 +732,22 @@ pub(super) async fn admit(
             },
         )
         .await
-        .map_err(crate::services::api_key_mutation_service::map_transaction_error)?;
-    Ok(Some(true))
+        .map_err(crate::services::api_key_mutation_service::map_transaction_error);
+    match bound {
+        Ok(()) => Ok(Some(true)),
+        // The ordinary resume preflight owns cancellation/retirement and its
+        // truthful not-sent receipt. No provider/model authority is granted here.
+        Err(error)
+            if error.is_forbidden()
+                || matches!(
+                    error,
+                    AppError::NotFound(_) | AppError::AssistantTurnRequired
+                ) =>
+        {
+            Ok(Some(false))
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// Reconcile durable receipts only. An unrelated valid proof is never blocked

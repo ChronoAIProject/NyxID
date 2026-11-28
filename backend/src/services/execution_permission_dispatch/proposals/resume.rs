@@ -231,6 +231,14 @@ pub(crate) async fn resume_turn(
             ));
             continue;
         }
+        if continuation::owner_task(row).is_some()
+            && turn
+                .execution_task
+                .as_ref()
+                .is_none_or(|task| *task != p.task)
+        {
+            return Err(refused());
+        }
         super::super::super::security_readiness_service::require_serving(&state.db, READINESS)
             .await?;
         version.require_serving(&state.db).await?;
@@ -431,7 +439,12 @@ pub(crate) async fn resume_turn(
             "execution_proposal.v1.independent_card_id": independent_card,
         };
         let successful = state_name == "completed" && activity_outcome == Some("completed");
-        if p.owner_continuation.is_some() && (!typed_wake || !eligible || !successful) {
+        if p.owner_continuation.as_ref().is_some_and(|proof| {
+            !typed_wake
+                || !eligible
+                || !successful
+                || (proof.version == 0 && continuation_ready != Some(true))
+        }) {
             set.insert("execution_proposal.v1.owner_continuation.blocked", true);
         }
         if let Some(version) = marker {

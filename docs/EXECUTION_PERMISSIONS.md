@@ -490,20 +490,24 @@ For a continuation handoff to release, every request has a successful, available
 receipt and a version-3 `owner_continuation` marker. Each marker retains its own
 original decision group (`batch` and `batch_turn_id`). Fresh decisions co-admitted
 with recovery events form their own group; they never rewrite an older group's
-proof. The normal named-event admission transaction binds fresh groups and joins
-compatible unreleased groups into a separate `handoff` containing its version,
-sorted request IDs and the actual joining turn ID. It commits these facts with
-the exact admitted events and turn/worker claim, before fallible resume or optional
-continuation-readiness work. The same transaction fences the live task, source,
-actor, conversation and credential and validates every original group and previous
+proof. The normal named-event admission transaction records fresh groups as
+version-0 intent and records their prospective union in `admission_handoff`,
+containing its version, sorted request IDs and the actual joining turn ID.
+Version 0 cannot release a model or count as an existing eligible continuation.
+Admission commits this evidence with the exact events and turn/worker claim,
+before fallible resume or optional continuation-readiness work. Only observed
+v3 readiness permits promotion to a version-3 marker and an eligible `handoff`.
+An existing positive marker retains its handoff until that ready promotion;
+prospective admission evidence alone never widens its release. The same
+transaction fences the live task, source, actor, conversation and credential and validates every original group and previous
 handoff before extending it. An eligible unblocked proof also requires the marked
 original root. A crash cannot expose a newly bound group without the corresponding
-joined proof. Resume revalidates the exact stored named-event set, worker, task,
+prospective union. Resume revalidates the exact stored named-event set, worker, task,
 source, key, stop and database-time lease fences; a fresh proof update also matches
 the current effect state and preparation claim. A complete historical version-2
-proof can be adopted under these fences while retaining its original decision group. Proof
-binding is independent of outcome readiness: denied or expired unsent decisions
-can retain their group proof, but never authorize execution or model release.
+proof can be adopted under these fences while retaining its original decision
+group. Proof binding is independent of outcome readiness: denied or expired unsent
+decisions can retain their group proof, but never authorize execution or model release.
 Concurrent identical resumes reload proof state inside each transaction attempt;
 an already-bound identical group is a successful no-op, while the effect claim
 and provider-send fences still admit one operation.
@@ -532,12 +536,20 @@ unblocked proof. Refusal metadata requires no optional continuation-readiness re
 and also protects unmarked legacy roots without enrolling them in automatic
 continuation. Their approved operations retain the normal single-send receipt
 path. Unsupported source lanes retain their existing admission and resume paths.
-Already released or delivered observations cannot join a new launch; independent new proofs remain pending for their own recovery. Historical
+Already released or delivered observations cannot join a new launch;
+independent new proofs remain pending for their own recovery. Historical
 proofs without the original admitted turn ID remain receipt-only. Successful
 final settlement marks every receipt in the atomically released handoff delivered,
 including members absent from that final wake, so maintenance cannot publish a
 duplicate sibling delivery. Different task roots remain partitioned by normal
 admission; stale task snapshots are pruned before continuation.
+The normal source admission also removes missing, stale-key, foreign-conversation
+and incorrectly typed entries in the retained-decision namespace under its exact
+conversation/key/worker transaction. It renders no foreign proposal data and
+preserves unrelated events. Rotation cannot wedge queue removal. A separately
+admitted ordinary event completes on its own input and turn; the owner's answer
+and receipt delivery stay attributed to their actual releasing turn, independent
+of later messages in the same conversation.
 After normal model/context preparation, an atomic batch release fences the live
 worker, task, source, actor and key before the request can be sealed for model
 I/O. Release uses MongoDB time for turn/key expiry. An explicit turn lease must
@@ -575,10 +587,14 @@ window. Historical receipts without a complete original decision/admitted-turn
 proof, unavailable results and released receipts remain receipt-only. Shared/group/org/platform/delegated/voice/external sources retain
 their existing receipt behavior. Release metadata contains only version,
 original decision request IDs and admitted turn ID, joined handoff IDs and turn,
-blocked state and the releasing turn ID; the encrypted receipt remains the single
-result copy.
+prospective admission union, blocked state and the releasing turn ID; the encrypted
+receipt remains the single result copy. Release matches both the promoted handoff
+and the latest admission union, so a newer unresolved admission cannot borrow an
+older release proof.
 Private denied, expired, historical and released receipts remain readable after
-their task deadline. Owner-message source lookup applies only to a possible new
+their task deadline. Their display precedes full execution-task equality, live
+root/credential and optional-readiness checks; execution and release retain those
+exact authority fences. Owner-message source lookup applies only to a possible new
 dispatch or an undelivered eligible continuation marker, never to those terminal
 status paths. An expired task cannot dispatch or release a continuation.
 Encrypted-result retention removes the ciphertext and its context marker together;
@@ -593,8 +609,13 @@ support does not satisfy it. The original-root evidence format and capacity rema
 v2. An authentic unmarked retained effect does not read optional continuation
 readiness, either during binding or before provider dispatch: its normal
 authoring/version/source/credential checks still govern one authorized send and
-its legacy receipt. Marked work retains its optional-readiness refusal. Fresh
-effects retain receipt-only behavior until it is ready; pending marked continuations refuse on readiness loss. Version-1
+its legacy receipt. A preceding v2-marked root with only fresh version-0 intent
+also sends its otherwise authorized effect once and commits a blocked receipt-only
+outcome when optional v3 readiness is unavailable. It publishes no positive v3
+marker or eligible joined handoff. Existing eligible v2/v3 pending continuations
+refuse on readiness loss. Enrollment/source failures before a fresh retained send
+flow through ordinary cancellation and grant retirement and return a truthful
+not-sent receipt; optional batch metadata grants no execution authority. Version-1
 pending markers remain receipt-only on upgraded workers. Version-3 handoff markers
 cannot release through v1/v2 readers. It adds no cohort prerequisite, feature flag,
 collection or backfill. The versioned release indexes are installed at startup. Before binary rollback, disable effective execution

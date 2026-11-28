@@ -81,6 +81,7 @@ pub struct Proposal {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct OwnerContinuation {
+    /// 0 records admission intent only; 3 is an eligible, readiness-gated handoff.
     pub version: u32,
     /// Immutable original fresh-decision group. Missing historical proof never releases.
     #[serde(default)]
@@ -91,6 +92,9 @@ pub struct OwnerContinuation {
     /// A separately fenced union; each member keeps its original decision proof.
     #[serde(default)]
     pub handoff: Option<OwnerContinuationHandoff>,
+    /// Admission intent only; it is not a fleet-ready model handoff.
+    #[serde(default)]
+    pub admission_handoff: Option<OwnerContinuationHandoff>,
     #[serde(default)]
     pub blocked: bool,
     /// None is proven unreleased. A release is irreversible, even after a crash.

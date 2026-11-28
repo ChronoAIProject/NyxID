@@ -721,7 +721,7 @@ async fn owner_permission_resume_partial_batch_crash_reconciles_success_without_
             .owner_continuation
             .as_ref()
             .unwrap();
-        assert_eq!(marker.version, 3);
+        assert_eq!(marker.version, if sibling == "denied" { 0 } else { 3 });
         assert_eq!(marker.batch.as_ref().unwrap().len(), 2);
         // Denial is durable at admission, before even the first provider send.
         assert_eq!(marker.blocked, sibling == "denied");
@@ -1152,11 +1152,11 @@ async fn mixed_admission_recovery(ordinary: bool, unmarked: bool, between: bool)
             .owner_continuation
             .as_ref()
             .expect("admission must persist receipt-only intent");
-        assert_eq!(proof.version, 3);
+        assert_eq!(proof.version, 0);
         assert!(proof.blocked);
         assert_eq!(proof.batch.as_ref(), Some(&batch));
         assert_eq!(proof.batch_turn_id.as_deref(), Some(turn.turn_id.as_str()));
-        assert_eq!(proof.handoff.as_ref().unwrap().request_ids, batch);
+        assert_eq!(proof.admission_handoff.as_ref().unwrap().request_ids, batch);
         assert!(proof.released_turn_id.is_none());
         assert_eq!(p.task, *task);
         assert_eq!(p.key_id, row.credential_api_key_id);

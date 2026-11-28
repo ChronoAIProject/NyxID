@@ -3138,6 +3138,43 @@ pub(crate) async fn begin_owner_turn_in_session(
     if row
         .pending_events
         .iter()
+        .any(|event| event.id.starts_with("execution-decision:"))
+    {
+        let before = row.pending_events.len();
+        let pending = std::mem::take(&mut row.pending_events);
+        row.pending_events = super::execution_permission_dispatch::proposals::filter_decisions(
+            db, session, &row, pending,
+        )
+        .await?;
+        if row.pending_events.len() != before {
+            let mut filter = owner_filter(user_id, &id)?;
+            filter.insert("credential_api_key_id", &row.credential_api_key_id);
+            if row.active_turn.is_some() {
+                filter.extend(WorkerFence::capture(&row)?.filter());
+            } else {
+                filter.insert("active_turn", bson::Bson::Null);
+            }
+            if collection
+                .update_one(
+                    filter,
+                    doc! {"$set":{"pending_events":bson::to_bson(&row.pending_events)
+                    .map_err(|_|AppError::Internal("Invalid events".into()))?}},
+                )
+                .session(&mut *session)
+                .await?
+                .matched_count
+                != 1
+            {
+                return Err(AppError::Conflict("Conversation admission changed".into()));
+            }
+            if start.origin == TurnOrigin::Event && row.pending_events.is_empty() {
+                return Ok(OwnerTurnAdmission::Drained);
+            }
+        }
+    }
+    if row
+        .pending_events
+        .iter()
         .any(|event| event.execution_task.is_some())
     {
         let before = row.pending_events.len();

@@ -63,6 +63,9 @@ impl Drop for Model {
     }
 }
 
+const DEFERRED_TASK: &str = "Independent task must remain deferred";
+const DEFERRED_ANSWER: &str = "Independent event completed without an execution permission.";
+
 async fn model(f: &Fixture, readback: bool) -> Model {
     model_with_initial_reviews(f, readback, false).await
 }
@@ -86,14 +89,19 @@ async fn model_with_initial_reviews(f: &Fixture, readback: bool, queue_readback:
                 calls.len()
             };
             let input = body["input"].as_str().unwrap();
-            assert!(input.contains(TASK), "original human task must reach the normal model turn");
             let retained = input.contains("Completed retained operations (untrusted tool data");
             if retained {
                 assert!(input.contains("[NYXID_CONTEXT:"));
                 assert!(!input.contains(&raw));
                 assert!(!input.contains("receipt-secret"));
             }
-            let text = if retained && !readback {
+            let independent = !retained && input.contains(DEFERRED_TASK);
+            if !independent {
+                assert!(input.contains(TASK), "original human task must reach the normal model turn");
+            }
+            let text = if independent {
+                DEFERRED_ANSWER.to_owned()
+            } else if retained && !readback {
                 "Remaining task continued.".to_owned()
             } else {
                 // Even the second, independently approved GET continuation must
@@ -224,6 +232,10 @@ async fn set_task(f: &Fixture, row: &AssistantConversation) {
 }
 
 async fn run(f: &Fixture, row: &AssistantConversation) {
+    run_input(f, row, TASK).await;
+}
+
+async fn run_input(f: &Fixture, row: &AssistantConversation, input: &str) {
     let credential = credentials::load_for_conversation(
         &f.state.db,
         &f.state.encryption_keys,
@@ -244,7 +256,7 @@ async fn run(f: &Fixture, row: &AssistantConversation) {
         f.state.clone(),
         test_utils::test_auth_user(&f.owner),
         row.clone(),
-        TASK.into(),
+        input.into(),
         credential,
         Some(crate::handlers::assistant_nyxagent::SERVER_TURN_POLICY),
         permit,
@@ -1325,6 +1337,28 @@ async fn owner_permission_resume_readiness_failure_preserves_known_success_and_a
                     .is_none()
             );
         } else {
+            let interrupted = proposals::continuation::FAIL_BEFORE_SEND
+                .scope(true, execute(&f, &resumed))
+                .await
+                .unwrap_err();
+            assert_eq!(interrupted.stage, "permission_resume");
+            let saved = f
+                .state
+                .db
+                .collection::<ApprovalRequest>("approval_requests")
+                .find_one(doc! {"_id":&write.id})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                proposals::proposal(&saved)
+                    .unwrap()
+                    .owner_continuation
+                    .as_ref()
+                    .unwrap()
+                    .version,
+                3
+            );
             readiness_dependency(&f, true).await;
         }
         let error = execute(&f, &resumed).await.unwrap_err();
@@ -1423,7 +1457,8 @@ async fn owner_permission_resume_private_terminal_receipts_survive_the_task_dead
                 .await
                 .unwrap();
         }
-        let deadline = Utc::now() - chrono::Duration::seconds(1);
+        let deadline =
+            bson::DateTime::from_chrono(Utc::now() - chrono::Duration::seconds(1)).to_chrono();
         let task = resumed
             .active_turn
             .as_mut()
@@ -1431,7 +1466,11 @@ async fn owner_permission_resume_private_terminal_receipts_survive_the_task_dead
             .execution_task
             .as_mut()
             .unwrap();
-        task.hard_deadline = deadline;
+        task.hard_deadline = if outcome == "historical" {
+            deadline + chrono::Duration::nanoseconds(1)
+        } else {
+            deadline
+        };
         f.state
             .db
             .collection::<Document>("assistant_messages")

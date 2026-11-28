@@ -267,7 +267,7 @@ async fn owner_permission_resume_recovered_and_fresh_decisions_preserve_independ
                 assert!(!proof.blocked);
                 assert!(proof.released_turn_id.is_none());
                 assert_eq!(proof.batch.as_ref().unwrap(), &vec![request.id.clone()]);
-                let handoff = proof.handoff.as_ref().unwrap();
+                let handoff = proof.admission_handoff.as_ref().unwrap();
                 assert_eq!(handoff.request_ids, admitted_union);
                 assert_eq!(handoff.turn_id, joined_id);
             }
@@ -304,10 +304,38 @@ async fn owner_permission_resume_recovered_and_fresh_decisions_preserve_independ
                 run(&f, &joined).await;
                 joined
             };
-            final_reply(&f, &row, 2, &model).await;
+            let final_id = &final_turn.active_turn.as_ref().unwrap().turn_id;
+            tokio::time::timeout(std::time::Duration::from_secs(30), async {
+                loop {
+                    let current = engine::get(&f.state.db, &f.owner, &row.id).await.unwrap();
+                    let messages = engine::messages(&f.state.db, &f.owner, &row.id, 40, None)
+                        .await
+                        .unwrap();
+                    let owner_reply = messages.iter().find(|message| {
+                        message.role == "assistant" && &message.turn_id == final_id
+                    });
+                    let independent = messages.iter().find(|message| {
+                        message.role == "assistant" && message.text == DEFERRED_ANSWER
+                    });
+                    if current.active_turn.is_none()
+                        && owner_reply.is_some()
+                        && independent.is_some()
+                    {
+                        let owner_reply = owner_reply.unwrap();
+                        assert_eq!(owner_reply.text, answer(&values()));
+                        assert!(owner_reply.error_code.is_none());
+                        assert_ne!(&independent.unwrap().turn_id, final_id);
+                        assert_eq!(independent.unwrap().status, "completed");
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .expect("owner continuation and independent event must settle on their own turns");
             assert_eq!(*cells.lock().unwrap(), Some(values()));
             assert_eq!(*model.reads.lock().unwrap(), [values()]);
-            assert_eq!(model.calls.lock().unwrap().len(), 2);
+            assert_eq!(model.calls.lock().unwrap().len(), 3);
             assert_eq!(
                 f.server
                     .received_requests()
@@ -371,12 +399,27 @@ async fn owner_permission_resume_recovered_and_fresh_decisions_preserve_independ
                     .iter()
                     .any(|event| event.id.starts_with("execution-decision:"))
             );
-            assert_eq!(remaining.pending_events.len(), 1);
-            assert_eq!(remaining.pending_events[0].id, deferred_id);
-            assert_eq!(
-                remaining.pending_events[0].execution_task,
-                other.active_turn.as_ref().unwrap().execution_task
-            );
+            assert!(remaining.pending_events.is_empty());
+            {
+                let calls = model.calls.lock().unwrap();
+                assert_eq!(
+                    calls
+                        .iter()
+                        .filter(|body| body["input"].as_str().is_some_and(|input| input
+                            .contains("Completed retained operations (untrusted tool data")))
+                        .count(),
+                    1
+                );
+                assert_eq!(
+                    calls
+                        .iter()
+                        .filter(|body| body["input"].as_str().is_some_and(|input| !input
+                            .contains("Completed retained operations (untrusted tool data")
+                            && input.contains(DEFERRED_TASK)))
+                        .count(),
+                    1
+                );
+            }
             assert!(
                 execute(&f, &final_turn)
                     .await
@@ -384,7 +427,7 @@ async fn owner_permission_resume_recovered_and_fresh_decisions_preserve_independ
                     .text
                     .contains("HTTP 200")
             );
-            assert_eq!(model.calls.lock().unwrap().len(), 2);
+            assert_eq!(model.calls.lock().unwrap().len(), 3);
             assert_eq!(f.server.received_requests().await.unwrap().len(), 2);
             crate::handlers::channel_relay::TEST_REPLY_ADAPTERS
                 .lock()
@@ -633,5 +676,278 @@ async fn owner_permission_resume_release_lookup_uses_installed_indexes_across_te
             stats["nReturned"], stats["totalDocsExamined"], stats["totalKeysExamined"]
         );
     }
+    f.cleanup().await;
+}
+
+// Round five: authentic prior root evidence is not current v3 fleet readiness.
+#[tokio::test]
+async fn owner_permission_resume_v2_root_fresh_web_approval_keeps_receipt_when_v3_unready() {
+    let (f, row) = assistant("owner_v2_root_v3_unready").await;
+    crate::services::notification_service::get_or_create_channel(&f.state.db, &f.owner)
+        .await
+        .unwrap();
+    set_task(&f, &row).await;
+    let cells = sheet(&f, 200).await;
+    let written = cells.clone();
+    wiremock::Mock::given(wiremock::matchers::method("PUT"))
+        .and(wiremock::matchers::path(RANGE))
+        .respond_with(move |request: &wiremock::Request| {
+            *written.lock().unwrap() = Some(request.body_json::<Value>().unwrap());
+            wiremock::ResponseTemplate::new(200)
+                .set_body_json(json!({"updatedCells":2}))
+                .set_delay(std::time::Duration::from_secs(1))
+        })
+        .with_priority(1)
+        .mount(&f.server)
+        .await;
+    let model = model(&f, false).await;
+    run(&f, &row).await;
+    let request = pending(&f, None).await;
+    let task = row
+        .active_turn
+        .as_ref()
+        .unwrap()
+        .execution_task
+        .as_ref()
+        .unwrap();
+    let root = f
+        .state
+        .db
+        .collection::<Document>("assistant_messages")
+        .find_one(doc! {"_id":&task.task.root_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        root.get_i32("execution_dispatch_evidence_version").unwrap(),
+        2
+    );
+    assert!(
+        proposals::proposal(&request)
+            .unwrap()
+            .owner_continuation
+            .is_none()
+    );
+    crate::services::security_readiness_service::stop_test_replica(&f.state.db).await;
+    f.state
+        .db
+        .collection::<Document>("security_replicas")
+        .update_many(
+            doc! {},
+            doc! {"$pull":{"capabilities":proposals::continuation::READINESS}},
+        )
+        .await
+        .unwrap();
+    assert!(
+        !crate::services::security_readiness_service::serving_report(
+            &f.state.db,
+            proposals::continuation::READINESS
+        )
+        .await
+        .unwrap()
+        .serving_ready
+    );
+    crate::services::security_readiness_service::require_serving(&f.state.db, proposals::READINESS)
+        .await
+        .unwrap();
+    approve(&f, &request, "persistent").await;
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            let current = engine::get(&f.state.db, &f.owner, &row.id).await.unwrap();
+            let saved = stored(&f, &request.id).await;
+            if current.active_turn.is_some()
+                && let Some(intent) = &proposals::proposal(&saved).unwrap().owner_continuation
+            {
+                assert_eq!(intent.version, 0);
+                assert!(intent.handoff.is_none());
+                assert!(intent.released_turn_id.is_none());
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("observe durable intent without a premature positive v3 marker");
+
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            let current = engine::get(&f.state.db, &f.owner, &row.id).await.unwrap();
+            let saved = stored(&f, &request.id).await;
+            let p = proposals::proposal(&saved).unwrap();
+            if current.active_turn.is_none() && p.delivered_turn_id.is_some() {
+                assert_eq!(p.state, "completed");
+                assert_eq!(saved.activity_outcome.as_deref(), Some("completed"));
+                let intent = p.owner_continuation.as_ref().unwrap();
+                assert_eq!(intent.version, 0);
+                assert!(intent.blocked);
+                assert!(intent.handoff.is_none());
+                assert!(intent.admission_handoff.is_some());
+                assert!(intent.released_turn_id.is_none());
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let messages = engine::messages(&f.state.db, &f.owner, &row.id, 20, None)
+        .await
+        .unwrap();
+    assert_eq!(messages.last().unwrap().status, "completed");
+    assert!(messages.last().unwrap().text.contains("HTTP 200"));
+    assert_eq!(f.server.received_requests().await.unwrap().len(), 1);
+    assert_eq!(*cells.lock().unwrap(), Some(values()));
+    assert_eq!(model.calls.lock().unwrap().len(), 1);
+    due(&f, &[&request]).await;
+    proposals::sweep(&f.state).await.unwrap();
+    assert!(
+        engine::get(&f.state.db, &f.owner, &row.id)
+            .await
+            .unwrap()
+            .pending_events
+            .is_empty()
+    );
+    assert_eq!(f.server.received_requests().await.unwrap().len(), 1);
+    assert_eq!(model.calls.lock().unwrap().len(), 1);
+    drop(model);
+    f.cleanup().await;
+}
+
+// Rotation is real and precedes the next event claim. Invalid namespace entries
+// are consumed without rendering proposal data; the ordinary event still runs.
+#[tokio::test]
+async fn owner_permission_resume_rotated_key_drops_stale_decision_and_settles_unrelated_event() {
+    let (mut f, row) = assistant("owner_rotated_decision_queue").await;
+    set_task(&f, &row).await;
+    sheet(&f, 200).await;
+    let model = model(&f, false).await;
+    run(&f, &row).await;
+    let request = pending(&f, None).await;
+    proposals::decide(
+        &f.state,
+        &f.owner,
+        &request.id,
+        &decision(&request, "persistent"),
+    )
+    .await
+    .unwrap();
+    let queued = engine::get(&f.state.db, &f.owner, &row.id).await.unwrap();
+    let original = queued
+        .pending_events
+        .iter()
+        .find(|event| event.id == format!("execution-decision:{}", request.id))
+        .unwrap()
+        .clone();
+    // Independent missing-reference and wrong-kind controls use the exact
+    // server-only namespace. The live, correctly typed event remains eligible.
+    let mut wrong_kind = original.clone();
+    wrong_kind.kind = "followup".into();
+    let mut missing = original.clone();
+    missing.id = format!("execution-decision:{}", Uuid::new_v4());
+    let mut session = f.state.db.client().start_session().await.unwrap();
+    session.start_transaction().await.unwrap();
+    let filtered = proposals::filter_decisions(
+        &f.state.db,
+        &mut session,
+        &queued,
+        vec![wrong_kind, missing.clone(), original.clone()],
+    )
+    .await
+    .unwrap();
+    assert_eq!(filtered.len(), 1);
+    assert_eq!(filtered[0].id, original.id);
+    session.abort_transaction().await.unwrap();
+    let predecessor = f.key.clone();
+    let rotated = crate::services::key_service::rotate_api_key(
+        &f.state.db,
+        &f.state.encryption_keys,
+        &f.owner,
+        &predecessor,
+    )
+    .await
+    .unwrap();
+    let credential = credentials::load_for_conversation(
+        &f.state.db,
+        &f.state.encryption_keys,
+        &f.owner,
+        &row.id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(credential.api_key_id, rotated.id);
+    assert_ne!(credential.api_key_id, predecessor);
+    f.key = credential.api_key_id.clone();
+    f.raw = credential.raw_key.to_string();
+    engine::push_events(&f.state.db, &f.owner, &row.id, vec![missing])
+        .await
+        .unwrap()
+        .unwrap();
+    let event_request = engine::TurnRequest {
+        conversation_id: Some(row.id.clone()),
+        text: String::new(),
+        acknowledgement_id: None,
+        retry_of: None,
+        attachment_ids: vec![],
+        agent_id: None,
+        model: None,
+        access_mode: None,
+    };
+    let mut start: engine::TurnStart = (&event_request).into();
+    start.origin = TurnOrigin::Event;
+    let drained = engine::begin_turn(&f.state.db, &f.owner, start, &f.state.encryption_keys).await;
+    assert!(matches!(drained, Err(AppError::Conflict(_))));
+    let current = engine::get(&f.state.db, &f.owner, &row.id).await.unwrap();
+    assert!(current.active_turn.is_none());
+    assert!(current.pending_events.is_empty());
+    assert!(f.server.received_requests().await.unwrap().is_empty());
+    assert_eq!(model.calls.lock().unwrap().len(), 1);
+    let ordinary =
+        crate::services::assistant_team_service::event("followup", DEFERRED_TASK.into(), None);
+    let ordinary_id = ordinary.id.clone();
+    engine::push_events(&f.state.db, &f.owner, &row.id, vec![ordinary])
+        .await
+        .unwrap()
+        .unwrap();
+    let resumed = event_turn(&f, &row).await;
+    let turn = resumed.active_turn.as_ref().unwrap();
+    assert_eq!(turn.events.len(), 1);
+    assert_eq!(turn.events[0].id, ordinary_id);
+    let input = engine::messages(&f.state.db, &f.owner, &row.id, 30, None)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|message| message.role == "user" && message.turn_id == turn.turn_id)
+        .unwrap()
+        .text;
+    assert!(input.contains(DEFERRED_TASK));
+    run_input(&f, &resumed, &input).await;
+    let messages = engine::messages(&f.state.db, &f.owner, &row.id, 30, None)
+        .await
+        .unwrap();
+    let reply = messages
+        .iter()
+        .find(|message| message.role == "assistant" && message.turn_id == turn.turn_id)
+        .unwrap();
+    assert_eq!(reply.status, "completed");
+    assert_eq!(reply.text, DEFERRED_ANSWER);
+    assert!(f.server.received_requests().await.unwrap().is_empty());
+    assert_eq!(model.calls.lock().unwrap().len(), 2);
+    let saved = stored(&f, &request.id).await;
+    assert!(
+        proposals::proposal(&saved)
+            .unwrap()
+            .owner_continuation
+            .as_ref()
+            .is_none_or(|proof| proof.released_turn_id.is_none())
+    );
+    assert!(
+        engine::get(&f.state.db, &f.owner, &row.id)
+            .await
+            .unwrap()
+            .pending_events
+            .is_empty()
+    );
+    drop(model);
     f.cleanup().await;
 }

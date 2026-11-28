@@ -19,7 +19,7 @@ mod resume;
 use record::{Arm, Field, Slot};
 pub(crate) mod v2;
 pub(crate) mod v3;
-pub(crate) use batch::record_admission as record_owner_admission;
+pub(crate) use batch::{filter_decisions, record_admission as record_owner_admission};
 pub(crate) use continuation::ResumeOutcome;
 pub(crate) use effects::ensure_indexes as ensure_owner_continuation_indexes;
 pub(crate) use lifecycle::{cancel_in_session, sweep};
