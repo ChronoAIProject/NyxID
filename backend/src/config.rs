@@ -745,6 +745,7 @@ pub struct AppConfig {
     /// Master billing switch. P1 uses this only as passive configuration;
     /// later phases wire the charging gate behind it.
     pub billing_enabled: bool,
+    pub cma_usage_custody_recovery_enabled: bool,
     /// Enable allocation policy authoring only after every billing writer is upgraded.
     pub billing_allocations_enabled: bool,
     /// Lago API URL for later phases. Empty means no Lago sink configured.
@@ -1844,6 +1845,9 @@ impl AppConfig {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(crate::services::cloud_response_cache::DEFAULT_MAX_ENTRIES),
             billing_enabled: parse_bool_env("BILLING_ENABLED", false),
+            cma_usage_custody_recovery_enabled: parse_bool_env(
+                "CMA_USAGE_CUSTODY_RECOVERY_ENABLED", false,
+            ),
             billing_allocations_enabled: parse_bool_env("BILLING_ALLOCATIONS_ENABLED", false),
             lago_api_url: env::var("LAGO_API_URL")
                 .ok()
@@ -2480,6 +2484,7 @@ mod tests {
             cloud_response_cache_max_entries:
                 crate::services::cloud_response_cache::DEFAULT_MAX_ENTRIES,
             billing_enabled: false,
+            cma_usage_custody_recovery_enabled: false,
             billing_allocations_enabled: false,
             lago_api_url: None,
             lago_api_key: None,

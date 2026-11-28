@@ -1473,6 +1473,9 @@ async fn server_run(cli: Cli) {
         state.jobs.billing_reconcile.clone(),
     );
     state.billing.spawn_refresh_worker();
+    if state.config.cma_usage_custody_recovery_enabled {
+        services::billing::sandbox_usage::inbox_promotion::spawn_reconciler(state.db.clone());
+    }
     services::assistant_upload_retention::refresh(&state.db, &state.upload_retention)
         .await
         .expect("Upload retention policy");
