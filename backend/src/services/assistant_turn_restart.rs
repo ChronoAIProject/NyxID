@@ -296,15 +296,26 @@ pub(crate) fn offer(
     loss: Loss<'_>,
 ) -> futures::future::BoxFuture<'static, AppResult<bool>> {
     let change = offer_change(row, loss);
+    let original = row.clone();
     let db = db.clone();
     Box::pin(async move {
         let Some((filter, update)) = change? else {
             return Ok(false);
         };
-        let context = (db.clone(), filter, update);
-        super::transaction_service::run_db_only(&db, &context, |session, (db, filter, update)| {
-            Box::pin(save_offer(db, session, filter.clone(), update.clone()))
-        })
+        let context = (db.clone(), original, filter, update);
+        super::transaction_service::run_db_only(
+            &db,
+            &context,
+            |session, (db, original, filter, update)| {
+                Box::pin(save_offer(
+                    db,
+                    session,
+                    original,
+                    filter.clone(),
+                    update.clone(),
+                ))
+            },
+        )
         .await
     })
 }
@@ -342,10 +353,12 @@ pub(crate) async fn audit(
 async fn save_offer(
     db: &Database,
     session: &mut mongodb::ClientSession,
+    original: &AssistantConversation,
     filter: bson::Document,
     update: bson::Document,
 ) -> AppResult<bool> {
-    let Some(row) = db
+    let prior = retained_material(db, session, original, &filter).await?;
+    let Some(mut row) = db
         .collection::<AssistantConversation>(COLLECTION_NAME)
         .find_one_and_update(filter, update)
         .return_document(mongodb::options::ReturnDocument::After)
@@ -354,6 +367,9 @@ async fn save_offer(
     else {
         return Ok(false);
     };
+    if let Some(material) = prior {
+        rebind_retained_material(db, session, &mut row, material).await?;
+    }
     let turn = row
         .active_turn
         .ok_or(crate::errors::AppError::AssistantTurnRequired)?;
@@ -379,7 +395,7 @@ pub(crate) async fn offer_expired_in_session(
     now: DateTime<Utc>,
 ) -> AppResult<()> {
     if let Some((filter, update)) = offer_change(row, Loss::Expiry(now))? {
-        save_offer(db, session, filter, update).await?;
+        save_offer(db, session, row, filter, update).await?;
     }
     Ok(())
 }
@@ -429,6 +445,119 @@ pub(crate) async fn claim(
         Box::pin(claim_capacity(db, offered, survivor, None, session))
     })
     .await
+}
+
+struct RetainedMaterial {
+    reply: Option<crate::models::assistant_conversation::StreamReply>,
+    window: bool,
+}
+
+/// Saved material belongs to the complete original authority, not just IDs.
+/// An offer and its successor claim both transfer it in their own transaction.
+async fn retained_material(
+    db: &Database,
+    session: &mut mongodb::ClientSession,
+    original: &AssistantConversation,
+    filter: &bson::Document,
+) -> AppResult<Option<RetainedMaterial>> {
+    if !super::execution_permission_dispatch::proposals::retained_turn(original) {
+        return Ok(None);
+    }
+    let Some(current) = db
+        .collection::<AssistantConversation>(COLLECTION_NAME)
+        .find_one(filter.clone())
+        .session(&mut *session)
+        .await?
+    else {
+        // A concurrent identical offer/claim already won. Preserve the normal
+        // idempotent no-match result without touching the replacement worker.
+        return Ok(None);
+    };
+    super::execution_permission_dispatch::proposals::fence_retained_settlement(
+        db, session, original,
+    )
+    .await?;
+    let turn = current
+        .active_turn
+        .as_ref()
+        .ok_or(crate::errors::AppError::AssistantTurnRequired)?;
+    if !super::assistant_stream_checkpoint::window_matches_snapshot(&current, turn)
+        || turn.reply.as_ref().is_some_and(|reply| {
+            !super::assistant_stream_checkpoint::matches_snapshot(&current, turn, reply)
+        })
+    {
+        return Err(crate::errors::AppError::Conflict(
+            "Retained replay authority is unavailable".into(),
+        ));
+    }
+    Ok(Some(RetainedMaterial {
+        reply: turn.reply.clone(),
+        window: turn
+            .restart_admission
+            .as_ref()
+            .is_some_and(|admission| admission.window.is_some()),
+    }))
+}
+
+async fn rebind_retained_material(
+    db: &Database,
+    session: &mut mongodb::ClientSession,
+    row: &mut AssistantConversation,
+    material: RetainedMaterial,
+) -> AppResult<()> {
+    let active = row
+        .active_turn
+        .as_ref()
+        .ok_or(crate::errors::AppError::AssistantTurnRequired)?;
+    let mut set = doc! {};
+    let reply = material
+        .reply
+        .map(|mut reply| -> AppResult<_> {
+            reply.retained_authority =
+                super::execution_permission_dispatch::proposals::checkpoint_identity(row, active)?;
+            set.insert(
+                "active_turn.reply",
+                bson::to_bson(&reply)
+                    .map_err(|_| crate::errors::AppError::AssistantTurnRequired)?,
+            );
+            Ok(reply)
+        })
+        .transpose()?;
+    let window_proof = if material.window {
+        let proof = super::execution_permission_dispatch::proposals::window_identity(row, active)?;
+        set.insert(
+            "active_turn.restart_admission.window.retained_authority",
+            proof
+                .as_deref()
+                .ok_or(crate::errors::AppError::AssistantTurnRequired)?,
+        );
+        proof
+    } else {
+        None
+    };
+    if !set.is_empty() {
+        let changed = db
+            .collection::<bson::Document>(COLLECTION_NAME)
+            .update_one(WorkerFence::capture(row)?.filter(), doc! {"$set": set})
+            .session(&mut *session)
+            .await?;
+        if changed.matched_count != 1 {
+            return Err(crate::errors::AppError::AssistantTurnRequired);
+        }
+    }
+    let active = row
+        .active_turn
+        .as_mut()
+        .ok_or(crate::errors::AppError::AssistantTurnRequired)?;
+    active.reply = reply;
+    if let Some(window) = active
+        .restart_admission
+        .as_mut()
+        .and_then(|admission| admission.window.as_mut())
+    {
+        window.retained_authority = window_proof;
+    }
+    Ok(())
 }
 
 pub(crate) async fn claim_capacity(
@@ -529,10 +658,14 @@ pub(crate) async fn claim_capacity(
         );
     }
     let collection = db.collection::<AssistantConversation>(COLLECTION_NAME);
+    let prior = retained_material(db, session, offered, &filter).await?;
     let change = collection
         .find_one_and_update(filter, doc! {"$set":fields})
         .return_document(mongodb::options::ReturnDocument::After);
-    let claimed = change.session(&mut *session).await?;
+    let mut claimed = change.session(&mut *session).await?;
+    if let (Some(row), Some(material)) = (claimed.as_mut(), prior) {
+        rebind_retained_material(db, session, row, material).await?;
+    }
     if let Some(active) = claimed.as_ref().and_then(|row| row.active_turn.as_ref()) {
         if let (Some(source), Some(attempt)) =
             (&active.restart_admission, &active.execution_attempt)

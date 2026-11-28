@@ -81,6 +81,12 @@ impl Input {
         row: &AssistantConversation,
         window: &ReattachWindow,
     ) -> Result<Self, TurnError> {
+        let turn = row.active_turn.as_ref().ok_or_else(unknown)?;
+        if !super::super::execution_permission_dispatch::proposals::window_identity(row, turn)
+            .is_ok_and(|expected| expected == window.retained_authority)
+        {
+            return Err(unknown());
+        }
         let bytes = record::Identity::of(row, &window.key)
             .open(&state.encryption_keys, window)
             .await
@@ -111,11 +117,16 @@ fn unknown() -> TurnError {
 fn before_admission(
     value: &Value,
     window: &ReattachWindow,
+    row: &AssistantConversation,
     active: &crate::models::assistant_conversation::ActiveTurn,
     version: i32,
 ) -> bool {
     let now = Utc::now();
-    !window.accepted
+    super::super::assistant_stream_checkpoint::window_matches_snapshot(row, active)
+        && active.reply.as_ref().is_none_or(|reply| {
+            super::super::assistant_stream_checkpoint::matches_snapshot(row, active, reply)
+        })
+        && !window.accepted
         && !window.terminal
         && active.running_response.is_none()
         && !active
@@ -214,7 +225,7 @@ pub(super) async fn resolve_budget_window(
         }
         let value = envelope(response).await?;
         let absent = value["status"] == "not_found"
-            && before_admission(&value, window, active, admission.version);
+            && before_admission(&value, window, &current, active, admission.version);
         let failed_budget = value["status"] == "failed"
             && identity(&value, credential)
                 .and_then(|binding| terminal_snapshot(&value, &binding).ok())
@@ -301,15 +312,23 @@ pub(super) async fn reconnect(
         .await
         .map_err(|_| unknown())?
         .ok_or_else(unknown)?;
-    if let (Some(turn), Some(watch)) = (saved.active_turn.as_mut(), &events.checkpoint) {
-        let latest = watch.borrow();
-        if latest.upstream.is_some()
-            && turn
-                .reply
-                .as_ref()
-                .is_none_or(|reply| latest.cursor > reply.cursor)
-        {
-            turn.reply = Some(latest.clone());
+    if !super::super::execution_permission_dispatch::proposals::retained_identity_matches(
+        row, &saved,
+    ) {
+        return Err(unknown());
+    }
+    if let Some(watch) = &events.checkpoint {
+        let latest = watch.borrow().clone();
+        let replace = saved.active_turn.as_ref().is_some_and(|turn| {
+            latest.upstream.is_some()
+                && super::super::assistant_stream_checkpoint::matches_snapshot(
+                    &saved, turn, &latest,
+                )
+                && super::super::assistant_stream_checkpoint::reply_for_snapshot(&saved, turn)
+                    .is_none_or(|reply| latest.cursor > reply.cursor)
+        });
+        if replace && let Some(turn) = saved.active_turn.as_mut() {
+            turn.reply = Some(latest);
         }
     }
     let admission = saved
@@ -481,6 +500,11 @@ pub(crate) async fn cancel_background(
     policy: Option<BillingRoutePolicy>,
 ) -> Option<ConfirmedCancellation> {
     let turn = row.active_turn.as_ref()?;
+    if !turn.stop_requested
+        && !super::super::assistant_stream_checkpoint::window_matches_snapshot(row, turn)
+    {
+        return None;
+    }
     let admission = turn.restart_admission.as_deref()?;
     let window = admission.window.as_ref()?;
     if window.terminal {
@@ -543,7 +567,7 @@ pub(crate) async fn cancel_background(
                     }
                     Some("cancelled")
                         if id.is_none()
-                            && before_admission(&value, window, turn, admission.version) =>
+                            && before_admission(&value, window, row, turn, admission.version) =>
                     {
                         outcome = "cancelled";
                         stopped_binding = Some((
@@ -657,6 +681,15 @@ pub(super) async fn recover(
     partial: &mut String,
     recovered_binding: &mut Option<InstructionBinding>,
 ) -> Result<TurnResult, TurnError> {
+    let active = row.active_turn.as_ref().ok_or_else(unknown)?;
+    if !super::super::assistant_stream_checkpoint::window_matches_snapshot(row, active)
+        || active.reply.is_some()
+            && super::super::assistant_stream_checkpoint::reply_for_snapshot(row, active).is_none()
+    {
+        // Invalid cursor/text is uncertainty, never proof that a request did
+        // not start. Do not silently turn it into a fresh POST opportunity.
+        return Err(unknown());
+    }
     let mut saved = row.clone();
     let mut window = window.clone();
     let mut post_first = false;
@@ -912,7 +945,7 @@ async fn recover_window(
     let mut key = window.key.clone();
     let mut accepted = window.accepted;
     let redact = |text: &str| input.redact(text, credential);
-    let prior = active.reply.as_ref();
+    let prior = super::super::assistant_stream_checkpoint::reply_for_snapshot(row, active);
     *partial = prior
         .filter(|reply| reply.text.starts_with(&input.prefix))
         .map_or_else(|| input.prefix.clone(), |reply| reply.text.clone());
@@ -1164,7 +1197,7 @@ async fn recover_window(
             }
             let absent = !accepted
                 && status == "not_found"
-                && before_admission(&value, window, active, admission.version);
+                && before_admission(&value, window, row, active, admission.version);
             let not_started = status == "failed"
                 && sequence.is_none()
                 && cursor.is_none()
@@ -1231,7 +1264,7 @@ async fn recover_window(
             if status == "cancelled"
                 && binding.is_none()
                 && !accepted
-                && before_admission(&value, window, active, admission.version)
+                && before_admission(&value, window, row, active, admission.version)
             {
                 confirm(state, row, &key).await?;
                 return Err(TurnError::new("cancelled"));

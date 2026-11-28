@@ -836,6 +836,14 @@ pub(crate) async fn run_owner_turn(
     events: Events,
 ) -> Option<OwnerTurnSettlement> {
     if super::execution_permission_dispatch::proposals::retained_turn(&row) {
+        let active = row.active_turn.as_ref()?;
+        if !super::assistant_stream_checkpoint::window_matches_snapshot(&row, active)
+            || active.reply.as_ref().is_some_and(|reply| {
+                !super::assistant_stream_checkpoint::matches_snapshot(&row, active, reply)
+            })
+        {
+            return None;
+        }
         let context = (&state.db, &row);
         let ownership =
             super::transaction_service::run_db_only(&state.db, &context, |session, (db, row)| {
@@ -1122,7 +1130,8 @@ async fn drive_owner_turn(
     ).ok()?;
     events.checkpoint = Some(checkpoint);
     if let Some(active) = row.active_turn.as_ref().filter(|turn|turn.restart_offer.is_some()) {
-        if let Some(reply) = &active.reply && let Some(sender) = &events.checkpoint {
+        if let Some(reply) = super::assistant_stream_checkpoint::reply_for_snapshot(&row, active)
+            && let Some(sender) = &events.checkpoint {
             events.cursor = events.cursor.max(reply.cursor.max(0) as u64);
             sender.send_replace(reply.clone());
         }
@@ -1215,7 +1224,7 @@ async fn drive_owner_turn(
     } else {
         Ok(())
     };
-    let mut partial = row.active_turn.as_ref().filter(|turn|turn.restart_offer.is_some()).and_then(|turn|turn.reply.as_ref()).map(|reply|reply.text.clone()).unwrap_or_default();
+    let mut partial = row.active_turn.as_ref().filter(|turn|turn.restart_offer.is_some()).and_then(|turn|super::assistant_stream_checkpoint::reply_for_snapshot(&row, turn)).map(|reply|reply.text.clone()).unwrap_or_default();
     let mut instruction_context = None;
     let mut recovered_binding = None;
     let mut result = match queued {

@@ -20,10 +20,7 @@ pub(super) async fn expired_channel(
     if !channel_expired(&state.db, row).await? {
         return Ok(Outcome::Live);
     }
-    if credential.api_key_id != row.credential_api_key_id || credential.raw_key.is_empty() {
-        return Err(refused());
-    }
-    let key_hash = crate::crypto::token::hash_token(credential.raw_key.as_str());
+    let key_hash = credential_hash(row, credential)?;
     let mut session = state.db.client().start_session().await?;
     let retired = session
         .start_transaction()
@@ -50,6 +47,28 @@ pub(super) async fn expired_channel(
     }).map(Outcome::Receipt).unwrap_or(Outcome::Withheld))
 }
 
+pub(super) fn credential_hash(
+    row: &AssistantConversation,
+    credential: &crate::services::assistant_agent_credential_service::AssistantCredential,
+) -> AppResult<String> {
+    if credential.api_key_id != row.credential_api_key_id || credential.raw_key.is_empty() {
+        return Err(refused());
+    }
+    Ok(crate::crypto::token::hash_token(
+        credential.raw_key.as_str(),
+    ))
+}
+
+pub(super) async fn fence_actor(
+    db: &Database,
+    session: &mut ClientSession,
+    row: &AssistantConversation,
+    key_hash: &str,
+) -> AppResult<()> {
+    super::super::fence_active_account(db, session, &row.user_id).await?;
+    continuation::fence_credential(db, session, row, key_hash).await
+}
+
 async fn retire_in_session(
     db: &Database,
     session: &mut ClientSession,
@@ -67,8 +86,7 @@ async fn retire_in_session(
         Some(&mut *session),
     )
     .await?;
-    super::super::fence_active_account(db, session, &row.user_id).await?;
-    continuation::fence_credential(db, session, row, key_hash).await?;
+    fence_actor(db, session, row, key_hash).await?;
     let mut root = continuation::original_task_filter(row)?;
     root.insert(
         "$expr",
@@ -160,13 +178,28 @@ async fn retire_in_session(
         lifecycle::cancel_in_session(db, session, filter, "authority_or_task_unavailable").await?;
         retired.push(request.id.clone());
     }
-    if retired.is_empty() {
-        return prior_retirements(db, session, row, &current).await;
+    let retired = if retired.is_empty() {
+        prior_retirements(db, session, row, &current).await?
+    } else {
+        retired.sort();
+        Some(record_retirements(db, session, row, &retired).await?)
+    };
+    if retired.is_some() {
+        // Only this complete, expired-source transaction makes the local
+        // receipt exclusive. Live per-member retirement stays provisional.
+        let changed = db
+            .collection::<Document>("assistant_conversations")
+            .update_one(
+                crate::services::assistant_nyxagent::WorkerFence::capture(row)?.filter(),
+                doc! {"$set": {"active_turn.execution_local_only": true}},
+            )
+            .session(&mut *session)
+            .await?;
+        if changed.matched_count != 1 {
+            return Err(refused());
+        }
     }
-    retired.sort();
-    record_retirements(db, session, row, &retired)
-        .await
-        .map(Some)
+    Ok(retired)
 }
 
 /// This observation grants no authority; mutation repeats every exact fence.

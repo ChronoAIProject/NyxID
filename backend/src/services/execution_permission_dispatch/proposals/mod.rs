@@ -23,7 +23,7 @@ pub(crate) mod v3;
 pub(crate) use batch::{
     checkpoint_identity, fence_checkpoint, fence_settlement as fence_retained_settlement,
     filter_decisions, record_admission as record_owner_admission, retained_identity_matches,
-    retained_turn,
+    retained_turn, window_identity,
 };
 pub(crate) use continuation::ResumeOutcome;
 pub(crate) use effects::ensure_indexes as ensure_owner_continuation_indexes;

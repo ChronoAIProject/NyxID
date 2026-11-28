@@ -72,10 +72,41 @@ async fn model(f: &Fixture, readback: bool) -> Model {
 
 #[derive(Clone)]
 struct RetainedStreamControl {
+    initial: bool,
     started: Arc<tokio::sync::Notify>,
     first: Arc<tokio::sync::Semaphore>,
     second: Arc<tokio::sync::Semaphore>,
     finish: Arc<tokio::sync::Semaphore>,
+    number: Arc<std::sync::atomic::AtomicUsize>,
+    lookups: Arc<std::sync::atomic::AtomicUsize>,
+    lookup_started: Arc<tokio::sync::Notify>,
+    lookup_gate: Arc<tokio::sync::Semaphore>,
+    cancels: Arc<std::sync::atomic::AtomicUsize>,
+}
+impl RetainedStreamControl {
+    fn new(initial: bool) -> Self {
+        Self {
+            initial,
+            started: Arc::new(tokio::sync::Notify::new()),
+            first: Arc::new(tokio::sync::Semaphore::new(0)),
+            second: Arc::new(tokio::sync::Semaphore::new(0)),
+            finish: Arc::new(tokio::sync::Semaphore::new(0)),
+            number: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            lookups: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            lookup_started: Arc::new(tokio::sync::Notify::new()),
+            lookup_gate: Arc::new(tokio::sync::Semaphore::new(0)),
+            cancels: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }
+    }
+    fn terminal(&self, cancelled: bool) -> Value {
+        let number = self.number.load(std::sync::atomic::Ordering::SeqCst);
+        let id = format!("resp_11111111111111111111111111111111_{number:032x}");
+        let status = if cancelled { "cancelled" } else { "completed" };
+        json!({"status":status,"conversation_id":"conv_11111111111111111111111111111111","response_id":id,
+            "response":{"id":id,"conversation":{"id":"conv_11111111111111111111111111111111"},"status":status,
+                "output":[{"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text",
+                    "text":if cancelled {"Retained first fragment. "} else {"Retained first fragment. Retained second fragment."},"annotations":[]}]}]}})
+    }
 }
 
 async fn model_with_initial_reviews(f: &Fixture, readback: bool, queue_readback: bool) -> Model {
@@ -94,6 +125,20 @@ async fn controlled_model(
     let captured_reads = reads.clone();
     let router = f.router();
     let raw = f.raw.clone();
+    let reattach = stream.clone();
+    let cancellation = stream.clone();
+    let cancel = move || {
+        let control = cancellation.clone();
+        async move {
+            let Some(control) = control else {
+                return StatusCode::NOT_FOUND.into_response();
+            };
+            control
+                .cancels
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Json(control.terminal(true)).into_response()
+        }
+    };
     let upstream = Router::new().route("/v1/responses", post(move |Json(body): Json<Value>| {
         let calls = captured.clone();
         let router = router.clone();
@@ -160,18 +205,24 @@ async fn controlled_model(
                     }
                 }
             };
-            if let Some(control) = stream.filter(|_| retained) {
+            if let Some(control) = stream.filter(|control| retained || control.initial) {
+                let background = body["background"] == true;
+                control.number.store(number, std::sync::atomic::Ordering::SeqCst);
                 control.started.notify_one();
                 let stream = async_stream::stream! {
+                    if background {
+                        yield Ok::<_, std::convert::Infallible>(axum::response::sse::Event::default().data(
+                            json!({"type":"response.created","sequence_number":0,"response":{"id":format!("resp_11111111111111111111111111111111_{number:032x}"),"conversation":{"id":"conv_11111111111111111111111111111111"},"status":"in_progress"}}).to_string()));
+                    }
                     control.first.acquire().await.unwrap().forget();
                     yield Ok::<_, std::convert::Infallible>(axum::response::sse::Event::default().data(
-                        json!({"type":"response.output_text.delta","sequence_number":0,"delta":"Retained first fragment. "}).to_string()));
+                        json!({"type":"response.output_text.delta","sequence_number":if background {1}else{0},"delta":"Retained first fragment. "}).to_string()));
                     control.second.acquire().await.unwrap().forget();
                     yield Ok::<_, std::convert::Infallible>(axum::response::sse::Event::default().data(
-                        json!({"type":"response.output_text.delta","sequence_number":1,"delta":"Retained second fragment."}).to_string()));
+                        json!({"type":"response.output_text.delta","sequence_number":if background {2}else{1},"delta":"Retained second fragment."}).to_string()));
                     control.finish.acquire().await.unwrap().forget();
                     yield Ok::<_, std::convert::Infallible>(axum::response::sse::Event::default().data(
-                        json!({"type":"response.completed","sequence_number":2,"response":{
+                        json!({"type":"response.completed","sequence_number":if background {3}else{2},"response":{
                             "id":format!("resp_11111111111111111111111111111111_{number:032x}"),
                             "conversation":{"id":"conv_11111111111111111111111111111111"},"status":"completed",
                             "output":[{"type":"message","role":"assistant","phase":"final_answer","status":"completed",
@@ -188,7 +239,18 @@ async fn controlled_model(
             }});
             ([("content-type", "text/event-stream")], format!("data: {frame}\n\n")).into_response()
         }
-    }));
+    }))
+    .route("/v1/responses/lookup", axum::routing::get(move || {
+        let control = reattach.clone(); async move {
+            let Some(control) = control else { return StatusCode::NOT_FOUND.into_response(); };
+            control.lookups.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            control.lookup_started.notify_one();
+            control.lookup_gate.acquire().await.unwrap().forget();
+            Json(control.terminal(false)).into_response()
+        }
+    }))
+    .route("/v1/responses/cancel", post(cancel.clone()))
+    .route("/v1/responses/{id}/cancel", post(cancel));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {

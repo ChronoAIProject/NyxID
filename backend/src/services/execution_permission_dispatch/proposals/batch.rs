@@ -123,12 +123,27 @@ pub(crate) fn checkpoint_identity(
     row: &AssistantConversation,
     turn: &crate::models::assistant_conversation::ActiveTurn,
 ) -> AppResult<Option<String>> {
+    saved_authority(row, turn, "retained-checkpoint-v1")
+}
+
+pub(crate) fn window_identity(
+    row: &AssistantConversation,
+    turn: &crate::models::assistant_conversation::ActiveTurn,
+) -> AppResult<Option<String>> {
+    saved_authority(row, turn, "retained-window-v1")
+}
+
+fn saved_authority(
+    row: &AssistantConversation,
+    turn: &crate::models::assistant_conversation::ActiveTurn,
+    purpose: &str,
+) -> AppResult<Option<String>> {
     if !retained_events(&turn.events) {
         return Ok(None);
     }
     let mut original = row.clone();
     original.active_turn = Some(turn.clone());
-    fingerprint(&("retained-checkpoint-v1", TurnAuthority::capture(&original)?)).map(Some)
+    fingerprint(&(purpose, TurnAuthority::capture(&original)?)).map(Some)
 }
 
 pub(crate) async fn fence_checkpoint(
@@ -888,6 +903,8 @@ pub(super) async fn admit(
                         {
                             return Err(refused());
                         }
+                        #[cfg(test)]
+                        super::resume::resume_boundary(db, row, "binding_live_root").await;
                         let live_root: AppResult<()> = async {
                             tasks::fence(db, session, task).await?;
                             let mut root = tasks::live_filter(task)?;
@@ -910,6 +927,9 @@ pub(super) async fn admit(
                         .await;
                         if let Err(error) = live_root {
                             if error.is_forbidden() && terminal_task(db, session, row).await? {
+                                #[cfg(test)]
+                                super::resume::resume_boundary(db, row, "binding_terminal_root")
+                                    .await;
                                 super::local::fence_live_channel(db, session, row).await?;
                                 block_in(db, session, &current).await?;
                                 return Ok(true);

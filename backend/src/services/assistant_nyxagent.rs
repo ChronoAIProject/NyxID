@@ -3874,6 +3874,7 @@ pub(crate) async fn begin_owner_turn_in_session(
     };
     row.active_turn = Some(ActiveTurn {
         execution_local_retirements: None,
+        execution_local_only: false,
         restart_offer: None,
         restart_eligibility: None,
         restart_admission: None,
@@ -5578,13 +5579,10 @@ pub async fn stop_requested(
 }
 
 fn checkpoint_reply_text(row: &AssistantConversation, turn: &ActiveTurn) -> String {
-    turn.reply.as_ref().map_or_else(String::new, |reply| {
-        let proof = super::execution_permission_dispatch::proposals::checkpoint_identity(row, turn);
-        if !proof.is_ok_and(|expected| expected == reply.retained_authority) {
-            return String::new();
-        }
-        super::assistant_citation_markers::sanitize(&reply.text).into_owned()
-    })
+    super::assistant_stream_checkpoint::reply_for_snapshot(row, turn)
+        .map_or_else(String::new, |reply| {
+            super::assistant_citation_markers::sanitize(&reply.text).into_owned()
+        })
 }
 
 #[derive(Clone)]

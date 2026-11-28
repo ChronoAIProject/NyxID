@@ -10,11 +10,44 @@ use tokio::sync::watch;
 use tokio_util::task::AbortOnDropHandle;
 
 use crate::errors::AppResult;
-use crate::models::assistant_conversation::{AssistantConversation, COLLECTION_NAME, StreamReply};
+use crate::models::assistant_conversation::{
+    ActiveTurn, AssistantConversation, COLLECTION_NAME, StreamReply,
+};
 
 #[cfg(test)]
 tokio::task_local! {
     pub(crate) static CHECKPOINT_WRITES: tokio::sync::mpsc::UnboundedSender<bool>;
+}
+
+/// Validate the complete saved snapshot, including ordinary/retained proof
+/// compatibility. Callers withhold the whole reply, including replay cursors.
+pub(crate) fn matches_snapshot(
+    row: &AssistantConversation,
+    turn: &ActiveTurn,
+    reply: &StreamReply,
+) -> bool {
+    window_matches_snapshot(row, turn)
+        && super::execution_permission_dispatch::proposals::checkpoint_identity(row, turn)
+            .is_ok_and(|expected| expected == reply.retained_authority)
+}
+
+pub(crate) fn window_matches_snapshot(row: &AssistantConversation, turn: &ActiveTurn) -> bool {
+    turn.restart_admission
+        .as_ref()
+        .and_then(|admission| admission.window.as_ref())
+        .is_none_or(|window| {
+            super::execution_permission_dispatch::proposals::window_identity(row, turn)
+                .is_ok_and(|expected| expected == window.retained_authority)
+        })
+}
+
+pub(crate) fn reply_for_snapshot<'a>(
+    row: &AssistantConversation,
+    turn: &'a ActiveTurn,
+) -> Option<&'a StreamReply> {
+    turn.reply
+        .as_ref()
+        .filter(|reply| matches_snapshot(row, turn, reply))
 }
 
 pub(crate) fn observe(reply: &mut StreamReply, event: &Value) {

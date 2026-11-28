@@ -547,14 +547,22 @@ only: their private result is neither opened nor rendered, and their proposal,
 grant, release and first-delivery records remain unchanged in either event order.
 The turn's server-only `execution_local_retirements` records the exact locally
 retired IDs, including a legitimate local cancellation committed while the
-source was live. Settlement marks only those receipts delivered and performs no
-owner-handoff settlement; an interrupted local receipt can reuse that same
-turn's durable IDs without another effect. This marker grants no execution or
-model authority and introduces no optional continuation-readiness dependency.
+source was live. These IDs remain provisional while the source is live: normal
+settlement records first delivery for both rendered terminal observers and
+new unsent receipts, preserving any earlier delivery ID on replay. Only the
+complete expired-source transaction sets `execution_local_only`. That disposition
+limits settlement to the local IDs and suppresses owner-handoff settlement;
+an interrupted local receipt can reuse that same turn's durable IDs without
+another effect. Neither field grants execution or model authority or introduces
+an optional continuation-readiness dependency.
 Disabling enrollment after admission still permits this exact local cleanup.
 The enrollment lookup must complete successfully, and the active personal
 account, exact credential relationship/key and all admitted identity fences
 remain mandatory; a false rollout result does not stand in for a read error.
+Live-source unsent retirement during disabled enrollment repeats those same
+account, cached raw-key hash and exact `assistant_agent_credentials` relationship
+checks in the retirement transaction. Missing relationships, key replacement,
+inactive keys/accounts and operational read failures cannot retire its grant.
 The provider capability carries the same
 captured authority through the actual send barrier. A pre-send refusal result
 also requires that authority and the exact preparing claim before retiring a grant.
@@ -684,11 +692,20 @@ The retained runner verifies that same identity before starting its driver or
 stream checkpoint; an unavailable ownership proof leaves the admitted turn
 recoverable and is not a settlement receipt.
 Retained stream checkpoints repeat the captured turn/event authority in their
-write transaction and carry a keyed identity proof. Final checkpoint recovery
-requires that proof to match the current authorized worker, task/source/key/model
-and decision events. A stale or historical markerless retained checkpoint does
-not become transcript text through Stop or lost-turn fallback. Ordinary stream
-checkpoint and restart behavior remains governed by the chat engine contract.
+write transaction and carry a keyed identity proof. The encrypted replay window
+carries a separate proof of the same admitted authority. History, reconnect,
+activity projection and final checkpoint recovery validate the saved snapshot's
+worker, task/source/key/model and complete decision events before using text,
+cursor or upstream replay metadata. An incompatible checkpoint is withheld as
+a whole, including its cursor; absence of usable text does not prove a request
+never started. A stale or historical markerless retained checkpoint/window
+cannot authorize transcript fallback, decryption or a fresh model request.
+An authenticated restart offer and successor claim each verify the original
+authority and transfer the checkpoint and window proofs atomically with their
+epoch/worker/claim change. A changed same-ID event cannot acquire that transfer,
+even when no checkpoint text exists. The survivor's direct terminal/deadline
+settlement uses only the validated claimed snapshot. Ordinary stream checkpoint
+and restart behavior remains governed by the chat engine contract.
 
 Marker authoring, joining and release require the optional fleet capability
 `permissions:execution-owner-continuation-v3`. It requires observed support from

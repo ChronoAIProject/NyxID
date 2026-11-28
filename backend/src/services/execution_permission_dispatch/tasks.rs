@@ -452,7 +452,11 @@ pub(crate) fn settle<'a>(
             .iter()
             .filter_map(|event| event.id.strip_prefix("execution-decision:"))
             .collect();
-        let receipts: Vec<_> = if let Some(ids) = &turn.execution_local_retirements {
+        let receipts: Vec<_> = if turn.execution_local_only {
+            let ids = turn
+                .execution_local_retirements
+                .as_ref()
+                .ok_or_else(refused)?;
             if task.channel_source.is_none()
                 || ids.is_empty()
                 || ids.len() > 64
@@ -488,7 +492,7 @@ pub(crate) fn settle<'a>(
                     )
                     .session(&mut *session)
                     .await?;
-                if turn.execution_local_retirements.is_none() {
+                if !turn.execution_local_only {
                     // A reconciled release can include successful receipts absent
                     // from this wake. Settle that exact atomically released batch,
                     // so maintenance cannot publish an extra sibling notice later.
@@ -523,10 +527,7 @@ pub(crate) fn settle<'a>(
             .iter()
             .filter_map(|e| e.id.strip_prefix("execution-decision-v2:"))
             .collect();
-        if turn.execution_local_retirements.is_none()
-            && !v2_receipts.is_empty()
-            && message.status == "completed"
-        {
+        if !turn.execution_local_only && !v2_receipts.is_empty() && message.status == "completed" {
             db.collection::<Document>("approval_requests").update_many(doc!{"_id":{"$in":v2_receipts},"user_id":&row.user_id,"execution_proposal.v2.state":{"$in":["completed","not_sent","unknown","denied","expired","cancelled"]}},doc!{"$set":{"execution_proposal.v2.delivered_turn_id":&turn.turn_id}}).session(&mut *session).await?;
         }
         if task.task.root_kind != TaskRootKind::Message

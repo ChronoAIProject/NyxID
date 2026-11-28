@@ -3088,7 +3088,7 @@ async fn expired_channel_observer_cases(
                 .await
                 .unwrap();
             let first = event_turn(&f, &row).await;
-            if matches!(outcome, "live" | "expired_undelivered") {
+            if matches!(outcome, "live" | "expired_undelivered" | "live_unsent") {
                 proposals::continuation::FAIL_AFTER_RELEASE
                     .scope(true, run(&f, &first))
                     .await;
@@ -3106,7 +3106,7 @@ async fn expired_channel_observer_cases(
                 assert_eq!(original_p.state, "completed");
                 assert_eq!(original.activity_outcome.as_deref(), Some("completed"));
             }
-            if matches!(outcome, "live" | "expired_undelivered") {
+            if matches!(outcome, "live" | "expired_undelivered" | "live_unsent") {
                 assert!(original_p.delivered_turn_id.is_none());
                 assert_eq!(
                     original_p
@@ -3132,7 +3132,11 @@ async fn expired_channel_observer_cases(
             );
             assert_eq!(
                 model.calls.lock().unwrap().len(),
-                if outcome == "expired_delivered" { 2 } else { 1 }
+                if matches!(outcome, "expired_delivered" | "live_unsent_delivered") {
+                    2
+                } else {
+                    1
+                }
             );
             if boundary != Some("between_members")
                 && matches!(outcome, "expired_undelivered" | "expired_delivered")
@@ -3158,6 +3162,21 @@ async fn expired_channel_observer_cases(
                 engine::push_events(&f.state.db, &f.owner, &row.id, replay)
                     .await
                     .unwrap();
+            }
+            if matches!(outcome, "live_unsent" | "live_unsent_delivered")
+                || (!disabled && boundary == Some("between_members"))
+            {
+                crate::services::approval_service::revoke_grant(
+                    &f.state.db,
+                    &f.owner,
+                    proposals::proposal(&approved_b)
+                        .unwrap()
+                        .grant_id
+                        .as_deref()
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
             }
             let admitted = event_turn(&f, &row).await;
             let turn = admitted.active_turn.as_ref().unwrap();
@@ -3186,7 +3205,18 @@ async fn expired_channel_observer_cases(
                 owner_runner_lifecycle::disable_rollout(&f).await;
             }
 
-            if outcome == "live" {
+            if matches!(outcome, "live_unsent" | "live_unsent_delivered") {
+                owner_runner_lifecycle::live_mixed_unsent(
+                    &f,
+                    &admitted,
+                    a,
+                    &approved_b,
+                    &model,
+                    &relay,
+                    a_first,
+                )
+                .await;
+            } else if outcome == "live" {
                 run(&f, &admitted).await;
                 final_reply(&f, &row, 2, &model).await;
                 let messages = engine::messages(&f.state.db, &f.owner, &row.id, 30, None)
@@ -3447,6 +3477,7 @@ async fn expired_channel_observer_cases(
                         "The operation was not sent because its authority or task is no longer available."
                     );
                     let current = engine::get(&f.state.db, &f.owner, &row.id).await.unwrap();
+                    assert!(current.active_turn.as_ref().unwrap().execution_local_only);
                     assert_eq!(
                         current
                             .active_turn
@@ -3522,12 +3553,21 @@ async fn expired_channel_observer_cases(
                 }
                 let saved_b = stored(&f, &b.id).await;
                 let p = proposals::proposal(&saved_b).unwrap();
-                assert_eq!(p.state, "cancelled");
-                assert_eq!(saved_b.status, "expired");
-                assert_eq!(
-                    p.failure_code.as_deref(),
-                    Some("authority_or_task_unavailable")
-                );
+                if !disabled && boundary == Some("between_members") && !a_first {
+                    assert_eq!(p.state, "not_sent");
+                    assert_eq!(saved_b.status, "approved");
+                    assert_eq!(
+                        p.failure_code.as_deref(),
+                        Some("authority_or_operation_unavailable")
+                    );
+                } else {
+                    assert_eq!(p.state, "cancelled");
+                    assert_eq!(saved_b.status, "expired");
+                    assert_eq!(
+                        p.failure_code.as_deref(),
+                        Some("authority_or_task_unavailable")
+                    );
+                }
                 assert_eq!(p.delivered_turn_id.as_deref(), Some(turn.turn_id.as_str()));
                 assert!(p.owner_continuation.as_ref().unwrap().blocked);
                 assert!(

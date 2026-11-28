@@ -100,6 +100,9 @@ pub async fn attempt(
         && let Some(deployment) = &admission.reattach
     {
         let window = crate::models::assistant_conversation::ReattachWindow {
+            retained_authority: super::execution_permission_dispatch::proposals::window_identity(
+                row, turn,
+            )?,
             channel_capacity_retry: channel_retry_session.is_some(),
             refusal: None,
             accepted: false,

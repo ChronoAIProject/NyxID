@@ -1751,6 +1751,10 @@ the active turn; forced Stop and orphan reclamation retain only authorized
 partial text. Retained permission checkpoints additionally follow
 [exact resume and recovery](../EXECUTION_PERMISSIONS.md#exact-resume-and-recovery).
 Only transcript history includes the checkpoint, not the conversation index.
+History projects retained text and cursor together only when the checkpoint and
+any replay window match the complete authority on that saved turn snapshot.
+Reconnect and activity projection apply the same validation; an obsolete
+fragment cannot seed a replay cursor or a failed terminal transcript.
 The POST response also identifies its conversation in `X-NyxID-Conversation-Id`,
 so a new thread remains recoverable if its first SSE event is lost.
 
@@ -1849,6 +1853,14 @@ The survivor takes over the turn's capacity slot and attaches to the existing
 upstream execution: it looks up the background response by the saved window key
 and continues reading its events after the saved reply checkpoint. The first
 handoff emits a `turn.notice` with code `continued_after_restart`.
+For retained permission turns, both the restart offer and successor claim
+transaction verify the original worker and exact decision proofs before
+transferring the saved checkpoint and encrypted replay-window authority to the
+new epoch/claim. The survivor restores text, upstream cursor and replay input
+only from that validated transfer, including its direct terminal/deadline
+settlement path. An incompatible or historical unproved retained window remains
+unavailable for replay, even if it has no saved text. See
+[exact resume and recovery](../EXECUTION_PERMISSIONS.md#exact-resume-and-recovery).
 
 Turn survival keeps the no-replay guarantee. The survivor sends the request again
 only when NyxAgent's answer proves the original was never admitted or never
