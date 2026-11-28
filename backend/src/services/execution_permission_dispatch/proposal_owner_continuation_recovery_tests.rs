@@ -2653,7 +2653,11 @@ async fn owner_permission_resume_markerless_delivered_receipt_keeps_fresh_group_
 
 #[tokio::test]
 async fn owner_permission_resume_outer_runner_preserves_replacement_worker_jobs_and_stop() {
-    for change in ["worker", "events", "stop"] {
+    outer_runner_authority_cases(&["worker", "events", "stop"]).await;
+}
+
+async fn outer_runner_authority_cases(changes: &[&'static str]) {
+    for &change in changes {
         let (f, row) = assistant("owner_outer_authority_and_jobs").await;
         let auth = f.auth().await;
         let machine_fixture = crate::services::assistant_authority_tests::Fixture {
@@ -2664,8 +2668,29 @@ async fn owner_permission_resume_outer_runner_preserves_replacement_worker_jobs_
             auth,
             nyxbot_thread: row.id.clone(),
         };
-        let node =
+        let mut node =
             crate::services::machine_integration_tests::node(&machine_fixture, &f.owner).await;
+        if change == "scoped_stop" {
+            node.machine.as_mut().unwrap().exact_cancel = true;
+            f.state
+                .db
+                .collection::<Document>("nodes")
+                .update_one(
+                    doc! {"_id": &node.id},
+                    doc! {"$set": {"machine": bson::to_bson(&node.machine).unwrap()}},
+                )
+                .await
+                .unwrap();
+            f.state
+                .db
+                .collection::<Document>("assistant_conversations")
+                .update_one(
+                    doc! {"_id": &row.id},
+                    doc! {"$set": {"automation_v2": true}},
+                )
+                .await
+                .unwrap();
+        }
         let (peer, mut node_requests) = crate::services::machine_integration_tests::peer(
             &machine_fixture,
             &node,
@@ -2679,6 +2704,11 @@ async fn owner_permission_resume_outer_runner_preserves_replacement_worker_jobs_
             "state":"running","services":[],"created_at":bson::DateTime::now(),
             "expires_at":bson::DateTime::from_chrono(Utc::now()+chrono::Duration::hours(1)),
         }).await.unwrap();
+        let protected = if change == "scoped_stop" {
+            Some(owner_runner_lifecycle::protected_job(&f, &row, &job).await)
+        } else {
+            None
+        };
         set_task(&f, &row).await;
         let _ = sheet(&f, 200).await;
         let model = model(&f, false).await;
@@ -2701,7 +2731,17 @@ async fn owner_permission_resume_outer_runner_preserves_replacement_worker_jobs_
                 .execution_attempt
                 .is_none()
         );
-        if change == "stop" {
+        if change == "lease" {
+            owner_runner_lifecycle::lease_loss_without_stop(
+                &f,
+                &admitted,
+                &approved,
+                &job,
+                &model,
+                &mut node_requests,
+            )
+            .await;
+        } else if matches!(change, "stop" | "scoped_stop") {
             let status = crate::handlers::assistant_nyxagent::stop(
                 axum::extract::State(f.state.clone()),
                 test_utils::test_auth_user(&f.owner),
@@ -2715,7 +2755,17 @@ async fn owner_permission_resume_outer_runner_preserves_replacement_worker_jobs_
                     .await
                     .unwrap()
                     .unwrap();
-            assert_eq!(cancelled.operation, nyxid_machine::Operation::Cancel);
+            assert_eq!(
+                cancelled.operation,
+                if change == "scoped_stop" {
+                    nyxid_machine::Operation::CancelExact
+                } else {
+                    nyxid_machine::Operation::Cancel
+                }
+            );
+            if change == "scoped_stop" {
+                assert_eq!(cancelled.parameters["job_ids"], json!([job]));
+            }
             assert_eq!(cancelled.parameters["conversation_id"], row.id);
             assert_eq!(
                 cancelled.parameters["turn_id"],
@@ -2768,6 +2818,23 @@ async fn owner_permission_resume_outer_runner_preserves_replacement_worker_jobs_
                     .get_bool("revoked")
                     .unwrap()
             );
+            assert!(
+                node_requests.try_recv().is_err(),
+                "the normal driver must not broaden or duplicate the handler's Stop"
+            );
+            if let Some((id, before)) = &protected {
+                assert!(
+                    f.state
+                        .db
+                        .collection::<Document>("machine_jobs")
+                        .find_one(doc! {"_id": id})
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        == *before
+                );
+                assert_eq!(before.get_str("state").unwrap(), "running");
+            }
             assert!(f.server.received_requests().await.unwrap().is_empty());
             assert_eq!(model.calls.lock().unwrap().len(), 1);
         } else {
@@ -2940,14 +3007,27 @@ async fn owner_permission_resume_outer_runner_preserves_replacement_worker_jobs_
 
 #[tokio::test]
 async fn owner_permission_resume_expired_channel_observers_retire_unsent_in_both_orders() {
-    for a_first in [true, false] {
-        for outcome in [
+    expired_channel_observer_cases(
+        &[
             "live",
             "expired_undelivered",
             "expired_delivered",
             "expired_denied",
             "expired_unknown",
-        ] {
+        ],
+        None,
+        false,
+    )
+    .await;
+}
+
+async fn expired_channel_observer_cases(
+    outcomes: &[&str],
+    boundary: Option<&'static str>,
+    disabled: bool,
+) {
+    for a_first in [true, false] {
+        for &outcome in outcomes {
             let (f, row, _) = channel_turn_transport_with_expiry(
                 "owner_expired_observer_batch",
                 "direct",
@@ -3054,7 +3134,9 @@ async fn owner_permission_resume_expired_channel_observers_retire_unsent_in_both
                 model.calls.lock().unwrap().len(),
                 if outcome == "expired_delivered" { 2 } else { 1 }
             );
-            if matches!(outcome, "expired_undelivered" | "expired_delivered") {
+            if boundary != Some("between_members")
+                && matches!(outcome, "expired_undelivered" | "expired_delivered")
+            {
                 // An attempted private-result open would fail authentication. The
                 // local expired observer path must not try to read this ciphertext.
                 let version = proposals::v3::AssistantVersion::of(&original).unwrap();
@@ -3100,6 +3182,10 @@ async fn owner_permission_resume_expired_channel_observers_retire_unsent_in_both
                 task.hard_deadline
             );
             assert!(task.hard_deadline > Utc::now());
+            if disabled {
+                owner_runner_lifecycle::disable_rollout(&f).await;
+            }
+
             if outcome == "live" {
                 run(&f, &admitted).await;
                 final_reply(&f, &row, 2, &model).await;
@@ -3126,21 +3212,9 @@ async fn owner_permission_resume_expired_channel_observers_retire_unsent_in_both
                 assert_eq!(f.server.received_requests().await.unwrap().len(), 2);
                 assert_eq!(model.calls.lock().unwrap().len(), 2);
             } else {
-                tokio::time::sleep(
-                    (task.hard_deadline - Utc::now())
-                        .to_std()
-                        .unwrap_or_default()
-                        + std::time::Duration::from_millis(1),
-                )
-                .await;
-                tokio::time::timeout(std::time::Duration::from_secs(30),async {
-                loop {
-                    if f.state.db.collection::<Document>("assistant_messages").find_one(doc! {
-                        "_id":&task.task.root_id,"$expr":{"$lte":["$execution_task.hard_deadline","$$NOW"]}
-                    }).await.unwrap().is_some() {break}
-                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                if boundary.is_none() {
+                    owner_runner_lifecycle::wait_for_task_expiry(&f.state.db, &admitted).await;
                 }
-            }).await.unwrap();
                 let a_before = f
                     .state
                     .db
@@ -3177,6 +3251,14 @@ async fn owner_permission_resume_expired_channel_observers_retire_unsent_in_both
                     .await
                     .unwrap()
                     .unwrap();
+                let account_before = f
+                    .state
+                    .db
+                    .collection::<Document>("users")
+                    .find_one(doc! {"_id": &f.owner})
+                    .await
+                    .unwrap()
+                    .unwrap();
                 let relationship = f
                     .state
                     .db
@@ -3195,108 +3277,163 @@ async fn owner_permission_resume_expired_channel_observers_retire_unsent_in_both
                 let provider_before = f.server.received_requests().await.unwrap().len();
                 let model_before = model.calls.lock().unwrap().len();
                 let relay_before = relay.receipts.lock().unwrap().len();
-                for drift in [
-                    "worker",
-                    "events",
-                    "source",
-                    "root",
-                    "key",
-                    "lease",
-                    "stop",
-                    "relationship",
-                ] {
-                    let (collection, filter, update) = match drift {
-                        "worker" => (
-                            "assistant_conversations",
-                            doc! {"_id":&row.id},
-                            doc! {"$set":{"active_turn.worker_instance.id":"foreign-current-worker"}},
-                        ),
-                        "events" => (
-                            "assistant_conversations",
-                            doc! {"_id":&row.id},
-                            doc! {"$set":{"active_turn.events.0.text":"different admitted decision"}},
-                        ),
-                        "source" => (
-                            "assistant_conversations",
-                            doc! {"_id":&row.id},
-                            doc! {"$inc":{"active_turn.execution_task.channel_source.channel_revision":1_i64}},
-                        ),
-                        "root" => (
-                            "assistant_messages",
-                            doc! {"_id":&task.task.root_id},
-                            doc! {"$inc":{"execution_task.epoch":1_i64}},
-                        ),
-                        "key" => (
-                            "api_keys",
-                            doc! {"_id":&f.key},
-                            doc! {"$set":{"is_active":false}},
-                        ),
-                        "lease" => (
-                            "assistant_conversations",
-                            doc! {"_id":&row.id},
-                            doc! {"$set":{"active_turn.lease_expires_at":bson::DateTime::from_chrono(Utc::now()-chrono::Duration::seconds(1))}},
-                        ),
-                        "stop" => (
-                            "assistant_conversations",
-                            doc! {"_id":&row.id},
-                            doc! {"$set":{"active_turn.stop_requested":true}},
-                        ),
-                        _ => (
-                            "assistant_agent_credentials",
-                            doc! {"_id":relationship.get("_id").unwrap().clone()},
-                            doc! {"$set":{"api_key_id":"foreign-key"}},
-                        ),
-                    };
-                    f.state
-                        .db
-                        .collection::<Document>(collection)
-                        .update_one(filter, update)
+                if disabled && boundary.is_none() {
+                    let overrides = f.state.db.collection::<Document>("feature_flag_overrides");
+                    let selector = doc! {"flag_key": crate::services::execution_permission_enrollment::FLAG,
+                    "target_kind": "user", "target_key": &f.owner, "org_user_id": null};
+                    let original = overrides.find_one(selector.clone()).await.unwrap().unwrap();
+                    overrides
+                        .update_one(
+                            selector.clone(),
+                            doc! {"$set": {"enabled": "invalid-fixture-value"}},
+                        )
                         .await
                         .unwrap();
+                    assert!(
+                        crate::services::execution_permission_enrollment::live_enabled(
+                            &f.state.db,
+                            &f.owner,
+                            None
+                        )
+                        .await
+                        .is_err()
+                    );
                     let error =
                         execute_using_egress(&f, &admitted, &mut credential, egress.as_ref())
                             .await
                             .unwrap_err();
                     assert_eq!(
                         (error.code, error.stage),
-                        ("cancelled", "permission_resume"),
-                        "{outcome}/{drift}"
+                        ("assistant_unavailable", "permission_resume")
                     );
                     assert!(worker_documents(&f.state.db, &approved_b).await == b_before);
+                    overrides.replace_one(selector, original).await.unwrap();
                     assert!(
-                        f.state
-                            .db
-                            .collection::<Document>("approval_requests")
-                            .find_one(doc! {"_id":&a.id})
-                            .await
-                            .unwrap()
-                            .unwrap()
-                            == a_before
-                    );
-                    f.state.db.collection::<Document>("assistant_conversations").update_one(doc! {"_id":&row.id},doc! {"$set":{"active_turn":bson::to_bson(&admitted.active_turn).unwrap()}}).await.unwrap();
-                    f.state
-                        .db
-                        .collection::<Document>("assistant_messages")
-                        .replace_one(doc! {"_id":&task.task.root_id}, root_before.clone())
-                        .await
-                        .unwrap();
-                    f.state
-                        .db
-                        .collection::<Document>("api_keys")
-                        .replace_one(doc! {"_id":&f.key}, key_before.clone())
-                        .await
-                        .unwrap();
-                    f.state
-                        .db
-                        .collection::<Document>("assistant_agent_credentials")
-                        .replace_one(
-                            doc! {"_id":relationship.get("_id").unwrap().clone()},
-                            relationship.clone(),
+                        !crate::services::execution_permission_enrollment::live_enabled(
+                            &f.state.db,
+                            &f.owner,
+                            None
                         )
                         .await
-                        .unwrap();
+                        .unwrap()
+                    );
                 }
-                if outcome == "expired_undelivered" {
+                if boundary.is_none() {
+                    for drift in [
+                        "worker",
+                        "events",
+                        "source",
+                        "root",
+                        "key",
+                        "account",
+                        "lease",
+                        "stop",
+                        "relationship",
+                    ] {
+                        let (collection, filter, update) = match drift {
+                            "worker" => (
+                                "assistant_conversations",
+                                doc! {"_id":&row.id},
+                                doc! {"$set":{"active_turn.worker_instance.id":"foreign-current-worker"}},
+                            ),
+                            "events" => (
+                                "assistant_conversations",
+                                doc! {"_id":&row.id},
+                                doc! {"$set":{"active_turn.events.0.text":"different admitted decision"}},
+                            ),
+                            "source" => (
+                                "assistant_conversations",
+                                doc! {"_id":&row.id},
+                                doc! {"$inc":{"active_turn.execution_task.channel_source.channel_revision":1_i64}},
+                            ),
+                            "root" => (
+                                "assistant_messages",
+                                doc! {"_id":&task.task.root_id},
+                                doc! {"$inc":{"execution_task.epoch":1_i64}},
+                            ),
+                            "key" => (
+                                "api_keys",
+                                doc! {"_id":&f.key},
+                                doc! {"$set":{"is_active":false}},
+                            ),
+                            "account" => (
+                                "users",
+                                doc! {"_id": &f.owner},
+                                doc! {"$set": {"is_active": false}},
+                            ),
+                            "lease" => (
+                                "assistant_conversations",
+                                doc! {"_id":&row.id},
+                                doc! {"$set":{"active_turn.lease_expires_at":bson::DateTime::from_chrono(Utc::now()-chrono::Duration::seconds(1))}},
+                            ),
+                            "stop" => (
+                                "assistant_conversations",
+                                doc! {"_id":&row.id},
+                                doc! {"$set":{"active_turn.stop_requested":true}},
+                            ),
+                            _ => (
+                                "assistant_agent_credentials",
+                                doc! {"_id":relationship.get("_id").unwrap().clone()},
+                                doc! {"$set":{"api_key_id":"foreign-key"}},
+                            ),
+                        };
+                        f.state
+                            .db
+                            .collection::<Document>(collection)
+                            .update_one(filter, update)
+                            .await
+                            .unwrap();
+                        let error =
+                            execute_using_egress(&f, &admitted, &mut credential, egress.as_ref())
+                                .await
+                                .unwrap_err();
+                        assert_eq!(
+                            (error.code, error.stage),
+                            ("cancelled", "permission_resume"),
+                            "{outcome}/{drift}"
+                        );
+                        assert!(worker_documents(&f.state.db, &approved_b).await == b_before);
+                        assert!(
+                            f.state
+                                .db
+                                .collection::<Document>("approval_requests")
+                                .find_one(doc! {"_id":&a.id})
+                                .await
+                                .unwrap()
+                                .unwrap()
+                                == a_before
+                        );
+                        f.state.db.collection::<Document>("assistant_conversations").update_one(doc! {"_id":&row.id},doc! {"$set":{"active_turn":bson::to_bson(&admitted.active_turn).unwrap()}}).await.unwrap();
+                        f.state
+                            .db
+                            .collection::<Document>("assistant_messages")
+                            .replace_one(doc! {"_id":&task.task.root_id}, root_before.clone())
+                            .await
+                            .unwrap();
+                        f.state
+                            .db
+                            .collection::<Document>("api_keys")
+                            .replace_one(doc! {"_id":&f.key}, key_before.clone())
+                            .await
+                            .unwrap();
+                        f.state
+                            .db
+                            .collection::<Document>("users")
+                            .replace_one(doc! {"_id": &f.owner}, account_before.clone())
+                            .await
+                            .unwrap();
+                        f.state
+                            .db
+                            .collection::<Document>("assistant_agent_credentials")
+                            .replace_one(
+                                doc! {"_id":relationship.get("_id").unwrap().clone()},
+                                relationship.clone(),
+                            )
+                            .await
+                            .unwrap();
+                    }
+                }
+                if boundary.is_none() && outcome == "expired_undelivered" {
                     // Interrupt after the actual local cancellation commits and
                     // before message settlement. The normal runner must reuse
                     // exactly B's durable local receipt, leaving observer A alone.
@@ -3327,7 +3464,19 @@ async fn owner_permission_resume_expired_channel_observers_retire_unsent_in_both
                                 && message.turn_id == turn.turn_id)
                     );
                 }
-                run(&f, &admitted).await;
+                if let Some(boundary) = boundary {
+                    owner_runner_lifecycle::run_at_expiry_boundary(
+                        &f,
+                        &admitted,
+                        boundary,
+                        &approved_b,
+                        a_first,
+                    )
+                    .await;
+                } else {
+                    run(&f, &admitted).await;
+                }
+
                 let messages = engine::messages(&f.state.db, &f.owner, &row.id, 30, None)
                     .await
                     .unwrap();
@@ -3437,3 +3586,6 @@ async fn owner_permission_resume_expired_channel_observers_retire_unsent_in_both
         }
     }
 }
+
+#[path = "proposal_owner_runner_lifecycle_tests.rs"]
+mod owner_runner_lifecycle;

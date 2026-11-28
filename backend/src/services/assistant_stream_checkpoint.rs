@@ -9,7 +9,13 @@ use serde_json::Value;
 use tokio::sync::watch;
 use tokio_util::task::AbortOnDropHandle;
 
-use crate::models::assistant_conversation::{COLLECTION_NAME, StreamReply};
+use crate::errors::AppResult;
+use crate::models::assistant_conversation::{AssistantConversation, COLLECTION_NAME, StreamReply};
+
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static CHECKPOINT_WRITES: tokio::sync::mpsc::UnboundedSender<bool>;
+}
 
 pub(crate) fn observe(reply: &mut StreamReply, event: &Value) {
     let cursor = event["cursor"].as_i64().unwrap_or(0);
@@ -32,13 +38,47 @@ pub(crate) fn observe(reply: &mut StreamReply, event: &Value) {
     reply.cursor = cursor;
 }
 
+#[cfg(test)]
 pub(crate) fn start(
     db: Database,
     worker_filter: bson::Document,
     message_id: String,
     block_id: String,
 ) -> (watch::Sender<StreamReply>, AbortOnDropHandle<()>) {
+    start_inner(db, worker_filter, message_id, block_id, None, None)
+}
+
+pub(crate) fn start_owned(
+    db: Database,
+    row: &AssistantConversation,
+    message_id: String,
+    block_id: String,
+) -> AppResult<(watch::Sender<StreamReply>, AbortOnDropHandle<()>)> {
+    let identity = super::execution_permission_dispatch::proposals::checkpoint_identity(
+        row,
+        row.active_turn
+            .as_ref()
+            .ok_or(crate::errors::AppError::AssistantTurnRequired)?,
+    )?;
+    let filter = super::assistant_nyxagent::WorkerFence::capture(row)?.filter();
+    let retained = identity.as_ref().map(|_| row.clone());
+    Ok(start_inner(
+        db, filter, message_id, block_id, retained, identity,
+    ))
+}
+
+fn start_inner(
+    db: Database,
+    worker_filter: bson::Document,
+    message_id: String,
+    block_id: String,
+    retained: Option<AssistantConversation>,
+    identity: Option<String>,
+) -> (watch::Sender<StreamReply>, AbortOnDropHandle<()>) {
+    #[cfg(test)]
+    let writes = CHECKPOINT_WRITES.try_with(Clone::clone).ok();
     let (sender, mut receiver) = watch::channel(StreamReply {
+        retained_authority: identity,
         upstream: None,
         message_id,
         block_id,
@@ -66,14 +106,40 @@ pub(crate) fn start(
                     {"active_turn.reply.cursor": {"$exists": false}},
                     {"active_turn.reply.cursor": {"$lt": reply.cursor}}
                 ]});
-                let write =
-                    collection.update_one(filter, doc! {"$set": {"active_turn.reply": value}});
-                match tokio::time::timeout(
-                    Duration::from_secs(2),
-                    std::future::IntoFuture::into_future(write),
-                )
-                .await
-                {
+                let write = async {
+                    if let Some(row) = &retained {
+                        let context = (&db, row, &filter, &value);
+                        super::transaction_service::run_db_only(
+                            &db,
+                            &context,
+                            |session, (db, row, filter, value)| {
+                                Box::pin(async move {
+                                    super::execution_permission_dispatch::proposals::fence_checkpoint(
+                                        db, session, row,
+                                    )
+                                    .await?;
+                                    Ok(db.collection::<bson::Document>(COLLECTION_NAME)
+                                        .update_one(
+                                            (*filter).clone(),
+                                            doc! {"$set": {"active_turn.reply": (*value).clone()}},
+                                        )
+                                        .session(session)
+                                        .await?)
+                                })
+                            },
+                        )
+                        .await
+                    } else {
+                        Ok(collection.update_one(filter, doc! {"$set": {"active_turn.reply": value}}).await?)
+                    }
+                };
+                let result: Result<AppResult<mongodb::results::UpdateResult>, _> =
+                    tokio::time::timeout(Duration::from_secs(2), write).await;
+                #[cfg(test)]
+                if let Some(writes) = &writes {
+                    let _ = writes.send(matches!(&result, Ok(Ok(result)) if result.matched_count == 1));
+                }
+                match result {
                     Ok(Ok(result)) if result.matched_count == 0 => {
                         if reply.upstream.is_some() && saved_cursor == 0 {
                             saved_cursor = reply.cursor;
@@ -82,6 +148,7 @@ pub(crate) fn start(
                         }
                     }
                     Ok(Ok(_)) => saved_cursor = reply.cursor,
+                    Ok(Err(error)) if error.is_forbidden() || matches!(error, crate::errors::AppError::NotFound(_)) => break,
                     // Keep the latest text and retry; checkpoint outages cannot stall tokens.
                     _ => {}
                 }
@@ -99,6 +166,7 @@ mod tests {
     #[test]
     fn checkpoints_recover_unicode_and_authoritative_text_without_duplicate_deltas() {
         let mut reply = StreamReply {
+            retained_authority: None,
             upstream: None,
             message_id: "message".into(),
             block_id: "block".into(),

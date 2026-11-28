@@ -70,7 +70,24 @@ async fn model(f: &Fixture, readback: bool) -> Model {
     model_with_initial_reviews(f, readback, false).await
 }
 
+#[derive(Clone)]
+struct RetainedStreamControl {
+    started: Arc<tokio::sync::Notify>,
+    first: Arc<tokio::sync::Semaphore>,
+    second: Arc<tokio::sync::Semaphore>,
+    finish: Arc<tokio::sync::Semaphore>,
+}
+
 async fn model_with_initial_reviews(f: &Fixture, readback: bool, queue_readback: bool) -> Model {
+    controlled_model(f, readback, queue_readback, None).await
+}
+
+async fn controlled_model(
+    f: &Fixture,
+    readback: bool,
+    queue_readback: bool,
+    stream: Option<RetainedStreamControl>,
+) -> Model {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let captured = calls.clone();
     let reads = Arc::new(Mutex::new(Vec::new()));
@@ -82,6 +99,7 @@ async fn model_with_initial_reviews(f: &Fixture, readback: bool, queue_readback:
         let router = router.clone();
         let raw = raw.clone();
         let reads = captured_reads.clone();
+        let stream = stream.clone();
         async move {
             let number = {
                 let mut calls = calls.lock().unwrap();
@@ -142,6 +160,26 @@ async fn model_with_initial_reviews(f: &Fixture, readback: bool, queue_readback:
                     }
                 }
             };
+            if let Some(control) = stream.filter(|_| retained) {
+                control.started.notify_one();
+                let stream = async_stream::stream! {
+                    control.first.acquire().await.unwrap().forget();
+                    yield Ok::<_, std::convert::Infallible>(axum::response::sse::Event::default().data(
+                        json!({"type":"response.output_text.delta","sequence_number":0,"delta":"Retained first fragment. "}).to_string()));
+                    control.second.acquire().await.unwrap().forget();
+                    yield Ok::<_, std::convert::Infallible>(axum::response::sse::Event::default().data(
+                        json!({"type":"response.output_text.delta","sequence_number":1,"delta":"Retained second fragment."}).to_string()));
+                    control.finish.acquire().await.unwrap().forget();
+                    yield Ok::<_, std::convert::Infallible>(axum::response::sse::Event::default().data(
+                        json!({"type":"response.completed","sequence_number":2,"response":{
+                            "id":format!("resp_11111111111111111111111111111111_{number:032x}"),
+                            "conversation":{"id":"conv_11111111111111111111111111111111"},"status":"completed",
+                            "output":[{"type":"message","role":"assistant","phase":"final_answer","status":"completed",
+                                "content":[{"type":"output_text","text":"Retained first fragment. Retained second fragment.","annotations":[]}]}]
+                        }}).to_string()));
+                };
+                return axum::response::Sse::new(stream).into_response();
+            }
             let frame = json!({"type":"response.completed","sequence_number":0,"response":{
                 "id":format!("resp_11111111111111111111111111111111_{number:032x}"),
                 "conversation":{"id":"conv_11111111111111111111111111111111"},"status":"completed",

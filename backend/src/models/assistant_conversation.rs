@@ -449,6 +449,9 @@ pub struct EngineWorkerInstance {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StreamReply {
+    /// Exact retained permission identity; absent on ordinary/historical streams.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retained_authority: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstream: Option<SubscriberCheckpoint>,
     pub message_id: String,
@@ -480,7 +483,7 @@ pub struct OutputPartLength {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ActiveTurn {
-    /// Server-fenced local expiry settlement; other admitted receipts are observers.
+    /// Server-fenced local unsent settlement; other admitted receipts are observers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_local_retirements: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

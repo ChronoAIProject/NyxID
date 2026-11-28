@@ -1114,12 +1114,12 @@ async fn drive_owner_turn(
         .map(|admission| admission.reply_id.clone()).unwrap_or_else(|| Uuid::new_v4().to_string());
     let block_id = format!("{message_id}-text");
     let worker_fence = engine::WorkerFence::capture(&row).ok()?;
-    let (checkpoint, _checkpoint_task) = super::assistant_stream_checkpoint::start(
+    let (checkpoint, _checkpoint_task) = super::assistant_stream_checkpoint::start_owned(
         state.db.clone(),
-        worker_fence.filter(),
+        &row,
         message_id.clone(),
         block_id.clone(),
-    );
+    ).ok()?;
     events.checkpoint = Some(checkpoint);
     if let Some(active) = row.active_turn.as_ref().filter(|turn|turn.restart_offer.is_some()) {
         if let Some(reply) = &active.reply && let Some(sender) = &events.checkpoint {
@@ -1355,7 +1355,7 @@ async fn drive_owner_turn(
     {
         // Platform revocation already captured durable exact effects. App Stop
         // keeps its ordinary broader cancellation at its explicit endpoint.
-        if row
+        if !row.automation_v2 && row
             .active_turn
             .as_ref()
             .is_none_or(|turn| turn.platform_origin.is_none() && turn.invocation_id.is_none())
@@ -1552,11 +1552,21 @@ pub(crate) async fn wait_queued(
     }
 }
 
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static WATCHER_GATE: std::sync::Arc<tokio::sync::Semaphore>;
+}
+
 async fn watch_stop(state: &AppState, row: &AssistantConversation, turn_id: &str) -> TurnError {
     // Collaboration turns recheck live authority in a snapshot transaction;
     // do that every 5 s (20 polls) and only the stored stop flag in between.
     let mut polls: u32 = 0;
     loop {
+        #[cfg(test)]
+        if let Ok(gate) = WATCHER_GATE.try_with(Clone::clone) {
+            gate.acquire().await.expect("test watcher gate").forget();
+        }
+
         if super::channel_guest_access::is_hosted_conversation(&row.id) {
             let full = polls.is_multiple_of(4);
             polls = polls.wrapping_add(1);
@@ -1597,13 +1607,29 @@ async fn watch_stop(state: &AppState, row: &AssistantConversation, turn_id: &str
                                 && active.execution_attempt != original.execution_attempt
                         })
                     {
-                        return TurnError::internal("turn_lost", "subscriber_relinquished");
+                        return watcher_authority_lost(row, "subscriber_relinquished");
                     }
-                    let turn = engine::live_turn(&current, Utc::now());
-                    if let Some(turn) = turn.filter(|t| t.turn_id == turn_id && !t.stop_requested)
-                        && let Some(mut error) =
-                            super::assistant_model_observer::approval_error(turn)
-                    {
+                    let Some(active) = current
+                        .active_turn
+                        .as_ref()
+                        .filter(|turn| turn.turn_id == turn_id)
+                    else {
+                        return watcher_authority_lost(row, "subscriber_relinquished");
+                    };
+                    if !super::execution_permission_dispatch::proposals::retained_identity_matches(
+                        row, &current,
+                    ) {
+                        return watcher_authority_lost(row, "subscriber_relinquished");
+                    }
+                    // Only a persisted Stop is Stop. An expired lease remains
+                    // loss of execution authority and grants no machine cleanup.
+                    if active.stop_requested {
+                        return TurnError::internal("cancelled", "stop");
+                    }
+                    let Some(turn) = engine::live_turn(&current, Utc::now()) else {
+                        return watcher_authority_lost(row, "lease_expiry");
+                    };
+                    if let Some(mut error) = super::assistant_model_observer::approval_error(turn) {
                         error.message = super::assistant_model_observer::approval_message(
                             error.code,
                             &super::assistant_links::AssistantPage::ApprovalSettings
@@ -1611,7 +1637,7 @@ async fn watch_stop(state: &AppState, row: &AssistantConversation, turn_id: &str
                         );
                         return error;
                     }
-                    Ok(turn.is_none_or(|t| t.turn_id != turn_id || t.stop_requested))
+                    Ok(false)
                 }
                 Err(error) => Err(error),
             }
@@ -1622,6 +1648,14 @@ async fn watch_stop(state: &AppState, row: &AssistantConversation, turn_id: &str
             Err(_) => return TurnError::internal("assistant_unavailable", "stop"),
         }
     }
+}
+
+fn watcher_authority_lost(row: &AssistantConversation, stage: &'static str) -> TurnError {
+    let mut error = TurnError::internal("turn_lost", stage);
+    if super::execution_permission_dispatch::proposals::retained_turn(row) {
+        error.disposition = engine::TurnFailureDisposition::PermissionRefusal;
+    }
+    error
 }
 
 /// Typed proxy failures collapse to `assistant_unavailable`, except a billing

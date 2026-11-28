@@ -132,8 +132,25 @@ pub(crate) async fn resume_turn(
     if batch.len() > 64 {
         return Err(refused());
     }
+    let outcome = resume_batch(state, egress, row, credential, &ids, &batch).await;
+    match super::local::expired_channel(state, row, credential, &batch).await? {
+        super::local::Outcome::Live => outcome,
+        super::local::Outcome::Receipt(text) => Ok(Some(ResumeOutcome::Receipt(text))),
+        super::local::Outcome::Withheld => Err(refused()),
+    }
+}
+
+async fn resume_batch(
+    state: &crate::AppState,
+    egress: &dyn super::super::super::platform_manager_contract::NyxAgentEgress,
+    row: &AssistantConversation,
+    credential: &crate::services::assistant_agent_credential_service::AssistantCredential,
+    ids: &[String],
+    batch: &[String],
+) -> AppResult<Option<ResumeOutcome>> {
+    let turn = row.active_turn.as_ref().ok_or_else(refused)?;
     let typed_wake = super::batch::typed_wake(&turn.events);
-    let filter = assistant_selector(doc! {"_id":{"$in":&batch}, "user_id":&row.user_id,
+    let filter = assistant_selector(doc! {"_id":{"$in":batch}, "user_id":&row.user_id,
     "execution_proposal.v1.conversation_id":&row.id,
     "execution_proposal.v1.key_id":&row.credential_api_key_id});
     let mut requests: Vec<ApprovalRequest> = state
@@ -147,11 +164,15 @@ pub(crate) async fn resume_turn(
     if requests.len() != batch.len() {
         return Err(missing());
     }
-    if let Some(text) = super::local::expired_channel(state, row, credential, &batch).await? {
-        return Ok(Some(ResumeOutcome::Receipt(text)));
+    match super::local::expired_channel(state, row, credential, batch).await? {
+        super::local::Outcome::Live => {}
+        super::local::Outcome::Receipt(text) => return Ok(Some(ResumeOutcome::Receipt(text))),
+        super::local::Outcome::Withheld => return Err(refused()),
     }
+    #[cfg(test)]
+    resume_boundary(state, row, "after_preliminary_check").await;
     let continuation_ready =
-        continuation::bind_batch(state, row, &requests, &batch, typed_wake).await?;
+        continuation::bind_batch(state, row, &requests, batch, typed_wake).await?;
     if continuation_ready == Some(true) {
         requests = state
             .db
@@ -178,6 +199,15 @@ pub(crate) async fn resume_turn(
         if !seen.insert(id) {
             continue;
         }
+        #[cfg(test)]
+        if seen.len() > 1 {
+            resume_boundary(state, row, "between_members").await;
+        }
+        match super::local::expired_channel(state, row, credential, batch).await? {
+            super::local::Outcome::Live => {}
+            super::local::Outcome::Receipt(text) => return Ok(Some(ResumeOutcome::Receipt(text))),
+            super::local::Outcome::Withheld => return Err(refused()),
+        }
         let request = requests
             .iter()
             .find(|request| request.id == id)
@@ -194,14 +224,7 @@ pub(crate) async fn resume_turn(
         }) {
             return Err(refused());
         }
-        // A still-owned admitted turn may settle this exact expired operation
-        // locally. Its expired channel remains unusable for execution/delivery.
-        let local_expired = eligible
-            && request.status == "approved"
-            && matches!(p.state.as_str(), "queued" | "preparing")
-            && turn.execution_task.as_ref() == Some(&p.task)
-            && p.task.hard_deadline <= Utc::now();
-        if p.task.channel_source.is_some() && !local_expired {
+        if p.task.channel_source.is_some() {
             super::super::super::execution_permission_channel::check(&state.db, &p.task).await?;
         }
         if request.status != "approved" {
@@ -289,8 +312,8 @@ pub(crate) async fn resume_turn(
             let cancelled = session
                 .start_transaction()
                 .and_run(
-                    (&state.db, row, &p.task, &cancel_filter),
-                    |session, (db, row, task, filter)| {
+                    (&state.db, row, &p.task, &cancel_filter, eligible),
+                    |session, (db, row, task, filter, eligible)| {
                         Box::pin(async move {
                             let result: AppResult<bool> = async {
                                 super::batch::fence_turn(db, session, row).await?;
@@ -319,6 +342,7 @@ pub(crate) async fn resume_turn(
                                 {
                                     return Ok(false);
                                 }
+                                super::local::fence_live_channel(db, session, row).await?;
                                 lifecycle::cancel_in_session(
                                     db,
                                     session,
@@ -326,6 +350,15 @@ pub(crate) async fn resume_turn(
                                     "authority_or_task_unavailable",
                                 )
                                 .await?;
+                                if *eligible && task.channel_source.is_some() {
+                                    super::local::record_retirements(
+                                        db,
+                                        session,
+                                        row,
+                                        &[filter.get_str("_id").map_err(encoding)?.to_owned()],
+                                    )
+                                    .await?;
+                                }
                                 Ok(true)
                             }
                             .await;
@@ -534,11 +567,18 @@ pub(crate) async fn resume_turn(
         }
         let update = doc! {"$set": set, "$unset": unset};
         let mut session = state.db.client().start_session().await?;
-        session.start_transaction().and_run((&state.db,id,&claim_id,&update,state_name,sent,row),move |session,(db,id,claim,update,state_name,sent,row)|Box::pin(async move {
+        session.start_transaction().and_run((&state.db,id,&claim_id,&update,state_name,sent,row,eligible),move |session,(db,id,claim,update,state_name,sent,row,eligible)|Box::pin(async move {
             let result:AppResult<()>=async {
-                if !*sent { super::batch::fence_turn(db, session, row).await?; }
+                if !*sent {
+                    super::batch::fence_turn(db, session, row).await?;
+                    super::local::fence_live_channel(db, session, row).await?;
+                }
                 if db.collection::<Document>(REQUESTS).update_one(version.selector(doc!{"_id":*id,"execution_proposal.v1.claim_id":*claim,"execution_proposal.v1.delivery_abandoned":{"$ne":true},"execution_proposal.v1.state":if *sent {"dispatched"} else {"preparing"}}),version.update((*update).clone())).session(&mut *session).await?.matched_count!=1{return Err(uncertain());}
                 if *state_name!="waiting" {lifecycle::retire_operations(db,session,&[(*id).to_owned()]).await?;}
+                if !*sent && *state_name == "not_sent" && *eligible
+                    && continuation::owner_task(row).is_some_and(|task| task.channel_source.is_some()) {
+                    super::local::record_retirements(db, session, row, &[(*id).to_owned()]).await?;
+                }
                 Ok(())
             }.await;
             super::super::super::api_key_mutation_service::transaction_result(result)
@@ -555,7 +595,7 @@ pub(crate) async fn resume_turn(
     }
     notes.extend(reviews.render());
     let text = notes.join("\n\n");
-    if let Some(continuation) = super::batch::reconcile(state, row, &batch, typed_wake).await? {
+    if let Some(continuation) = super::batch::reconcile(state, row, batch, typed_wake).await? {
         return Ok(Some(ResumeOutcome::Continue(continuation)));
     }
     Ok(Some(ResumeOutcome::Receipt(text)))
@@ -630,4 +670,25 @@ async fn claim_preparation(
         }.await;
         super::super::super::api_key_mutation_service::transaction_result(result)
     })).await.map_err(super::super::super::api_key_mutation_service::map_transaction_error)
+}
+
+#[cfg(test)]
+pub(crate) type ResumeBoundaryHook = std::sync::Arc<
+    dyn Fn(Database, AssistantConversation, &'static str) -> futures::future::BoxFuture<'static, ()>
+        + Send
+        + Sync,
+>;
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static RESUME_BOUNDARY: ResumeBoundaryHook;
+}
+#[cfg(test)]
+async fn resume_boundary(
+    state: &crate::AppState,
+    row: &AssistantConversation,
+    boundary: &'static str,
+) {
+    if let Ok(hook) = RESUME_BOUNDARY.try_with(Clone::clone) {
+        hook(state.db.clone(), row.clone(), boundary).await;
+    }
 }

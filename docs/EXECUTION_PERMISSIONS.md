@@ -532,17 +532,29 @@ An exact admitted owner-channel task that reaches its source/task deadline can
 settle this unsent cancellation locally under the same worker/root/proposal
 fences. That local receipt grants no expired channel egress, result delivery or
 model release; the ordinary channel expiry checks continue to refuse those uses.
-Expired owner-channel wakes retire eligible unsent requests in one local
-transaction before processing individual receipt notices. The transaction binds
+At every observed owner-channel task/source expiry, the whole exact admitted
+batch returns through one scoped local retirement transaction. This includes
+expiry during binding or between ordered members; accumulated observer notices
+are discarded. Ordinary per-member cancellation/result transactions fence the
+source deadline and retain their own local unsent IDs atomically, so a later
+member's expiry cannot discard a cancellation that already committed. A
+definitive `not_sent` receipt can join only when its claim and resume turn belong
+to this admitted turn; older terminal observations cannot acquire membership.
+The local transaction binds
 the complete admitted event set, current worker/claim, original task/source and
 live verified conversation-key relationship. Terminal observers are evidence
 only: their private result is neither opened nor rendered, and their proposal,
 grant, release and first-delivery records remain unchanged in either event order.
 The turn's server-only `execution_local_retirements` records the exact locally
-retired IDs. Settlement marks only those receipts delivered and performs no
+retired IDs, including a legitimate local cancellation committed while the
+source was live. Settlement marks only those receipts delivered and performs no
 owner-handoff settlement; an interrupted local receipt can reuse that same
 turn's durable IDs without another effect. This marker grants no execution or
 model authority and introduces no optional continuation-readiness dependency.
+Disabling enrollment after admission still permits this exact local cleanup.
+The enrollment lookup must complete successfully, and the active personal
+account, exact credential relationship/key and all admitted identity fences
+remain mandatory; a false rollout result does not stand in for a read error.
 The provider capability carries the same
 captured authority through the actual send barrier. A pre-send refusal result
 also requires that authority and the exact preparing claim before retiring a grant.
@@ -655,9 +667,14 @@ an inconsistent record fails closed. Operational failures report the failing
 authority refusals at these boundaries settle as cancellation.
 Permission refusals carry an internal disposition distinct from ordinary Stop
 cleanup. The normal owner driver does not convert them into conversation-wide
-machine cancellation. Other driver cancellation first fences the original turn
-and commits its job updates before node cancellation; explicit human Stop keeps
-its authorized conversation cancellation. Retained permission settlement repeats
+machine cancellation. The watcher recognizes Stop only from the current
+persisted `stop_requested` flag. Lease expiry reports `turn_lost` at
+`lease_expiry`; ownership/event replacement relinquishes execution. Neither
+condition creates Stop authorization. Driver conversation-wide job cleanup
+requires that persisted Stop and original-turn proof in its transaction.
+For `automation_v2`, the authorized Stop handler owns cleanup and carries its
+protected run/job set through exact node cancellation; the driver performs no
+second, broader cleanup. Retained permission settlement repeats
 the originally admitted worker (including legacy turns without an execution
 attempt), semantic task/source/key/model and complete decision-event proof in
 the message transaction. Stop and lease expiry can settle a still-owned turn;
@@ -666,6 +683,12 @@ queue consumption, job cancellation or active-turn removal.
 The retained runner verifies that same identity before starting its driver or
 stream checkpoint; an unavailable ownership proof leaves the admitted turn
 recoverable and is not a settlement receipt.
+Retained stream checkpoints repeat the captured turn/event authority in their
+write transaction and carry a keyed identity proof. Final checkpoint recovery
+requires that proof to match the current authorized worker, task/source/key/model
+and decision events. A stale or historical markerless retained checkpoint does
+not become transcript text through Stop or lost-turn fallback. Ordinary stream
+checkpoint and restart behavior remains governed by the chat engine contract.
 
 Marker authoring, joining and release require the optional fleet capability
 `permissions:execution-owner-continuation-v3`. It requires observed support from

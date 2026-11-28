@@ -1719,8 +1719,12 @@ legacy turns without an execution attempt, and the complete admitted decision
 proof before message settlement. A changed worker or decision set relinquishes
 settlement without a reply or after-turn queue work. Permission authority refusal
 is distinct from explicit human Stop and cannot cancel conversation machine jobs.
-Driver job cleanup fences its original turn transactionally; the human Stop route
-retains its authorized cancellation. See
+Lease loss reports `turn_lost`/`lease_expiry`; only a persisted Stop authorizes
+driver job cleanup. Scoped automation Stop cleanup stays with the handler's
+protected job set through node cancellation. Retained stream checkpoints bind
+the admitted identity during writes and again during final text recovery, so
+changed decisions cannot publish an obsolete checkpoint through failure fallback.
+Ordinary stream checkpoints and restart behavior retain their existing contract. See
 [exact resume and recovery](../EXECUTION_PERMISSIONS.md#exact-resume-and-recovery).
 
 A detached task owns the shared
@@ -1743,7 +1747,9 @@ safe for subscribers into `active_turn.reply` at most once a second. Writes
 coalesce through a watch channel, are bounded by the relay's output limit,
 and fence the owner, turn ID, Stop flag and increasing text cursor. Database
 delays cannot block the token reader. Settlement removes the checkpoint with
-the active turn; forced Stop and orphan reclamation retain its partial text.
+the active turn; forced Stop and orphan reclamation retain only authorized
+partial text. Retained permission checkpoints additionally follow
+[exact resume and recovery](../EXECUTION_PERMISSIONS.md#exact-resume-and-recovery).
 Only transcript history includes the checkpoint, not the conversation index.
 The POST response also identifies its conversation in `X-NyxID-Conversation-Id`,
 so a new thread remains recoverable if its first SSE event is lost.

@@ -490,20 +490,27 @@ async fn require_enrolled(
     {
         return Err(refused());
     }
-    // Keep the existing account-disable fence, not a flag-change fence. The
-    // rollout flag can race dispatch; exact permission/claim fences cannot.
     if let Some(session) = session {
-        let filter = doc! {"_id":actor,"is_active":true,"user_type":"person","platform_personal_deleting":{"$ne":true}};
-        if db
-            .collection::<Document>("users")
-            .update_one(filter, doc! {"$inc":{"execution_dispatch_fence":1_i64}})
-            .session(session)
-            .await?
-            .matched_count
-            != 1
-        {
-            return Err(refused());
-        }
+        fence_active_account(db, session, actor).await?;
+    }
+    Ok(())
+}
+
+async fn fence_active_account(
+    db: &Database,
+    session: &mut ClientSession,
+    actor: &str,
+) -> AppResult<()> {
+    let filter = doc! {"_id":actor,"is_active":true,"user_type":"person","platform_personal_deleting":{"$ne":true}};
+    if db
+        .collection::<Document>("users")
+        .update_one(filter, doc! {"$inc":{"execution_dispatch_fence":1_i64}})
+        .session(session)
+        .await?
+        .matched_count
+        != 1
+    {
+        return Err(refused());
     }
     Ok(())
 }

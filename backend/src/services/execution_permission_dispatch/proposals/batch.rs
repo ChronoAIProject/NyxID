@@ -42,7 +42,7 @@ fn event_set(events: &[AgentEvent]) -> AppResult<Vec<Document>> {
 
 /// Server-only ownership captured from the admitted snapshot. Carry the same
 /// worker and event proof through preparation and the provider's send barrier.
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Serialize)]
 pub(super) struct TurnAuthority {
     filter: Document,
     events: Vec<Document>,
@@ -97,11 +97,49 @@ impl TurnAuthority {
 }
 
 pub(crate) fn retained_turn(row: &AssistantConversation) -> bool {
-    row.active_turn.as_ref().is_some_and(|turn| {
-        turn.events
-            .iter()
-            .any(|event| event.id.starts_with("execution-decision:"))
-    })
+    row.active_turn
+        .as_ref()
+        .is_some_and(|turn| retained_events(&turn.events))
+}
+
+fn retained_events(events: &[AgentEvent]) -> bool {
+    events
+        .iter()
+        .any(|event| event.id.starts_with("execution-decision:"))
+}
+
+pub(crate) fn retained_identity_matches(
+    original: &AssistantConversation,
+    current: &AssistantConversation,
+) -> bool {
+    !retained_turn(original)
+        || TurnAuthority::capture(original)
+            .ok()
+            .zip(TurnAuthority::capture(current).ok())
+            .is_some_and(|(original, current)| original == current)
+}
+
+pub(crate) fn checkpoint_identity(
+    row: &AssistantConversation,
+    turn: &crate::models::assistant_conversation::ActiveTurn,
+) -> AppResult<Option<String>> {
+    if !retained_events(&turn.events) {
+        return Ok(None);
+    }
+    let mut original = row.clone();
+    original.active_turn = Some(turn.clone());
+    fingerprint(&("retained-checkpoint-v1", TurnAuthority::capture(&original)?)).map(Some)
+}
+
+pub(crate) async fn fence_checkpoint(
+    db: &Database,
+    session: &mut ClientSession,
+    row: &AssistantConversation,
+) -> AppResult<()> {
+    if retained_turn(row) {
+        fence_turn(db, session, row).await?;
+    }
+    Ok(())
 }
 
 /// Settlement preserves identity while allowing actual Stop and lease expiry.
@@ -872,6 +910,7 @@ pub(super) async fn admit(
                         .await;
                         if let Err(error) = live_root {
                             if error.is_forbidden() && terminal_task(db, session, row).await? {
+                                super::local::fence_live_channel(db, session, row).await?;
                                 block_in(db, session, &current).await?;
                                 return Ok(true);
                             }

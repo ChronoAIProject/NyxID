@@ -454,7 +454,6 @@ pub(crate) fn settle<'a>(
             .collect();
         let receipts: Vec<_> = if let Some(ids) = &turn.execution_local_retirements {
             if task.channel_source.is_none()
-                || task.hard_deadline > Utc::now()
                 || ids.is_empty()
                 || ids.len() > 64
                 || !ids.windows(2).all(|pair| pair[0] < pair[1])

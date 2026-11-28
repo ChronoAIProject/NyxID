@@ -694,11 +694,16 @@ pub(crate) async fn cancel_owned_conversation(
                             .map(|worker| worker.id.as_str()),
                     );
                     filter.insert("credential_api_key_id", &row.credential_api_key_id);
+                    // Stop authorization is durable. Lease/authority refusal
+                    // cannot mint Stop, and scoped automation cleanup belongs
+                    // to the handler that captured its protected run set.
+                    filter.insert("active_turn.stop_requested", true);
+                    filter.insert("automation_v2", doc! {"$ne": true});
                     let current = db
                         .collection::<AssistantConversation>(CONVERSATIONS)
                         .find_one_and_update(
                             filter,
-                            doc! {"$set": {"active_turn.stop_requested": true}},
+                            doc! {"$inc": {"execution_dispatch_fence": 1_i64}},
                         )
                         .return_document(mongodb::options::ReturnDocument::After)
                         .session(&mut *session)

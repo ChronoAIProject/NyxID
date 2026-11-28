@@ -21,13 +21,16 @@ use record::{Arm, Field, Slot};
 pub(crate) mod v2;
 pub(crate) mod v3;
 pub(crate) use batch::{
-    fence_settlement as fence_retained_settlement, filter_decisions,
-    record_admission as record_owner_admission, retained_turn,
+    checkpoint_identity, fence_checkpoint, fence_settlement as fence_retained_settlement,
+    filter_decisions, record_admission as record_owner_admission, retained_identity_matches,
+    retained_turn,
 };
 pub(crate) use continuation::ResumeOutcome;
 pub(crate) use effects::ensure_indexes as ensure_owner_continuation_indexes;
 pub(crate) use lifecycle::{cancel_in_session, sweep};
 pub(crate) use presentation::delivery_notice;
+#[cfg(test)]
+pub(crate) use resume::{RESUME_BOUNDARY, ResumeBoundaryHook};
 pub(crate) use resume::{Resume, result_for_human, resume_turn};
 use v3::{AssistantVersion, assistant_selector};
 pub(crate) const READINESS: &str = "permissions:execution-authoring-v1";

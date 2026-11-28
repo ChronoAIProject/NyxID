@@ -3630,7 +3630,7 @@ pub(crate) async fn begin_owner_turn_in_session(
             seq: row.message_count,
             turn_id: lost.turn_id.clone(),
             role: "assistant".into(),
-            text: checkpoint_reply_text(&lost),
+            text: checkpoint_reply_text(&row, &lost),
             status: "failed".into(),
             error_code: Some("turn_lost".into()),
             upstream_error_code: None,
@@ -5577,8 +5577,12 @@ pub async fn stop_requested(
         .is_none_or(|turn| turn.turn_id != turn_id || turn.stop_requested))
 }
 
-fn checkpoint_reply_text(turn: &ActiveTurn) -> String {
+fn checkpoint_reply_text(row: &AssistantConversation, turn: &ActiveTurn) -> String {
     turn.reply.as_ref().map_or_else(String::new, |reply| {
+        let proof = super::execution_permission_dispatch::proposals::checkpoint_identity(row, turn);
+        if !proof.is_ok_and(|expected| expected == reply.retained_authority) {
+            return String::new();
+        }
         super::assistant_citation_markers::sanitize(&reply.text).into_owned()
     })
 }
@@ -5978,7 +5982,7 @@ artifact_recovery_target: None,
                     turn_id: turn_id.clone(),
                     role: "assistant".into(),
                     text: if use_revoked { String::new() } else if result.text.is_empty() && error.as_ref().is_some_and(|error| matches!(error.code, "cancelled" | "turn_lost")) {
-                        settled_turn.as_ref().map(checkpoint_reply_text).unwrap_or_default()
+                        settled_turn.as_ref().map(|turn| checkpoint_reply_text(&row, turn)).unwrap_or_default()
                     } else {
                         result.text.clone()
                     },
