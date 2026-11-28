@@ -1714,6 +1714,14 @@ of settling as `turn_lost`. See
 [graceful drain](../DEPLOYMENT.md#rolling-deploys-and-graceful-drain).
 Delete stops and cancels before removing the row, and a late worker settlement against
 the deleted row is a quiet no-op. All late settlement is fenced by the exact turn ID.
+Retained execution-permission turns also bind their original worker, including
+legacy turns without an execution attempt, and the complete admitted decision
+proof before message settlement. A changed worker or decision set relinquishes
+settlement without a reply or after-turn queue work. Permission authority refusal
+is distinct from explicit human Stop and cannot cancel conversation machine jobs.
+Driver job cleanup fences its original turn transactionally; the human Stop route
+retains its authorized cancellation. See
+[exact resume and recovery](../EXECUTION_PERMISSIONS.md#exact-resume-and-recovery).
 
 A detached task owns the shared
 `DirectChatPermit`, upstream stream and settlement. Browser SSE is a broadcast

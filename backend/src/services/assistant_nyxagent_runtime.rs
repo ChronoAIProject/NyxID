@@ -277,6 +277,7 @@ where
                     .active_turn
                     .as_ref()
                     .is_some_and(|turn| turn.execution_attempt.is_some())
+                    || super::execution_permission_dispatch::proposals::retained_turn(row)
                 {
                     return SettledExecution::Relinquished;
                 }
@@ -834,6 +835,30 @@ pub(crate) async fn run_owner_turn(
     permit: DirectChatPermit,
     events: Events,
 ) -> Option<OwnerTurnSettlement> {
+    if super::execution_permission_dispatch::proposals::retained_turn(&row) {
+        let context = (&state.db, &row);
+        let ownership =
+            super::transaction_service::run_db_only(&state.db, &context, |session, (db, row)| {
+                Box::pin(async move {
+                    super::execution_permission_dispatch::proposals::fence_retained_settlement(
+                        db, session, row,
+                    )
+                    .await
+                })
+            })
+            .await;
+        if let Err(error) = ownership {
+            // No driver/checkpoint starts without proof. An unavailable proof
+            // leaves the admitted work recoverable, never evidence of settlement.
+            if !matches!(error, AppError::NotFound(_)) {
+                tracing::warn!(
+                    code = error.error_code(),
+                    "Permission runner ownership unconfirmed"
+                );
+            }
+            return None;
+        }
+    }
     if !super::assistant_turn_restart::owns_subscriber(
         &row,
         &super::assistant_engine_worker::instance().id,
@@ -1312,7 +1337,9 @@ async fn drive_owner_turn(
         error: Some(error),
     }),
     };
-    if row.active_turn.as_ref().is_some_and(|turn|turn.restart_admission.is_some()) && (result.response_id.is_none() || executor_lost(&result)) {
+    if row.active_turn.as_ref().is_some_and(|turn|turn.restart_admission.is_some())
+        && !result.error.as_ref().is_some_and(|error|error.disposition==engine::TurnFailureDisposition::PermissionRefusal)
+        && (result.response_id.is_none() || executor_lost(&result)) {
         let current = state.db.collection::<AssistantConversation>(crate::models::assistant_conversation::COLLECTION_NAME).find_one(engine::WorkerFence::capture(&row).ok()?.filter()).await.ok()?;
         let current = current?;
         let confirmation = cancel_background(&state,egress.as_ref(),&current,&credential,policy).await;
@@ -1324,7 +1351,7 @@ async fn drive_owner_turn(
     if result
         .error
         .as_ref()
-        .is_some_and(|error| error.code == "cancelled")
+        .is_some_and(|error| error.code == "cancelled" && error.disposition != engine::TurnFailureDisposition::PermissionRefusal)
     {
         // Platform revocation already captured durable exact effects. App Stop
         // keeps its ordinary broader cancellation at its explicit endpoint.
@@ -1333,11 +1360,7 @@ async fn drive_owner_turn(
             .as_ref()
             .is_none_or(|turn| turn.platform_origin.is_none() && turn.invocation_id.is_none())
         {
-            let _ = crate::services::machine_service::cancel_conversation(
-                &state,
-                &row.user_id,
-                &row.id,
-            )
+            let _ = crate::services::machine_service::cancel_owned_conversation(&state, &row)
             .await;
         }
     }
@@ -1617,7 +1640,7 @@ fn permission_turn_error(error: AppError, stage: &'static str) -> TurnError {
             AppError::NotFound(_) | AppError::AssistantTurnRequired
         )
     {
-        TurnError::internal("cancelled", stage)
+        TurnError::permission_refusal(stage)
     } else {
         proxy_turn_error(error).at_stage(stage)
     }
@@ -2752,7 +2775,7 @@ async fn execute_turn_inner(
         // This identity check applies to every model attempt, including recovery
         // after release. No successor may inherit the retained task's input.
         if retained.is_some() && credential.api_key_id != row.credential_api_key_id {
-            return Err(TurnError::internal("cancelled", "permission_release"));
+            return Err(TurnError::permission_refusal("permission_release"));
         }
         if let Some(retained) = retained.filter(|_| !continuation_released) {
             #[cfg(test)]
@@ -3119,7 +3142,7 @@ async fn execute_turn_inner(
                 }
                 RecoveryAction::ReplaceCredential => {
                     if retained.is_some() {
-                        return Err(TurnError::internal("cancelled", "permission_release"));
+                        return Err(TurnError::permission_refusal("permission_release"));
                     }
                     events.emit(
                         "turn.notice",

@@ -147,6 +147,9 @@ pub(crate) async fn resume_turn(
     if requests.len() != batch.len() {
         return Err(missing());
     }
+    if let Some(text) = super::local::expired_channel(state, row, credential, &batch).await? {
+        return Ok(Some(ResumeOutcome::Receipt(text)));
+    }
     let continuation_ready =
         continuation::bind_batch(state, row, &requests, &batch, typed_wake).await?;
     if continuation_ready == Some(true) {

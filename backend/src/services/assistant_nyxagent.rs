@@ -3873,6 +3873,7 @@ pub(crate) async fn begin_owner_turn_in_session(
         )
     };
     row.active_turn = Some(ActiveTurn {
+        execution_local_retirements: None,
         restart_offer: None,
         restart_eligibility: None,
         restart_admission: None,
@@ -5529,6 +5530,14 @@ impl WorkerFence {
             filter.insert("active_turn.execution_attempt.claim_id", &attempt.claim_id);
         } else {
             filter.insert("active_turn.execution_attempt", bson::Bson::Null);
+            if super::execution_permission_dispatch::proposals::retained_turn(row) {
+                filter.insert(
+                    "active_turn.worker_instance.id",
+                    turn.worker_instance
+                        .as_ref()
+                        .map(|worker| worker.id.as_str()),
+                );
+            }
         }
         Ok(Self(filter))
     }
@@ -5736,6 +5745,7 @@ artifact_recovery_target: None,
                         },
                     );
                 }
+                super::execution_permission_dispatch::proposals::fence_retained_settlement(&db,session,&row).await?;
                 let mut current = collection
                     .find_one(active_filter)
                     .session(&mut *session)
@@ -8988,6 +8998,8 @@ pub fn upstream_body(model: &str, text: &str, session: Option<&str>, instruction
 pub struct TurnError {
     #[serde(skip)]
     pub(super) origin: TurnErrorOrigin,
+    #[serde(skip)]
+    pub(super) disposition: TurnFailureDisposition,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "upstream_error_code")]
     pub upstream_code: Option<Box<str>>,
@@ -9000,6 +9012,12 @@ pub struct TurnError {
     pub upstream_request_id: Option<Box<str>>,
     pub response_id: Option<Box<str>>,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum TurnFailureDisposition {
+    Ordinary,
+    PermissionRefusal,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum TurnErrorOrigin {
     NyxId,
@@ -9046,6 +9064,11 @@ impl TurnError {
         error.origin = TurnErrorOrigin::NyxId;
         error.upstream_code = None;
         error.stage = stage;
+        error
+    }
+    pub(crate) fn permission_refusal(stage: &'static str) -> Self {
+        let mut error = Self::internal("cancelled", stage);
+        error.disposition = TurnFailureDisposition::PermissionRefusal;
         error
     }
     pub fn at_stage(mut self, stage: &'static str) -> Self {
@@ -9217,6 +9240,7 @@ impl TurnError {
             metadata: None,
             upstream_code,
             origin: TurnErrorOrigin::NyxAgent,
+            disposition: TurnFailureDisposition::Ordinary,
             stage: "stream",
             http_status: None,
             upstream_request_id: None,

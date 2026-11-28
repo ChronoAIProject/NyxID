@@ -480,6 +480,9 @@ pub struct OutputPartLength {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ActiveTurn {
+    /// Server-fenced local expiry settlement; other admitted receipts are observers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_local_retirements: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channel_guest: Option<super::channel_guest_access::GuestTurn>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

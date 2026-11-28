@@ -13,13 +13,17 @@ mod batch;
 pub(crate) mod continuation;
 pub(in crate::services::execution_permission_dispatch) mod effects;
 mod lifecycle;
+mod local;
 mod presentation;
 pub(crate) mod record;
 mod resume;
 use record::{Arm, Field, Slot};
 pub(crate) mod v2;
 pub(crate) mod v3;
-pub(crate) use batch::{filter_decisions, record_admission as record_owner_admission};
+pub(crate) use batch::{
+    fence_settlement as fence_retained_settlement, filter_decisions,
+    record_admission as record_owner_admission, retained_turn,
+};
 pub(crate) use continuation::ResumeOutcome;
 pub(crate) use effects::ensure_indexes as ensure_owner_continuation_indexes;
 pub(crate) use lifecycle::{cancel_in_session, sweep};

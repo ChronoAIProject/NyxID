@@ -275,6 +275,55 @@ pub(super) async fn prepare(
     })
 }
 
+/// Serialize exact credential revocation/rotation without redundant decryption.
+pub(super) async fn fence_credential(
+    db: &Database,
+    session: &mut ClientSession,
+    row: &AssistantConversation,
+    key_hash: &str,
+) -> AppResult<()> {
+    // Rotation/revocation changes or removes this exact relationship.
+    // Writing it in the release transaction serializes those mutations
+    // without decrypting redundant ciphertext a second time.
+    if db
+        .collection::<Document>("assistant_agent_credentials")
+        .update_one(
+            doc! {
+                "user_id": &row.user_id, "conversation_id": &row.id,
+                "api_key_id": &row.credential_api_key_id,
+            },
+            doc! {"$inc": {"execution_dispatch_fence": 1_i64}},
+        )
+        .session(&mut *session)
+        .await?
+        .matched_count
+        != 1
+    {
+        return Err(refused());
+    }
+    if db
+        .collection::<Document>("api_keys")
+        .update_one(
+            doc! {
+                "_id": &row.credential_api_key_id, "user_id": &row.user_id, "is_active": true,
+                "key_hash": key_hash,
+                "$expr": {"$or": [
+                    {"$eq": [{"$ifNull": ["$expires_at", bson::Bson::Null]}, bson::Bson::Null]},
+                    {"$gt": ["$expires_at", "$$NOW"]},
+                ]},
+            },
+            doc! {"$inc": {"execution_dispatch_fence": 1_i64}},
+        )
+        .session(&mut *session)
+        .await?
+        .matched_count
+        != 1
+    {
+        return Err(refused());
+    }
+    Ok(())
+}
+
 impl OwnerContinuation {
     pub(crate) fn receipt_text(&self) -> &str {
         &self.receipt_text
@@ -310,28 +359,7 @@ impl OwnerContinuation {
                     if db.collection::<Document>("assistant_messages").update_one(root,
                         doc! {"$inc":{"execution_dispatch_fence":1_i64}})
                         .session(&mut *session).await?.matched_count != 1 { return Err(refused()); }
-                    // Rotation/revocation changes or removes this exact relationship.
-                    // Writing it in the release transaction serializes those mutations
-                    // without decrypting redundant ciphertext a second time.
-                    if db.collection::<Document>("assistant_agent_credentials").update_one(doc! {
-                        "user_id": &row.user_id, "conversation_id": &row.id,
-                        "api_key_id": &row.credential_api_key_id,
-                    }, doc! {"$inc": {"execution_dispatch_fence": 1_i64}})
-                        .session(&mut *session).await?.matched_count != 1 {
-                        return Err(refused());
-                    }
-                    if db.collection::<Document>("api_keys").update_one(doc! {
-                        "_id": &row.credential_api_key_id, "user_id": &row.user_id, "is_active": true,
-                        "key_hash": *key_hash,
-                        "$expr": {"$or": [
-                            {"$eq": [{"$ifNull": ["$expires_at", bson::Bson::Null]}, bson::Bson::Null]},
-                            {"$gt": ["$expires_at", "$$NOW"]},
-                        ]},
-                    }, doc! {"$inc": {"execution_dispatch_fence": 1_i64}})
-                        .session(&mut *session).await?.matched_count != 1
-                    {
-                        return Err(refused());
-                    }
+                    fence_credential(db,session,row,key_hash).await?;
                     if db.collection::<Document>("assistant_agents").update_one(doc! {
                         "_id": &row.agent_id, "user_id": &row.user_id, "destroyed_at": null,
                     }, doc! {"$inc": {"execution_dispatch_fence": 1_i64}})

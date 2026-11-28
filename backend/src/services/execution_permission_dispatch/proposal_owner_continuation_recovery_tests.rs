@@ -2316,35 +2316,35 @@ async fn owner_permission_resume_release_requires_prepared_worker_and_decision_e
         assert!(unused.released_turn_id.is_none());
         assert_eq!(f.server.received_requests().await.unwrap().len(), 1);
         assert_eq!(model.calls.lock().unwrap().len(), 1);
-        // Settle the actual stale execution failure using the current worker's
-        // normal failure settlement, then recover the genuine retained event.
+        // The stale execution cannot authorize settlement. Recover through the
+        // rightful worker's normal entry and the genuine retained event.
         let error = execute(&f, &resumed).await.unwrap_err();
         assert_eq!(
             (error.code, error.stage),
             ("cancelled", "permission_resume")
         );
-        engine::finish_turn(
-            &f.state.db,
-            &current,
-            &f.key,
-            &Uuid::new_v4().to_string(),
-            &engine::TurnResult {
-                text: String::new(),
-                session_id: None,
-                response_id: None,
-                error: Some(error),
-            },
-        )
-        .await
-        .unwrap();
-        due(&f, &[&request]).await;
-        proposals::sweep(&f.state).await.unwrap();
-        let recovered = event_turn(&f, &row).await;
-        assert_ne!(
-            recovered.active_turn.as_ref().unwrap().turn_id,
-            resumed.active_turn.as_ref().unwrap().turn_id
-        );
-        run(&f, &recovered).await;
+        // Only the actual current worker can settle. A changed ordinary event
+        // finishes on its own input before maintenance re-admits the retained ID.
+        run(&f, &current).await;
+        let recovered = if change == "events" {
+            let messages = engine::messages(&f.state.db, &f.owner, &row.id, 30, None)
+                .await
+                .unwrap();
+            assert!(messages.iter().any(|message| message.turn_id
+                == current.active_turn.as_ref().unwrap().turn_id
+                && message.text == DEFERRED_ANSWER));
+            due(&f, &[&request]).await;
+            proposals::sweep(&f.state).await.unwrap();
+            let recovered = event_turn(&f, &row).await;
+            assert_ne!(
+                recovered.active_turn.as_ref().unwrap().turn_id,
+                resumed.active_turn.as_ref().unwrap().turn_id
+            );
+            run(&f, &recovered).await;
+            recovered
+        } else {
+            current.clone()
+        };
         let receipt = stored(&f, &request.id).await;
         let p = proposals::proposal(&receipt).unwrap();
         let recovered_id = recovered.active_turn.as_ref().unwrap().turn_id.as_str();
@@ -2387,7 +2387,10 @@ async fn owner_permission_resume_release_requires_prepared_worker_and_decision_e
                 .is_empty()
         );
         assert_eq!(f.server.received_requests().await.unwrap().len(), 1);
-        assert_eq!(model.calls.lock().unwrap().len(), 2);
+        assert_eq!(
+            model.calls.lock().unwrap().len(),
+            if change == "events" { 3 } else { 2 }
+        );
         drop(model);
         f.cleanup().await;
     }
@@ -2645,5 +2648,792 @@ async fn owner_permission_resume_markerless_delivered_receipt_keeps_fresh_group_
             .remove(&bot);
         drop(model);
         f.cleanup().await;
+    }
+}
+
+#[tokio::test]
+async fn owner_permission_resume_outer_runner_preserves_replacement_worker_jobs_and_stop() {
+    for change in ["worker", "events", "stop"] {
+        let (f, row) = assistant("owner_outer_authority_and_jobs").await;
+        let auth = f.auth().await;
+        let machine_fixture = crate::services::assistant_authority_tests::Fixture {
+            state: f.state.clone(),
+            owner: f.owner.clone(),
+            row: row.clone(),
+            chat: auth.assistant_chat.as_ref().unwrap().as_ref().clone(),
+            auth,
+            nyxbot_thread: row.id.clone(),
+        };
+        let node =
+            crate::services::machine_integration_tests::node(&machine_fixture, &f.owner).await;
+        let (peer, mut node_requests) = crate::services::machine_integration_tests::peer(
+            &machine_fixture,
+            &node,
+            json!({"cancelled":true}),
+        )
+        .await;
+        let job = Uuid::new_v4().to_string();
+        f.state.db.collection::<Document>("machine_jobs").insert_one(doc! {
+            "_id":&job,"user_id":&f.owner,"node_id":&node.id,"runtime_id":node.machine.as_ref().unwrap().runtime_id.clone(),
+            "conversation_id":&row.id,"api_key_id":&f.key,"agent_id":&row.agent_id,"issuing_turn_id":"independent-earlier-turn",
+            "state":"running","services":[],"created_at":bson::DateTime::now(),
+            "expires_at":bson::DateTime::from_chrono(Utc::now()+chrono::Duration::hours(1)),
+        }).await.unwrap();
+        set_task(&f, &row).await;
+        let _ = sheet(&f, 200).await;
+        let model = model(&f, false).await;
+        run(&f, &row).await;
+        let request = pending(&f, None).await;
+        let approved = proposals::decide(
+            &f.state,
+            &f.owner,
+            &request.id,
+            &decision(&request, "operation"),
+        )
+        .await
+        .unwrap();
+        let admitted = event_turn(&f, &row).await;
+        assert!(
+            admitted
+                .active_turn
+                .as_ref()
+                .unwrap()
+                .execution_attempt
+                .is_none()
+        );
+        if change == "stop" {
+            let status = crate::handlers::assistant_nyxagent::stop(
+                axum::extract::State(f.state.clone()),
+                test_utils::test_auth_user(&f.owner),
+                axum::extract::Path(row.id.clone()),
+            )
+            .await
+            .unwrap();
+            assert_eq!(status, StatusCode::NO_CONTENT);
+            let cancelled =
+                tokio::time::timeout(std::time::Duration::from_secs(5), node_requests.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(cancelled.operation, nyxid_machine::Operation::Cancel);
+            assert_eq!(cancelled.parameters["conversation_id"], row.id);
+            assert_eq!(
+                cancelled.parameters["turn_id"],
+                admitted.active_turn.as_ref().unwrap().turn_id
+            );
+            run(&f, &admitted).await;
+            let saved = engine::messages(&f.state.db, &f.owner, &row.id, 30, None)
+                .await
+                .unwrap();
+            let stopped = saved
+                .iter()
+                .find(|message| {
+                    message.role == "assistant"
+                        && message.turn_id == admitted.active_turn.as_ref().unwrap().turn_id
+                })
+                .unwrap();
+            assert_eq!(stopped.error_code.as_deref(), Some("cancelled"));
+            assert!(
+                engine::get(&f.state.db, &f.owner, &row.id)
+                    .await
+                    .unwrap()
+                    .active_turn
+                    .is_none()
+            );
+            let finished = f
+                .state
+                .db
+                .collection::<Document>("machine_jobs")
+                .find_one(doc! {"_id":&job})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(finished.get_str("state").unwrap(), "finished");
+            let stopped_request = stored(&f, &approved.id).await;
+            assert_eq!(
+                proposals::proposal(&stopped_request).unwrap().state,
+                "cancelled"
+            );
+            assert_eq!(
+                proposals::proposal(&stopped_request)
+                    .unwrap()
+                    .failure_code
+                    .as_deref(),
+                Some("task_stopped")
+            );
+            assert!(
+                worker_documents(&f.state.db, &approved)
+                    .await
+                    .1
+                    .get_bool("revoked")
+                    .unwrap()
+            );
+            assert!(f.server.received_requests().await.unwrap().is_empty());
+            assert_eq!(model.calls.lock().unwrap().len(), 1);
+        } else {
+            let mut deferred = crate::services::assistant_team_service::event(
+                "followup",
+                DEFERRED_TASK.into(),
+                None,
+            );
+            deferred.execution_task = None;
+            engine::push_events(&f.state.db, &f.owner, &row.id, vec![deferred])
+                .await
+                .unwrap();
+            let captured = Arc::new(Mutex::new(None));
+            let store = captured.clone();
+            let stale = admitted.clone();
+            let job_id = job.clone();
+            let hook: proposals::ModelApprovalHook = Arc::new(move |db, request| {
+                let store = store.clone();
+                let stale = stale.clone();
+                let job_id = job_id.clone();
+                Box::pin(async move {
+                    let before = worker_documents(&db, &request).await;
+                    let job = db
+                        .collection::<Document>("machine_jobs")
+                        .find_one(doc! {"_id":&job_id})
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    let update = if change == "worker" {
+                        doc! {"$set":{"active_turn.worker_instance.id":"rightful-current-worker"}}
+                    } else {
+                        doc! {"$set":{"active_turn.events.0.text":"The current worker owns this exact decision event."}}
+                    };
+                    db.collection::<Document>("assistant_conversations")
+                        .update_one(doc! {"_id":&stale.id}, update)
+                        .await
+                        .unwrap();
+                    let current = engine::get(&db, &stale.user_id, &stale.id).await.unwrap();
+                    *store.lock().unwrap() = Some((before, job, current));
+                })
+            });
+            proposals::continuation::BEFORE_EFFECT_CLAIM
+                .scope(hook, run(&f, &admitted))
+                .await;
+            let (before, job_before, current) = captured
+                .lock()
+                .unwrap()
+                .clone()
+                .expect("late takeover must be reached inside the normal owner runner");
+            assert!(worker_documents(&f.state.db, &approved).await == before);
+            assert!(
+                f.state
+                    .db
+                    .collection::<Document>("machine_jobs")
+                    .find_one(doc! {"_id":&job})
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    == job_before
+            );
+            let untouched = engine::get(&f.state.db, &f.owner, &row.id).await.unwrap();
+            let live = untouched
+                .active_turn
+                .as_ref()
+                .expect("stale settlement cannot drop the rightful turn");
+            let expected = current.active_turn.as_ref().unwrap();
+            assert_eq!(live.turn_id, expected.turn_id);
+            assert_eq!(
+                live.worker_instance.as_ref().unwrap().id,
+                expected.worker_instance.as_ref().unwrap().id
+            );
+            assert_eq!(
+                bson::to_bson(&live.execution_attempt).unwrap(),
+                bson::to_bson(&expected.execution_attempt).unwrap()
+            );
+            assert_eq!(
+                bson::to_bson(&live.events).unwrap(),
+                bson::to_bson(&expected.events).unwrap()
+            );
+            assert!(!live.stop_requested);
+            assert_eq!(
+                bson::to_bson(&untouched.pending_events).unwrap(),
+                bson::to_bson(&current.pending_events).unwrap()
+            );
+            let messages = engine::messages(&f.state.db, &f.owner, &row.id, 30, None)
+                .await
+                .unwrap();
+            assert!(
+                !messages
+                    .iter()
+                    .any(|message| message.role == "assistant" && message.turn_id == live.turn_id)
+            );
+            assert!(node_requests.try_recv().is_err());
+            assert!(f.server.received_requests().await.unwrap().is_empty());
+            assert_eq!(model.calls.lock().unwrap().len(), 1);
+            // The rightful snapshot enters the same normal wrapper and owns its
+            // actual effect, model reply and settlement. No stale result is reused.
+            run(&f, &current).await;
+            tokio::time::timeout(std::time::Duration::from_secs(30), async {
+                loop {
+                    let done = engine::get(&f.state.db, &f.owner, &row.id).await.unwrap();
+                    if done.active_turn.is_none()
+                        && done.pending_events.is_empty()
+                        && model.calls.lock().unwrap().len() == 3
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .unwrap();
+            let messages = engine::messages(&f.state.db, &f.owner, &row.id, 30, None)
+                .await
+                .unwrap();
+            let reply = messages
+                .iter()
+                .find(|message| message.role == "assistant" && message.turn_id == expected.turn_id)
+                .unwrap();
+            assert_eq!(
+                messages
+                    .iter()
+                    .filter(|message| message.role == "assistant"
+                        && message.turn_id == expected.turn_id)
+                    .count(),
+                1
+            );
+            assert_eq!(reply.status, "completed");
+            assert_eq!(reply.text, "Remaining task continued.");
+            assert!(
+                messages
+                    .iter()
+                    .any(|message| message.text == DEFERRED_ANSWER
+                        && message.turn_id != expected.turn_id)
+            );
+            let saved = stored(&f, &approved.id).await;
+            let p = proposals::proposal(&saved).unwrap();
+            assert_eq!(p.state, "completed");
+            assert_eq!(
+                p.owner_continuation
+                    .as_ref()
+                    .unwrap()
+                    .released_turn_id
+                    .as_deref(),
+                Some(expected.turn_id.as_str())
+            );
+            assert_eq!(
+                p.delivered_turn_id.as_deref(),
+                Some(expected.turn_id.as_str())
+            );
+            assert!(
+                f.state
+                    .db
+                    .collection::<Document>("machine_jobs")
+                    .find_one(doc! {"_id":&job})
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    == job_before
+            );
+            assert!(node_requests.try_recv().is_err());
+            assert_eq!(f.server.received_requests().await.unwrap().len(), 1);
+            assert_eq!(model.calls.lock().unwrap().len(), 3);
+        }
+        peer.abort();
+        drop(model);
+        f.cleanup().await;
+    }
+}
+
+#[tokio::test]
+async fn owner_permission_resume_expired_channel_observers_retire_unsent_in_both_orders() {
+    for a_first in [true, false] {
+        for outcome in [
+            "live",
+            "expired_undelivered",
+            "expired_delivered",
+            "expired_denied",
+            "expired_unknown",
+        ] {
+            let (f, row, _) = channel_turn_transport_with_expiry(
+                "owner_expired_observer_batch",
+                "direct",
+                Some(chrono::Duration::seconds(20)),
+            )
+            .await;
+            set_task(&f, &row).await;
+            let _ = sheet(
+                &f,
+                if outcome == "expired_unknown" {
+                    202
+                } else {
+                    200
+                },
+            )
+            .await;
+            let (relay, bot) = reply_transport(&f, &row).await;
+            let model = model_with_initial_reviews(&f, true, true).await;
+            run(&f, &row).await;
+            let requests: Vec<_> = f
+                .state
+                .db
+                .collection::<ApprovalRequest>("approval_requests")
+                .find(doc! {"status":"pending"})
+                .await
+                .unwrap()
+                .try_collect()
+                .await
+                .unwrap();
+            assert_eq!(requests.len(), 2);
+            let a = requests
+                .iter()
+                .find(|request| {
+                    proposals::proposal(request)
+                        .unwrap()
+                        .review
+                        .operation
+                        .starts_with("PUT ")
+                })
+                .unwrap();
+            let b = requests
+                .iter()
+                .find(|request| {
+                    proposals::proposal(request)
+                        .unwrap()
+                        .review
+                        .operation
+                        .starts_with("GET ")
+                })
+                .unwrap();
+            let mut input = decision(a, "operation");
+            if outcome == "expired_denied" {
+                input.approved = false;
+                input.choice_id = None;
+                input.choice_digest = None;
+            }
+            proposals::decide(&f.state, &f.owner, &a.id, &input)
+                .await
+                .unwrap();
+            let first = event_turn(&f, &row).await;
+            if matches!(outcome, "live" | "expired_undelivered") {
+                proposals::continuation::FAIL_AFTER_RELEASE
+                    .scope(true, run(&f, &first))
+                    .await;
+            } else {
+                run(&f, &first).await;
+            }
+            let original = stored(&f, &a.id).await;
+            let original_p = proposals::proposal(&original).unwrap();
+            if outcome == "expired_denied" {
+                assert_eq!(original_p.state, "denied");
+            } else if outcome == "expired_unknown" {
+                assert_eq!(original_p.state, "unknown");
+                assert_eq!(original.activity_outcome.as_deref(), Some("pending"));
+            } else {
+                assert_eq!(original_p.state, "completed");
+                assert_eq!(original.activity_outcome.as_deref(), Some("completed"));
+            }
+            if matches!(outcome, "live" | "expired_undelivered") {
+                assert!(original_p.delivered_turn_id.is_none());
+                assert_eq!(
+                    original_p
+                        .owner_continuation
+                        .as_ref()
+                        .unwrap()
+                        .released_turn_id
+                        .as_deref(),
+                    Some(first.active_turn.as_ref().unwrap().turn_id.as_str())
+                );
+            } else {
+                assert_eq!(
+                    original_p.delivered_turn_id.as_deref(),
+                    Some(first.active_turn.as_ref().unwrap().turn_id.as_str())
+                );
+            }
+            let first_wire = f.server.received_requests().await.unwrap();
+            assert_eq!(first_wire.len(), usize::from(outcome != "expired_denied"));
+            assert!(
+                first_wire
+                    .iter()
+                    .all(|request| request.method.as_str() == "PUT")
+            );
+            assert_eq!(
+                model.calls.lock().unwrap().len(),
+                if outcome == "expired_delivered" { 2 } else { 1 }
+            );
+            if matches!(outcome, "expired_undelivered" | "expired_delivered") {
+                // An attempted private-result open would fail authentication. The
+                // local expired observer path must not try to read this ciphertext.
+                let version = proposals::v3::AssistantVersion::of(&original).unwrap();
+                f.state.db.collection::<Document>("approval_requests").update_one(doc! {"_id":&a.id},version.update(doc! {
+                "$set":{"execution_proposal.v1.result":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:vec![0]}}
+            })).await.unwrap();
+            }
+            let replay = first.active_turn.as_ref().unwrap().events.clone();
+            if a_first {
+                engine::push_events(&f.state.db, &f.owner, &row.id, replay.clone())
+                    .await
+                    .unwrap();
+            }
+            let approved_b =
+                proposals::decide(&f.state, &f.owner, &b.id, &decision(b, "operation"))
+                    .await
+                    .unwrap();
+            if !a_first {
+                engine::push_events(&f.state.db, &f.owner, &row.id, replay)
+                    .await
+                    .unwrap();
+            }
+            let admitted = event_turn(&f, &row).await;
+            let turn = admitted.active_turn.as_ref().unwrap();
+            let task = turn.execution_task.as_ref().unwrap();
+            let expected = if a_first {
+                [a.id.clone(), b.id.clone()]
+            } else {
+                [b.id.clone(), a.id.clone()]
+            };
+            assert_eq!(
+                turn.events
+                    .iter()
+                    .map(|event| event.id.clone())
+                    .collect::<Vec<_>>(),
+                expected
+                    .iter()
+                    .map(|id| format!("execution-decision:{id}"))
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(
+                task.channel_source.as_ref().unwrap().expires_at,
+                task.hard_deadline
+            );
+            assert!(task.hard_deadline > Utc::now());
+            if outcome == "live" {
+                run(&f, &admitted).await;
+                final_reply(&f, &row, 2, &model).await;
+                let messages = engine::messages(&f.state.db, &f.owner, &row.id, 30, None)
+                    .await
+                    .unwrap();
+                let reply = messages
+                    .iter()
+                    .find(|message| message.role == "assistant" && message.turn_id == turn.turn_id)
+                    .unwrap();
+                assert_eq!(reply.text, answer(&values()));
+                confirmed_reply(&f, &turn.turn_id, &reply.id, &relay, &reply.text).await;
+                let saved = stored(&f, &b.id).await;
+                let p = proposals::proposal(&saved).unwrap();
+                assert_eq!(
+                    p.owner_continuation
+                        .as_ref()
+                        .unwrap()
+                        .released_turn_id
+                        .as_deref(),
+                    Some(turn.turn_id.as_str())
+                );
+                assert_eq!(p.delivered_turn_id.as_deref(), Some(turn.turn_id.as_str()));
+                assert_eq!(f.server.received_requests().await.unwrap().len(), 2);
+                assert_eq!(model.calls.lock().unwrap().len(), 2);
+            } else {
+                tokio::time::sleep(
+                    (task.hard_deadline - Utc::now())
+                        .to_std()
+                        .unwrap_or_default()
+                        + std::time::Duration::from_millis(1),
+                )
+                .await;
+                tokio::time::timeout(std::time::Duration::from_secs(30),async {
+                loop {
+                    if f.state.db.collection::<Document>("assistant_messages").find_one(doc! {
+                        "_id":&task.task.root_id,"$expr":{"$lte":["$execution_task.hard_deadline","$$NOW"]}
+                    }).await.unwrap().is_some() {break}
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            }).await.unwrap();
+                let a_before = f
+                    .state
+                    .db
+                    .collection::<Document>("approval_requests")
+                    .find_one(doc! {"_id":&a.id})
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let a_stored = stored(&f, &a.id).await;
+                let a_grant = if let Some(id) = &proposals::proposal(&a_stored).unwrap().grant_id {
+                    f.state
+                        .db
+                        .collection::<Document>("approval_grants")
+                        .find_one(doc! {"_id":id})
+                        .await
+                        .unwrap()
+                } else {
+                    None
+                };
+                let b_before = worker_documents(&f.state.db, &approved_b).await;
+                let root_before = f
+                    .state
+                    .db
+                    .collection::<Document>("assistant_messages")
+                    .find_one(doc! {"_id":&task.task.root_id})
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let key_before = f
+                    .state
+                    .db
+                    .collection::<Document>("api_keys")
+                    .find_one(doc! {"_id":&f.key})
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let relationship = f
+                    .state
+                    .db
+                    .collection::<Document>("assistant_agent_credentials")
+                    .find_one(
+                        doc! {"user_id":&f.owner,"conversation_id":&row.id,"api_key_id":&f.key},
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let mut credential = load_credential(&f, &admitted).await;
+                let egress = crate::handlers::assistant_nyxagent::http_egress(
+                    f.state.clone(),
+                    test_utils::test_auth_user(&f.owner),
+                );
+                let provider_before = f.server.received_requests().await.unwrap().len();
+                let model_before = model.calls.lock().unwrap().len();
+                let relay_before = relay.receipts.lock().unwrap().len();
+                for drift in [
+                    "worker",
+                    "events",
+                    "source",
+                    "root",
+                    "key",
+                    "lease",
+                    "stop",
+                    "relationship",
+                ] {
+                    let (collection, filter, update) = match drift {
+                        "worker" => (
+                            "assistant_conversations",
+                            doc! {"_id":&row.id},
+                            doc! {"$set":{"active_turn.worker_instance.id":"foreign-current-worker"}},
+                        ),
+                        "events" => (
+                            "assistant_conversations",
+                            doc! {"_id":&row.id},
+                            doc! {"$set":{"active_turn.events.0.text":"different admitted decision"}},
+                        ),
+                        "source" => (
+                            "assistant_conversations",
+                            doc! {"_id":&row.id},
+                            doc! {"$inc":{"active_turn.execution_task.channel_source.channel_revision":1_i64}},
+                        ),
+                        "root" => (
+                            "assistant_messages",
+                            doc! {"_id":&task.task.root_id},
+                            doc! {"$inc":{"execution_task.epoch":1_i64}},
+                        ),
+                        "key" => (
+                            "api_keys",
+                            doc! {"_id":&f.key},
+                            doc! {"$set":{"is_active":false}},
+                        ),
+                        "lease" => (
+                            "assistant_conversations",
+                            doc! {"_id":&row.id},
+                            doc! {"$set":{"active_turn.lease_expires_at":bson::DateTime::from_chrono(Utc::now()-chrono::Duration::seconds(1))}},
+                        ),
+                        "stop" => (
+                            "assistant_conversations",
+                            doc! {"_id":&row.id},
+                            doc! {"$set":{"active_turn.stop_requested":true}},
+                        ),
+                        _ => (
+                            "assistant_agent_credentials",
+                            doc! {"_id":relationship.get("_id").unwrap().clone()},
+                            doc! {"$set":{"api_key_id":"foreign-key"}},
+                        ),
+                    };
+                    f.state
+                        .db
+                        .collection::<Document>(collection)
+                        .update_one(filter, update)
+                        .await
+                        .unwrap();
+                    let error =
+                        execute_using_egress(&f, &admitted, &mut credential, egress.as_ref())
+                            .await
+                            .unwrap_err();
+                    assert_eq!(
+                        (error.code, error.stage),
+                        ("cancelled", "permission_resume"),
+                        "{outcome}/{drift}"
+                    );
+                    assert!(worker_documents(&f.state.db, &approved_b).await == b_before);
+                    assert!(
+                        f.state
+                            .db
+                            .collection::<Document>("approval_requests")
+                            .find_one(doc! {"_id":&a.id})
+                            .await
+                            .unwrap()
+                            .unwrap()
+                            == a_before
+                    );
+                    f.state.db.collection::<Document>("assistant_conversations").update_one(doc! {"_id":&row.id},doc! {"$set":{"active_turn":bson::to_bson(&admitted.active_turn).unwrap()}}).await.unwrap();
+                    f.state
+                        .db
+                        .collection::<Document>("assistant_messages")
+                        .replace_one(doc! {"_id":&task.task.root_id}, root_before.clone())
+                        .await
+                        .unwrap();
+                    f.state
+                        .db
+                        .collection::<Document>("api_keys")
+                        .replace_one(doc! {"_id":&f.key}, key_before.clone())
+                        .await
+                        .unwrap();
+                    f.state
+                        .db
+                        .collection::<Document>("assistant_agent_credentials")
+                        .replace_one(
+                            doc! {"_id":relationship.get("_id").unwrap().clone()},
+                            relationship.clone(),
+                        )
+                        .await
+                        .unwrap();
+                }
+                if outcome == "expired_undelivered" {
+                    // Interrupt after the actual local cancellation commits and
+                    // before message settlement. The normal runner must reuse
+                    // exactly B's durable local receipt, leaving observer A alone.
+                    let result =
+                        execute_using_egress(&f, &admitted, &mut credential, egress.as_ref())
+                            .await
+                            .unwrap();
+                    assert!(result.error.is_none());
+                    assert_eq!(
+                        result.text,
+                        "The operation was not sent because its authority or task is no longer available."
+                    );
+                    let current = engine::get(&f.state.db, &f.owner, &row.id).await.unwrap();
+                    assert_eq!(
+                        current
+                            .active_turn
+                            .as_ref()
+                            .unwrap()
+                            .execution_local_retirements,
+                        Some(vec![b.id.clone()])
+                    );
+                    assert!(
+                        !engine::messages(&f.state.db, &f.owner, &row.id, 30, None)
+                            .await
+                            .unwrap()
+                            .iter()
+                            .any(|message| message.role == "assistant"
+                                && message.turn_id == turn.turn_id)
+                    );
+                }
+                run(&f, &admitted).await;
+                let messages = engine::messages(&f.state.db, &f.owner, &row.id, 30, None)
+                    .await
+                    .unwrap();
+                let reply = messages
+                    .iter()
+                    .find(|message| message.role == "assistant" && message.turn_id == turn.turn_id)
+                    .unwrap();
+                assert_eq!(
+                    messages
+                        .iter()
+                        .filter(|message| message.role == "assistant"
+                            && message.turn_id == turn.turn_id)
+                        .count(),
+                    1
+                );
+                assert_eq!(reply.status, "completed");
+                assert_eq!(
+                    reply.text,
+                    "The operation was not sent because its authority or task is no longer available."
+                );
+                assert!(!reply.text.contains("HTTP"));
+                assert!(
+                    f.state
+                        .db
+                        .collection::<Document>("approval_requests")
+                        .find_one(doc! {"_id":&a.id})
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        == a_before
+                );
+                if let Some(grant) = a_grant {
+                    assert!(
+                        f.state
+                            .db
+                            .collection::<Document>("approval_grants")
+                            .find_one(doc! {"_id":grant.get("_id").unwrap().clone()})
+                            .await
+                            .unwrap()
+                            .unwrap()
+                            == grant
+                    );
+                }
+                let saved_b = stored(&f, &b.id).await;
+                let p = proposals::proposal(&saved_b).unwrap();
+                assert_eq!(p.state, "cancelled");
+                assert_eq!(saved_b.status, "expired");
+                assert_eq!(
+                    p.failure_code.as_deref(),
+                    Some("authority_or_task_unavailable")
+                );
+                assert_eq!(p.delivered_turn_id.as_deref(), Some(turn.turn_id.as_str()));
+                assert!(p.owner_continuation.as_ref().unwrap().blocked);
+                assert!(
+                    p.owner_continuation
+                        .as_ref()
+                        .unwrap()
+                        .released_turn_id
+                        .is_none()
+                );
+                let (_, grant) = worker_documents(&f.state.db, &approved_b).await;
+                assert!(grant.get_bool("revoked").unwrap());
+                assert!(
+                    grant.get_datetime("expires_at").unwrap().to_chrono()
+                        > Utc::now() + chrono::Duration::days(29)
+                );
+                assert!(
+                    crate::services::execution_permission_channel::deliveries::due(&f.state.db)
+                        .await
+                        .unwrap()
+                        .is_empty()
+                );
+                let outbox = f
+                    .state
+                    .db
+                    .collection::<Document>(
+                        crate::models::execution_permission_channel::COLLECTION_NAME,
+                    )
+                    .find_one(doc! {"turn_id":&turn.turn_id,"message_id":&reply.id})
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(outbox.get_str("state").unwrap(), "expired");
+                assert_eq!(
+                    f.server.received_requests().await.unwrap().len(),
+                    provider_before
+                );
+                assert_eq!(model.calls.lock().unwrap().len(), model_before);
+                assert_eq!(relay.receipts.lock().unwrap().len(), relay_before);
+                assert!(
+                    f.state
+                        .db
+                        .collection::<Document>("approval_requests")
+                        .find_one(doc! {"_id": &a.id})
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        == a_before
+                );
+            }
+            crate::handlers::channel_relay::TEST_REPLY_ADAPTERS
+                .lock()
+                .unwrap()
+                .remove(&bot);
+            drop(model);
+            f.cleanup().await;
+        }
     }
 }

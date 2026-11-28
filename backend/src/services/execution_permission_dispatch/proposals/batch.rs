@@ -96,6 +96,35 @@ impl TurnAuthority {
     }
 }
 
+pub(crate) fn retained_turn(row: &AssistantConversation) -> bool {
+    row.active_turn.as_ref().is_some_and(|turn| {
+        turn.events
+            .iter()
+            .any(|event| event.id.starts_with("execution-decision:"))
+    })
+}
+
+/// Settlement preserves identity while allowing actual Stop and lease expiry.
+pub(crate) async fn fence_settlement(
+    db: &Database,
+    session: &mut ClientSession,
+    row: &AssistantConversation,
+) -> AppResult<()> {
+    if !retained_turn(row) {
+        return Ok(());
+    }
+    let mut authority = TurnAuthority::capture(row)?;
+    authority.filter.remove("active_turn.stop_requested");
+    authority.filter.remove("$expr");
+    authority.fence(db, session).await.map_err(|error| {
+        if error.is_forbidden() {
+            AppError::NotFound("Conversation authority changed".into())
+        } else {
+            error
+        }
+    })
+}
+
 pub(super) async fn fence_turn(
     db: &Database,
     session: &mut ClientSession,

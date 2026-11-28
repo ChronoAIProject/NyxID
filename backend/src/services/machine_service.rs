@@ -669,6 +669,99 @@ async fn fence_turn_operation_in_session(
     Ok(())
 }
 
+/// Driver cleanup is owned by the original turn, never by a stale cancellation
+/// result. The explicit human Stop endpoint retains its broader entry below.
+pub(crate) async fn cancel_owned_conversation(
+    state: &AppState,
+    row: &AssistantConversation,
+) -> AppResult<()> {
+    let mut session = state.db.client().start_session().await?;
+    let nodes = session
+        .start_transaction()
+        .and_run((&state.db, row), |session, (db, row)| {
+            Box::pin(async move {
+                let result: AppResult<Vec<String>> = async {
+                    super::execution_permission_dispatch::proposals::fence_retained_settlement(
+                        db, session, row,
+                    )
+                    .await?;
+                    let mut filter = super::assistant_nyxagent::WorkerFence::capture(row)?.filter();
+                    filter.insert(
+                        "active_turn.worker_instance.id",
+                        row.active_turn
+                            .as_ref()
+                            .and_then(|turn| turn.worker_instance.as_ref())
+                            .map(|worker| worker.id.as_str()),
+                    );
+                    filter.insert("credential_api_key_id", &row.credential_api_key_id);
+                    let current = db
+                        .collection::<AssistantConversation>(CONVERSATIONS)
+                        .find_one_and_update(
+                            filter,
+                            doc! {"$set": {"active_turn.stop_requested": true}},
+                        )
+                        .return_document(mongodb::options::ReturnDocument::After)
+                        .session(&mut *session)
+                        .await?
+                        .ok_or(AppError::AssistantTurnRequired)?;
+                    let mut cursor = db
+                        .collection::<MachineJob>(JOBS)
+                        .find(doc! {
+                            "conversation_id": &row.id,
+                            "user_id": &row.user_id,
+                            "state": "running",
+                        })
+                        .session(&mut *session)
+                        .await?;
+                    let jobs: Vec<MachineJob> = cursor.stream(&mut *session).try_collect().await?;
+                    let ids: Vec<_> = jobs.iter().map(|job| job.id.as_str()).collect();
+                    db.collection::<MachineJob>(JOBS)
+                        .update_many(
+                            doc! {
+                                "_id": {"$in": ids},
+                                "conversation_id": &row.id,
+                                "user_id": &row.user_id,
+                                "state": "running",
+                            },
+                            doc! {"$set": {
+                                "state": "finished",
+                                "finished_at": bson::DateTime::now(),
+                            }},
+                        )
+                        .session(&mut *session)
+                        .await?;
+                    let mut nodes: std::collections::HashSet<String> =
+                        jobs.into_iter().map(|job| job.node_id).collect();
+                    nodes.extend(
+                        current
+                            .active_turn
+                            .as_ref()
+                            .into_iter()
+                            .flat_map(|turn| turn.machine_node_ids.iter().cloned()),
+                    );
+                    Ok(nodes.into_iter().collect())
+                }
+                .await;
+                super::api_key_mutation_service::transaction_result(result)
+            })
+        })
+        .await
+        .map_err(super::api_key_mutation_service::map_transaction_error)?;
+    let args = json!({
+        "conversation_id": row.id,
+        "turn_id": row.active_turn.as_ref().map(|turn| turn.turn_id.as_str()).unwrap_or_default(),
+    });
+    futures::stream::iter(nodes)
+        .for_each_concurrent(16, |node| {
+            let args = args.clone();
+            async move {
+                send_cancel(state, &node, args).await;
+            }
+        })
+        .await;
+    Ok(())
+}
+
 pub(crate) async fn cancel_conversation(state: &AppState, user: &str, id: &str) -> AppResult<()> {
     let row = state
         .db
