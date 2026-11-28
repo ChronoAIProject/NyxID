@@ -1,5 +1,6 @@
 use super::*;
 use crate::models::credits::Credits;
+use crate::services::platform_entry_native::tests::credentials::BotSecret;
 
 #[test]
 fn absent_guest_policy_is_closed_and_exact_cap_round_trips() {
@@ -2150,18 +2151,12 @@ async fn lark_credentials_do_not_verify_an_org_member() {
         let adapter = LarkFamilyAdapter::media_test_adapter(&server.uri(), platform);
         let mut bot = f.bot.clone();
         bot.platform = platform.into();
-        bot.bot_token_encrypted = state
-            .encryption_keys
-            .encrypt(b"cli_app:app-secret")
-            .await
-            .unwrap();
-        bot.lark_verification_token_encrypted = Some(
-            state
-                .encryption_keys
-                .encrypt(b"verification-token")
-                .await
-                .unwrap(),
-        );
+        BotSecret::Token
+            .set(&state.encryption_keys, &mut bot, "cli_app:app-secret")
+            .await;
+        BotSecret::LarkVerificationToken
+            .set(&state.encryption_keys, &mut bot, "verification-token")
+            .await;
         bot.status = "pending_webhook".into();
         bot.webhook_registered = false;
         db.collection::<ChannelBot>("channel_bots")
@@ -3106,5 +3101,59 @@ async fn guest_history_keeps_retained_meta_generation_until_its_erasure_is_claim
         .await
         .unwrap();
     assert!(list().await.unwrap().0.is_empty());
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn eligibility_revision_requires_new_channel_origin_and_hidden_lane() {
+    let f = Fixture::new("eligibility_channel_lane").await;
+    let db = &f.org.state.db;
+    let actor = &f.org.member;
+    let old = f.link(actor, "member").await;
+    let (previous, _) = transcript::lane(db, &old, actor, &f.agent.id)
+        .await
+        .unwrap();
+    let delayed = links::issue(db, actor, &f.channel).await.unwrap();
+    assert!(
+        links::receive(
+            db,
+            &f.channel,
+            "new-chat",
+            delayed["code"].as_str().unwrap(),
+            None
+        )
+        .await
+        .unwrap()
+    );
+    f.org.repromote_member().await;
+    assert!(
+        links::confirm(db, actor, &f.channel, delayed["id"].as_str().unwrap())
+            .await
+            .is_err()
+    );
+    assert!(
+        sender(db, &f.channel, "member", true, &f.agent.id)
+            .await
+            .is_err()
+    );
+    let current = f.link(actor, "member").await;
+    assert!(validate(db, &old, actor, &f.agent.id).await.is_err());
+    validate(db, &current, actor, &f.agent.id).await.unwrap();
+    let (next, _) = transcript::lane(db, &current, actor, &f.agent.id)
+        .await
+        .unwrap();
+    assert_ne!(previous, next);
+    assert!(
+        transcript::lane(db, &old, actor, &f.agent.id)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        transcript::lane(db, &current, actor, &f.agent.id)
+            .await
+            .unwrap()
+            .0,
+        next
+    );
     db.drop().await.unwrap();
 }

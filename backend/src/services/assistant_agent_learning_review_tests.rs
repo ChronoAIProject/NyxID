@@ -1,3 +1,6 @@
+#[path = "assistant_agent_learning_review_tests/historical.rs"]
+mod historical;
+
 use super::*;
 use crate::models::{
     assistant_acknowledgement::AssistantAcknowledgement,
@@ -456,19 +459,21 @@ async fn migration_reserves_started_update_even_if_invalidated_and_is_idempotent
 #[tokio::test]
 async fn migration_uses_original_encrypted_base_after_current_pin_changes() {
     let fixture = orchestrator_fixture("learning_migration_original_base").await;
-    let original_id = Uuid::new_v4().to_string();
+    let original_id = historical::ORIGINAL_BASE_SKILL_ID;
     let replacement_id = Uuid::new_v4().to_string();
     let body = json!({"schema_version":1,"kind":"improve","name":"original","description":"safe guidance",
         "skill_md":"# Guidance","files":[],"base_skill":{"source":"ornn","skill_id":original_id,
         "name":"original","version":"1.0","sha256":"a".repeat(64)},"rationale":"","safety_notes":""});
     let mut row = proposal(true);
     row.publication.as_mut().unwrap().version = "1.1".into();
-    row.body_encrypted = fixture
-        .state
-        .encryption_keys
-        .encrypt(&serde_json::to_vec(&body).unwrap())
-        .await
-        .unwrap();
+    row.body_encrypted = hex::decode(historical::ORIGINAL_BASE).unwrap();
+    assert_eq!(
+        crate::services::assistant_learning_record::body(&fixture.state.encryption_keys, &row)
+            .await
+            .unwrap()
+            .as_slice(),
+        serde_json::to_vec(&body).unwrap()
+    );
     fixture
         .state
         .db
@@ -1698,6 +1703,7 @@ async fn seed_learned_proposal(name: &str) -> SeededLearned {
             .unwrap();
     }
     let evidence = LearningEvidence {
+        eligibility_revision: 0,
         label: "teaching task".into(),
         conversation_id: fixture.row.id.clone(),
         turn_id: turn_id.clone(),
@@ -1710,6 +1716,7 @@ async fn seed_learned_proposal(name: &str) -> SeededLearned {
         .db
         .collection::<AssistantAgentLearning>(CONFIG_COLLECTION_NAME)
         .insert_one(AssistantAgentLearning {
+            eligibility_revision: 0,
             agent_id: agent.id.clone(),
             owner_id: fixture.owner.clone(),
             enabled: true,
@@ -1736,6 +1743,7 @@ async fn seed_learned_proposal(name: &str) -> SeededLearned {
         .db
         .collection::<AssistantAgentLearningRun>(RUNS_COLLECTION_NAME)
         .insert_one(AssistantAgentLearningRun {
+            eligibility_revision: 0,
             org_maintain_revision: 0,
             id: "run".into(),
             agent_id: agent.id.clone(),
@@ -1772,7 +1780,16 @@ async fn seed_learned_proposal(name: &str) -> SeededLearned {
     };
     let body = serde_json::to_vec(&generated).unwrap();
     let id = Uuid::new_v4().to_string();
-    let encrypted = fixture.state.encryption_keys.encrypt(&body).await.unwrap();
+    let (encrypted, body_context_version) = crate::services::assistant_learning_record::Field::Body
+        .seal(
+            &fixture.state.encryption_keys,
+            &id,
+            &fixture.owner,
+            &agent.id,
+            &body,
+        )
+        .await
+        .unwrap();
     fixture
         .state
         .db
@@ -1799,7 +1816,7 @@ async fn seed_learned_proposal(name: &str) -> SeededLearned {
             scope_digest: None,
             evidence: vec![evidence],
             body_encrypted: encrypted,
-            body_context_version: None,
+            body_context_version,
             body_bytes: body.len() as i64,
             created_at: now,
             updated_at: now,
@@ -1917,6 +1934,8 @@ async fn started_learned_publication(name: &str) -> StartedLearned {
         )
         .insert_one(AssistantAcknowledgement {
             meta_contexts: Vec::new(),
+            eligibility_revision: 0,
+            target_eligibility_revisions: Default::default(),
             org_maintenance_targets: Default::default(),
             org_maintain_revision: 0,
             activity_execution: None,
@@ -2306,6 +2325,8 @@ async fn approval_card_is_consumed_once_and_replay_cannot_consume_again() {
         )
         .insert_one(AssistantAcknowledgement {
             meta_contexts: Vec::new(),
+            eligibility_revision: 0,
+            target_eligibility_revisions: Default::default(),
             org_maintenance_targets: Default::default(),
             org_maintain_revision: 0,
             activity_execution: None,
@@ -2643,12 +2664,7 @@ async fn migration_retries_undecryptable_drafts_without_reporting_them_unresolve
     assert_eq!(data.get_str("proposal_id").unwrap(), row.id);
     assert_eq!(audits.count_documents(unresolved.clone()).await.unwrap(), 1);
     // A draft that decrypts but does not decode needs an operator instead.
-    let encrypted = fixture
-        .state
-        .encryption_keys
-        .encrypt(b"not a draft")
-        .await
-        .unwrap();
+    let encrypted = hex::decode(historical::INVALID_DRAFT).unwrap();
     fixture
         .state
         .db
@@ -2704,7 +2720,7 @@ async fn recovery_learned_legacy_update_is_rebuilt_from_the_panel() {
             .unwrap();
     let base = SkillPin {
         source: "ornn".into(),
-        skill_id: Uuid::new_v4().to_string(),
+        skill_id: historical::LEGACY_UPDATE_SKILL_ID.into(),
         name: "resumable".into(),
         version: "1.0".into(),
         sha256: publication::hash(&base_bytes),
@@ -2780,7 +2796,7 @@ async fn recovery_learned_legacy_update_is_rebuilt_from_the_panel() {
     generated.base_skill = Some(base.clone());
     generated.skill_md = "# Guidance\nSearch first.".into();
     let body = serde_json::to_vec(&generated).unwrap();
-    let encrypted = f.state.encryption_keys.encrypt(&body).await.unwrap();
+    let encrypted = hex::decode(historical::LEGACY_UPDATE).unwrap();
     let legacy = publication::package_with_snapshot(
         &generated,
         "legacy-operation",
@@ -2796,7 +2812,7 @@ async fn recovery_learned_legacy_update_is_rebuilt_from_the_panel() {
     proposals
         .update_one(
             doc! {"_id":&id},
-            doc! {"$set":{"body_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:encrypted},
+            doc! {"$unset":{"body_context_version":""},"$set":{"body_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:encrypted},
             "body_bytes":body.len() as i64,"publication":{"operation_id":"legacy-operation","name":"resumable",
             "version":"1.1","sha256":publication::hash(&legacy),"skill_id":bson::Bson::Null,"started":false,
             "approved_by":bson::Bson::Null,"approval_digest":bson::Bson::Null,"acknowledgement_id":bson::Bson::Null,
@@ -3019,10 +3035,10 @@ async fn stored_legacy_learned_root_file_still_previews() {
         content: "Safe reusable guidance".into(),
     });
     let bytes = serde_json::to_vec(&generated).unwrap();
-    let encrypted = f.state.encryption_keys.encrypt(&bytes).await.unwrap();
+    let encrypted = hex::decode(historical::ROOT_FILE).unwrap();
     f.state.db.collection::<bson::Document>(PROPOSALS_COLLECTION_NAME).update_one(
         doc! {"_id":&id},
-        doc! {"$set":{"body_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:encrypted},"body_bytes":bytes.len() as i64}},
+        doc! {"$unset":{"body_context_version":""},"$set":{"body_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:encrypted},"body_bytes":bytes.len() as i64}},
     ).await.unwrap();
     let proposals = list(&f.state, &f.owner, &agent.id, true).await.unwrap();
     let preview = proposals
@@ -3266,17 +3282,30 @@ mod mixed_records;
 
 #[tokio::test]
 async fn learning_proposal_context_selects_each_field_and_preserves_absent_and_erased_rows() {
-    use crate::services::assistant_skill_authoring::tests::{
-        contextualize, recovery::mixed_authored_row,
-    };
+    use crate::services::assistant_skill_authoring::tests::recovery::mixed_authored_row;
     let db = crate::test_utils::connect_transaction_test_database("proposal_reader_branches").await;
     let state = crate::test_utils::test_app_state(db.clone());
     let mut legacy_keys = crate::test_utils::test_encryption_keys();
     legacy_keys.set_contextual_record_writes(false);
     let bundle = Box::pin(mixed_authored_row(std::sync::Arc::new(legacy_keys))).await;
-    let mut raw = bundle.get_document("authored").unwrap().clone();
-    let legacy: AssistantAgentLearningProposal = bson::from_document(raw.clone()).unwrap();
-    contextualize(&state.encryption_keys, &mut raw).await;
+    let staged = bundle.get_document("authored").unwrap();
+    let legacy: AssistantAgentLearningProposal = bson::from_document(staged.clone()).unwrap();
+    let rows = db.collection::<bson::Document>(PROPOSALS_COLLECTION_NAME);
+    rows.insert_one(staged).await.unwrap();
+    assert!(
+        crate::services::assistant_learning_record::storage::migrate(
+            &db,
+            &state.encryption_keys,
+            staged
+        )
+        .await
+        .unwrap()
+    );
+    let raw = rows
+        .find_one(doc! {"_id": &legacy.id})
+        .await
+        .unwrap()
+        .unwrap();
     let bound: AssistantAgentLearningProposal = bson::from_document(raw.clone()).unwrap();
     for identity in [
         "owner",

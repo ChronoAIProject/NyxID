@@ -379,6 +379,7 @@ async fn process_claimed(db: &Database, keys: &EncryptionKeys, job: Document) ->
 
 #[cfg(test)]
 mod tests {
+    use super::super::tests::token_row;
     use super::*;
 
     #[tokio::test]
@@ -568,7 +569,21 @@ mod tests {
     }
 
     async fn replace(db: &Database, owner: &str, keys: &EncryptionKeys) -> AppResult<()> {
-        let encrypted = keys.encrypt(b"successor-token").await?;
+        use crate::services::credential_record_service as record;
+        let field = "access_token_encrypted";
+        let encrypted = record::encrypt(
+            keys,
+            COLLECTIONS[1],
+            "token-0000",
+            owner,
+            field,
+            b"successor-token",
+        )
+        .await?;
+        let mut set = doc! {field: binary(encrypted)};
+        let mut unset = Document::new();
+        record::mark_classic_update(&mut set, &mut unset, keys, field);
+        let update = doc! {"$set": set, "$unset": unset};
         let mut tx = db.client().start_session().await?;
         tx.start_transaction()
             .write_concern(WriteConcern::majority())
@@ -576,10 +591,7 @@ mod tests {
         super::super::super::erasure_admission::credential_change_in_session(db, owner, &mut tx)
             .await?;
         db.collection::<Document>(COLLECTIONS[1])
-            .update_one(
-                doc! {"_id":"token-0000"},
-                doc! {"$set":{"access_token_encrypted":binary(encrypted)}},
-            )
+            .update_one(doc! {"_id":"token-0000"}, update)
             .session(&mut tx)
             .await?;
         super::super::super::transaction_service::commit(&mut tx).await
@@ -972,8 +984,23 @@ mod tests {
         let keys = crate::test_utils::test_encryption_keys();
         let mut legacy = crate::test_utils::test_encryption_keys();
         legacy.set_contextual_record_writes(false);
-        db.collection::<Document>(COLLECTIONS[1]).insert_one(doc! {"_id":"token","user_id":&user,"provider_config_id":"provider",
-            "credential_user_id":&user,"status":"active","access_token_encrypted":binary(keys.encrypt(b"existing-token").await.unwrap())}).await.unwrap();
+        let token = token_row(
+            &legacy,
+            doc! {
+                "_id": "token",
+                "user_id": &user,
+                "provider_config_id": "provider",
+                "credential_user_id": &user,
+                "status": "active",
+            },
+            "access_token_encrypted",
+            b"existing-token",
+        )
+        .await;
+        db.collection::<Document>(COLLECTIONS[1])
+            .insert_one(token)
+            .await
+            .unwrap();
         let credentials = crate::services::user_credentials_service::upsert_user_credentials(
             &db,
             &legacy,
@@ -1060,8 +1087,20 @@ mod tests {
         let tokens = db.collection::<Document>(COLLECTIONS[1]);
         let mut rows = Vec::new();
         for index in 0..270 {
-            rows.push(doc! {"_id":format!("token-{index:04}"),"user_id":&user,"provider_config_id":"provider",
-                "status":"active","access_token_encrypted":binary(keys.encrypt(format!("token-{index}").as_bytes()).await.unwrap())});
+            rows.push(
+                token_row(
+                    &keys,
+                    doc! {
+                        "_id": format!("token-{index:04}"),
+                        "user_id": &user,
+                        "provider_config_id": "provider",
+                        "status": "active",
+                    },
+                    "access_token_encrypted",
+                    format!("token-{index}").as_bytes(),
+                )
+                .await,
+            );
         }
         tokens.insert_many(rows).await.unwrap();
         assert!(!ready_or_enqueue(&db, &user).await.unwrap());
@@ -1178,23 +1217,20 @@ mod tests {
                 .await
                 .unwrap();
             for index in 0..3 {
-                let mut row = doc! {"_id":format!("token-{index}"),"user_id":&user,"provider_config_id":"group-provider",
-                "token_type":"oauth2","status":"active","created_at":bson::DateTime::from_chrono(chrono::Utc::now()-chrono::Duration::seconds(3-index)),"updated_at":bson::DateTime::now()};
-                if index == 0 {
-                    row.insert(
-                        "access_token_encrypted",
-                        binary(keys.encrypt(b"stale-access").await.unwrap()),
-                    );
+                let (field, value) = if index == 0 {
+                    ("access_token_encrypted", "stale-access".to_owned())
                 } else {
-                    row.insert(
-                        "refresh_token_encrypted",
-                        binary(
-                            keys.encrypt(format!("own-refresh-{index}").as_bytes())
-                                .await
-                                .unwrap(),
-                        ),
-                    );
-                }
+                    ("refresh_token_encrypted", format!("own-refresh-{index}"))
+                };
+                let row = token_row(&keys, doc! {
+                    "_id": format!("token-{index}"),
+                    "user_id": &user,
+                    "provider_config_id": "group-provider",
+                    "token_type": "oauth2",
+                    "status": "active",
+                    "created_at": bson::DateTime::from_chrono(chrono::Utc::now() - chrono::Duration::seconds(3 - index)),
+                    "updated_at": bson::DateTime::now(),
+                }, field, value.as_bytes()).await;
                 db.collection::<Document>(COLLECTIONS[1])
                     .insert_one(row)
                     .await

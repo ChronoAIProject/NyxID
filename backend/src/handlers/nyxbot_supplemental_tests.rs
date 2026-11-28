@@ -9,6 +9,12 @@ use std::sync::{
 };
 
 async fn notice_fixture() -> (Fixture, MockServer, AssistantConversation) {
+    Box::pin(notice_fixture_with_reference_keys(None)).await
+}
+
+async fn notice_fixture_with_reference_keys(
+    reference_keys: Option<&crate::crypto::aes::EncryptionKeys>,
+) -> (Fixture, MockServer, AssistantConversation) {
     let (f, platform) = Box::pin(image_fixture("telegram", "gateway")).await;
     let origin = f.event.delivery.as_ref().unwrap().origin.clone();
     f.state.db.collection::<bson::Document>(CONVERSATIONS).update_one(doc! {"_id":&f.event.conversation_id},doc! {"$set":{"message_count":1,"active_turn":{
@@ -17,17 +23,16 @@ async fn notice_fixture() -> (Fixture, MockServer, AssistantConversation) {
         "lease_expires_at":bson::DateTime::from_chrono(Utc::now()+ChronoDuration::minutes(5)),
         "external_check_started":true,"stop_requested":false,
     }}}).await.unwrap();
-    let encrypted = f
-        .state
-        .encryption_keys
-        .encrypt(b"cmaeg1.ev.original")
-        .await
-        .unwrap();
+    let keys = reference_keys.unwrap_or(&f.state.encryption_keys);
+    let encrypted = f.seal_reference(keys, b"cmaeg1.ev.original").await;
     let mut fields = sources::reference_fields(
         encrypted,
         Utc::now() + ChronoDuration::minutes(29),
         f.event.relay_message_id.as_deref(),
     );
+    if keys.contextual_record_writes() {
+        fields.insert("event_ref_context_version", 3);
+    }
     fields.insert("platform_thread_id", "77");
     f.state
         .db
@@ -413,7 +418,7 @@ async fn supplemental_chat_reference_anchor_missing_deleted_mismatched_stale_and
                         "event_ref_ciphertext",
                         bson::Binary {
                             subtype: bson::spec::BinarySubtype::Generic,
-                            bytes: f.state.encryption_keys.encrypt(b"newer").await.unwrap(),
+                            bytes: f.seal_reference(&f.state.encryption_keys, b"newer").await,
                         },
                     );
                 }
@@ -515,11 +520,8 @@ async fn supplemental_progress_does_not_use_reference_fallback_or_newer_pointer(
             .await
             .unwrap();
         let mut fields = sources::reference_fields(
-            f.state
-                .encryption_keys
-                .encrypt(b"newer-event")
-                .await
-                .unwrap(),
+            f.seal_reference(&f.state.encryption_keys, b"newer-event")
+                .await,
             Utc::now() + ChronoDuration::minutes(29),
             Some("newer-inbound"),
         );
@@ -594,7 +596,7 @@ async fn supplemental_reference_pairing_clears_nonrelay_and_debug_is_redacted() 
     f.state.db.drop().await.unwrap();
 }
 
-async fn stored_recovery(f: &mut Fixture) -> String {
+async fn stored_recovery(f: &mut Fixture, answer: Option<&str>) -> String {
     use crate::{
         models::nyxbot_gateway_response::{COLLECTION_NAME, GatewayResponse},
         services::nyxbot_response_recovery as recovery,
@@ -607,8 +609,8 @@ async fn stored_recovery(f: &mut Fixture) -> String {
         .await
         .unwrap();
     let mut payload = recovery::Payload::new("notice-response", "nyxbot-test", Default::default());
-    payload.finish(Some("Useful answer"), false);
-    let stored = GatewayResponse {
+    payload.finish(answer, answer.is_none());
+    let mut stored = GatewayResponse {
         id: Uuid::new_v4().to_string(),
         response_id: "notice-response".into(),
         user_id: OWNER.into(),
@@ -622,10 +624,13 @@ async fn stored_recovery(f: &mut Fixture) -> String {
         answer_delivery: None,
         revision: 1,
         payload_context_version: None,
-        payload_ciphertext: payload.seal_legacy(&f.state.encryption_keys).await.unwrap(),
+        payload_ciphertext: Vec::new(),
         created_at: Utc::now(),
         expires_at: Utc::now() + ChronoDuration::hours(1),
     };
+    recovery::storage::install(&f.state.encryption_keys, &mut stored, &payload)
+        .await
+        .unwrap();
     f.state
         .db
         .collection::<GatewayResponse>(COLLECTION_NAME)
@@ -662,9 +667,9 @@ async fn supplemental_recovery_snapshot_and_replay_are_byte_identical() {
             let (mut f, platform, row) = Box::pin(notice_fixture()).await;
             mock_platform(&platform, outcome).await;
             let gateway = GatewayContract::mount(&f, false).await;
-            let id = stored_recovery(&mut f).await;
+            let id = stored_recovery(&mut f, Some("Useful answer")).await;
             let (mut baseline_fixture, _, _) = Box::pin(notice_fixture()).await;
-            let baseline_id = stored_recovery(&mut baseline_fixture).await;
+            let baseline_id = stored_recovery(&mut baseline_fixture, Some("Useful answer")).await;
             let baseline = recovery_bytes(&baseline_fixture, &baseline_id).await;
             assert!(baseline.0.contains("Useful answer"));
             notice(&f, &row).await;
@@ -689,7 +694,7 @@ async fn supplemental_recovery_get_races_unchanged_late_sender() {
         let (mut f, platform, row) = Box::pin(notice_fixture()).await;
         mock_platform(&platform, "confirmed").await;
         let gateway = GatewayContract::mount(&f, false).await;
-        let id = stored_recovery(&mut f).await;
+        let id = stored_recovery(&mut f, Some("Useful answer")).await;
         notice(&f, &row).await;
         delivery::detach(&f.state.db, &f.event.id).await.unwrap();
         let (snapshot, ()) = tokio::join!(
@@ -878,7 +883,8 @@ async fn supplemental_guest_and_org_route_authority_are_revalidated() {
                 f.state.db.collection(USERS).insert_one(test_user(&org,UserType::Org)).await.unwrap();
                 f.state.db.collection::<bson::Document>("org_memberships").insert_one(doc!{"_id":Uuid::new_v4().to_string(),"org_user_id":&org,"member_user_id":OWNER,"role":"admin","allowed_service_ids":bson::Bson::Null,"created_at":bson::DateTime::now(),"revoked_at":bson::Bson::Null}).await.unwrap();
                 f.state.db.collection::<bson::Document>(CHANNELS).update_one(doc!{"_id":&f.channel.id},doc!{"$set":{"bot_owner_id":&org}}).await.unwrap();
-                for (collection,filter) in [("channel_bots",doc!{"_id":&f.channel.channel_bot_id}),("channel_conversations",doc!{"_id":&f.channel.route_id}),("api_keys",doc!{"_id":&f.channel.route_api_key_id}),("channel_messages",doc!{"_id":&f.event.relay_message_id})] {
+                set_bot_secrets(&f.state, &f.channel, doc! {"user_id":&org}, &[(BotSecret::Token, b"token")]).await;
+                for (collection,filter) in [("channel_conversations",doc!{"_id":&f.channel.route_id}),("api_keys",doc!{"_id":&f.channel.route_api_key_id}),("channel_messages",doc!{"_id":&f.event.relay_message_id})] {
                     f.state.db.collection::<bson::Document>(collection).update_one(filter,doc!{"$set":{"user_id":&org}}).await.unwrap();
                 }
                 if mode=="org_revoked" {f.state.db.collection::<bson::Document>("org_memberships").delete_many(doc!{"org_user_id":&org}).await.unwrap();}
@@ -936,7 +942,7 @@ async fn supplemental_no_notice_stream_and_recovery_have_no_supplemental_reads()
         counts.lock().unwrap().clear();
         assert_eq!(live(&f, false).await, before);
         assert_eq!(*counts.lock().unwrap(), before_reads);
-        let id = stored_recovery(&mut f).await;
+        let id = stored_recovery(&mut f, Some("Useful answer")).await;
         let first = recovery_bytes(&f, &id).await;
         counts.lock().unwrap().clear();
         assert_eq!(recovery_bytes(&f, &id).await, first);
@@ -1004,30 +1010,29 @@ async fn supplemental_two_notice_replicas_race_the_provider_stream_claim() {
 #[tokio::test]
 async fn supplemental_notice_preserves_recovered_failure_and_one_failure_delivery() {
     Box::pin(async {
-        let (mut f,platform,row)=Box::pin(notice_fixture()).await;
-        mock_platform(&platform,"confirmed").await;
-        let gateway=GatewayContract::mount(&f,false).await;
-        let id=stored_recovery(&mut f).await;
-        let mut payload=crate::services::nyxbot_response_recovery::Payload::new(&id,"nyxbot-test",Default::default());
-        payload.finish(None,true);
-        let cipher=payload.seal_legacy(&f.state.encryption_keys).await.unwrap();
-        f.state.db.collection::<bson::Document>(crate::models::nyxbot_gateway_response::COLLECTION_NAME).update_one(doc!{"response_id":&id},doc!{"$set":{"payload_ciphertext":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:cipher}}}).await.unwrap();
-        let (mut baseline_fixture,_,_)=Box::pin(notice_fixture()).await;
-        let baseline_id=stored_recovery(&mut baseline_fixture).await;
-        let cipher=payload.seal_legacy(&baseline_fixture.state.encryption_keys).await.unwrap();
-        baseline_fixture.state.db.collection::<bson::Document>(crate::models::nyxbot_gateway_response::COLLECTION_NAME).update_one(doc!{"response_id":&baseline_id},doc!{"$set":{"payload_ciphertext":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:cipher}}}).await.unwrap();
-        let baseline=recovery_bytes(&baseline_fixture,&baseline_id).await;
+        let (mut f, platform, row) = Box::pin(notice_fixture()).await;
+        mock_platform(&platform, "confirmed").await;
+        let gateway = GatewayContract::mount(&f, false).await;
+        let id = stored_recovery(&mut f, None).await;
+        let (mut baseline_fixture, _, _) = Box::pin(notice_fixture()).await;
+        let baseline_id = stored_recovery(&mut baseline_fixture, None).await;
+        let baseline = recovery_bytes(&baseline_fixture, &baseline_id).await;
         assert!(baseline.0.contains("failed"));
-        notice(&f,&row).await;
-        assert_eq!(recovery_bytes(&f,&id).await,baseline);
-        assert!(gateway.final_reply(&f,"NyxBot could not finish this turn.").await);
-        late_delivery::process(&f.state,&f.event.id).await;
+        notice(&f, &row).await;
+        assert_eq!(recovery_bytes(&f, &id).await, baseline);
+        assert!(
+            gateway
+                .final_reply(&f, "NyxBot could not finish this turn.")
+                .await
+        );
+        late_delivery::process(&f.state, &f.event.id).await;
         assert!(sends(&f).await.is_empty());
-        assert_eq!(platform.received_requests().await.unwrap().len(),2);
+        assert_eq!(platform.received_requests().await.unwrap().len(), 2);
         no_event_replies(&f).await;
         f.state.db.drop().await.unwrap();
         baseline_fixture.state.db.drop().await.unwrap();
-    }).await;
+    })
+    .await;
 }
 
 async fn result_fixture(age: ChronoDuration) -> (Fixture, MockServer, AssistantConversation) {
@@ -1061,11 +1066,8 @@ async fn age_result_anchor(f: &Fixture, age: ChronoDuration) {
         .await
         .unwrap();
     let fields = sources::reference_fields(
-        f.state
-            .encryption_keys
-            .encrypt(b"cmaeg1.ev.original")
-            .await
-            .unwrap(),
+        f.seal_reference(&f.state.encryption_keys, b"cmaeg1.ev.original")
+            .await,
         at + ChronoDuration::minutes(29),
         f.event.relay_message_id.as_deref(),
     );
@@ -2475,14 +2477,18 @@ async fn supplemental_result_window_late_authority_guest_org_key_and_relink() {
                 f.state.db.collection(USERS).insert_one(test_user(&org,UserType::Org)).await.unwrap();
                 f.state.db.collection::<bson::Document>("org_memberships").insert_one(doc!{"_id":Uuid::new_v4().to_string(),"org_user_id":&org,"member_user_id":OWNER,"role":"admin","allowed_service_ids":bson::Bson::Null,"created_at":bson::DateTime::now(),"revoked_at":bson::Bson::Null}).await.unwrap();
                 f.state.db.collection::<bson::Document>(CHANNELS).update_one(doc!{"_id":&f.channel.id},doc!{"$set":{"bot_owner_id":&org}}).await.unwrap();
-                for (collection,filter) in [("channel_bots",doc!{"_id":&f.channel.channel_bot_id}),("channel_conversations",doc!{"_id":&f.channel.route_id}),("api_keys",doc!{"_id":&f.channel.route_api_key_id}),("channel_messages",doc!{"_id":&f.event.relay_message_id})] {
+                set_bot_secrets(&f.state, &f.channel, doc! {"user_id":&org}, &[(BotSecret::Token, b"token")]).await;
+                for (collection,filter) in [("channel_conversations",doc!{"_id":&f.channel.route_id}),("api_keys",doc!{"_id":&f.channel.route_api_key_id}),("channel_messages",doc!{"_id":&f.event.relay_message_id})] {
                     f.state.db.collection::<bson::Document>(collection).update_one(filter,doc!{"$set":{"user_id":&org}}).await.unwrap();
                 }
                 if mode=="org_revoked" {f.state.db.collection::<bson::Document>("org_memberships").delete_many(doc!{"org_user_id":&org}).await.unwrap();}
             }
             if mode=="route_revoked" {f.state.db.collection::<bson::Document>("api_keys").update_one(doc!{"_id":&f.channel.route_api_key_id},doc!{"$set":{"is_active":false}}).await.unwrap();}
             if mode=="platform_manager" {f.state.db.collection::<bson::Document>("channel_bots").update_one(doc!{"_id":&f.channel.channel_bot_id},doc!{"$set":{"platform_profile_id":"managed"}}).await.unwrap();}
-            if mode=="gateway_key_missing" { f.state.db.collection::<bson::Document>(CHANNELS).update_one(doc! {"_id":&f.channel.id},doc! {"$set":{"agent_key_ciphertext":bson::Bson::Null}}).await.unwrap(); }
+            if mode=="gateway_key_missing" { f.state.db.collection::<bson::Document>(CHANNELS).update_one(doc! {"_id":&f.channel.id},doc! {
+                        "$set":{"agent_key_ciphertext":bson::Bson::Null},
+                        "$unset":{channel_key::VERSION_PATH:""},
+                    }).await.unwrap(); }
             if mode=="relinked" { f.state.db.collection::<bson::Document>(THREADS).update_one(doc! {"channel_id":&f.channel.id},doc! {"$set":{"conversation_id":"different-conversation"}}).await.unwrap(); }
             deliver_to_for(&f.state,&row,&f.event.delivery.as_ref().unwrap().origin,"Useful answer",None,Purpose::TeamResult).await;
             assert_eq!(platform.received_requests().await.unwrap().len(),usize::from(matches!(mode,"guest"|"org")),"{mode}");

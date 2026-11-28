@@ -1502,6 +1502,7 @@ async fn separate_sheets_catalog_allows_one_guest_append_and_preserves_workspace
     use crate::models::service_approval_config::{
         ApprovalEffect, ApprovalMode, ApprovalRule, ApprovalVerb,
     };
+    use crate::services::credential_record_service as key_record;
     use crate::services::{
         approval_policy::GlobalApprovalMode, approval_service,
         assistant_agent_credential_service as credentials, destination_routing::tests as google,
@@ -1525,20 +1526,26 @@ async fn separate_sheets_catalog_allows_one_guest_append_and_preserves_workspace
     assert_ne!(workspace_id, sheets_id);
     assert_ne!(workspace.api_key_id, sheets.api_key_id);
     let guest_token = "test-guest-sheets-token";
-    let encrypted = f
-        .org
-        .state
-        .encryption_keys
-        .encrypt(guest_token.as_bytes())
-        .await
-        .unwrap();
+    let keys = &f.org.state.encryption_keys;
+    let key_id = sheets.api_key_id.as_deref().unwrap();
+    let field = "access_token_encrypted";
+    let encrypted = key_record::encrypt(
+        keys,
+        crate::models::user_api_key::COLLECTION_NAME,
+        key_id,
+        &sheets.user_id,
+        field,
+        guest_token.as_bytes(),
+    )
+    .await
+    .unwrap();
+    let mut set = doc! {field: bson::Binary {
+        subtype: bson::spec::BinarySubtype::Generic, bytes: encrypted,
+    }};
+    let mut unset = Document::new();
+    key_record::mark_classic_update(&mut set, &mut unset, keys, field);
     db.collection::<Document>(crate::models::user_api_key::COLLECTION_NAME)
-        .update_one(
-            doc! {"_id": sheets.api_key_id.as_deref().unwrap()},
-            doc! {"$set": {"access_token_encrypted": bson::Binary {
-                subtype: bson::spec::BinarySubtype::Generic, bytes: encrypted,
-            }}},
-        )
+        .update_one(doc! {"_id": key_id}, doc! {"$set": set, "$unset": unset})
         .await
         .unwrap();
     team::set_grants(

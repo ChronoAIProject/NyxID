@@ -296,6 +296,53 @@ impl Fixture {
             .unwrap()
             .unwrap()
     }
+    pub(crate) async fn patch_member_role(
+        &self,
+        admin: &str,
+        role: OrgRole,
+    ) -> axum::http::StatusCode {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let (_, private) = crate::routes::build_router_with_state(self.state.clone());
+        let router = private.with_state(self.state.clone());
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let token = crate::crypto::jwt::generate_access_token(
+            &self.state.jwt_keys,
+            &self.state.config,
+            &Uuid::parse_str(admin).unwrap(),
+            "read write",
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let response = reqwest::Client::new()
+            .patch(format!(
+                "http://{address}/api/v1/orgs/{}/members/{}",
+                self.org, self.member
+            ))
+            .bearer_auth(token)
+            .json(&serde_json::json!({"role":role}))
+            .send()
+            .await
+            .unwrap();
+        server.abort();
+        response.status()
+    }
+
+    pub(crate) async fn repromote_member(&self) {
+        for role in [OrgRole::Viewer, OrgRole::Member] {
+            assert_eq!(
+                self.patch_member_role(&self.admin, role).await,
+                axum::http::StatusCode::OK
+            );
+        }
+    }
+
     pub(crate) async fn revoke(&self, person: &str) {
         self.state
             .db
@@ -3336,3 +3383,126 @@ async fn org_agent_settlement_retries_ordinary_report_and_consumes_with_live_aut
     session.abort_transaction().await.unwrap();
     db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn eligibility_revision_rotates_member_key_and_discards_legacy_events() {
+    let f = Fixture::new("eligibility_member_thread").await;
+    let db = &f.state.db;
+    let (agent, _) = f.create().await;
+    let member = super::org_service::get_active_membership(db, &f.org, &f.member)
+        .await
+        .unwrap()
+        .unwrap();
+    db.collection::<bson::Document>("org_memberships")
+        .update_one(
+            doc! {"_id":&member.id},
+            doc! {"$unset":{"eligibility_revision":""}},
+        )
+        .await
+        .unwrap();
+    let row = team::home_thread_for(db, &f.state.encryption_keys, &f.member, &agent)
+        .await
+        .unwrap();
+    let old_key = f.key(&row).await;
+    let event = team::event("notice", "Pending".into(), Some(&agent.id));
+    db.collection::<bson::Document>("assistant_conversations").update_one(doc!{"_id":&row.id},
+        doc!{"$unset":{"eligibility_revision":""},"$push":{"pending_events":bson::to_bson(&event).unwrap()}}).await.unwrap();
+    for role in [OrgRole::Admin, OrgRole::Member, OrgRole::Member] {
+        assert!(f.patch_member_role(&f.admin, role).await.is_success());
+    }
+    assert!(
+        org_agents::resolve_credential_access(db, &old_key)
+            .await
+            .is_ok()
+    );
+    f.repromote_member().await;
+    let restored = super::org_service::get_active_membership(db, &f.org, &f.member)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(restored.id, member.id);
+    assert_eq!(restored.created_at, member.created_at);
+    assert_eq!(restored.eligibility_revision, 1);
+    assert!(
+        org_agents::resolve_credential_access(db, &old_key)
+            .await
+            .is_err()
+    );
+    let next = engine::begin_turn(
+        db,
+        &f.member,
+        &engine::TurnRequest {
+            acknowledgement_id: None,
+            retry_of: None,
+            attachment_ids: vec![],
+            conversation_id: Some(row.id.clone()),
+            agent_id: None,
+            text: "New request".into(),
+            model: None,
+            access_mode: None,
+        },
+        &f.state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    assert_ne!(old_key.id, next.credential_api_key_id);
+    assert_eq!(next.member_use.eligibility_revision, 1);
+    assert!(
+        next.active_turn
+            .as_ref()
+            .unwrap()
+            .events
+            .iter()
+            .all(|e| e.id != event.id)
+    );
+    assert!(
+        org_agents::resolve_credential_access(db, &f.key(&next).await)
+            .await
+            .is_ok()
+    );
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn eligibility_revision_counts_only_committed_demotions_from_two_admins() {
+    let f = Fixture::new("eligibility_admin_race").await;
+    let db = &f.state.db;
+    db.collection::<crate::models::org_membership::OrgMembership>("org_memberships")
+        .insert_one(test_membership(&f.org, &f.outsider, OrgRole::Admin, None))
+        .await
+        .unwrap();
+    let (loss, gain) = tokio::join!(
+        f.patch_member_role(&f.admin, OrgRole::Viewer),
+        f.patch_member_role(&f.outsider, OrgRole::Admin)
+    );
+    for status in [loss, gain] {
+        assert!(status.is_success() || status == axum::http::StatusCode::CONFLICT);
+    }
+    let current = super::org_service::get_active_membership(db, &f.org, &f.member)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(current.eligibility_revision, i64::from(loss.is_success()));
+    if !loss.is_success() {
+        assert!(
+            f.patch_member_role(&f.admin, OrgRole::Viewer)
+                .await
+                .is_success()
+        );
+    }
+    assert!(
+        f.patch_member_role(&f.outsider, OrgRole::Member)
+            .await
+            .is_success()
+    );
+    f.repromote_member().await;
+    let current = super::org_service::get_active_membership(db, &f.org, &f.member)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(current.eligibility_revision, 2);
+    db.drop().await.unwrap();
+}
+
+#[path = "org_member_revision_tests.rs"]
+mod delayed;

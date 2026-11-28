@@ -326,6 +326,7 @@ mod tests {
             &OwnerAccess::AsOrgMember {
                 org_user_id: "org".to_string(),
                 membership_id: "membership".to_string(),
+                eligibility_revision: 0,
                 role: OrgRole::Member,
                 allowed_service_ids: None,
             },
@@ -346,6 +347,7 @@ mod tests {
         let access = OwnerAccess::AsOrgMember {
             org_user_id: "org".to_string(),
             membership_id: "membership".to_string(),
+            eligibility_revision: 0,
             role: OrgRole::Member,
             allowed_service_ids: None,
         };
@@ -365,6 +367,7 @@ mod tests {
         let access = OwnerAccess::AsOrgAdmin {
             org_user_id: "org".to_string(),
             membership_id: "membership".to_string(),
+            eligibility_revision: 0,
             allowed_service_ids: None,
         };
 

@@ -16,11 +16,12 @@ use zeroize::Zeroizing;
 
 use super::transaction_service;
 use crate::{
-    crypto::aes::{EncryptionKeys, RecordContext},
+    crypto::aes::EncryptionKeys,
     errors::{AppError, AppResult},
 };
 
 pub(crate) mod replay;
+pub(crate) mod report;
 
 const LOG: &str = "encrypted_record_census_log";
 const PROTOCOL: i32 = 1;
@@ -38,6 +39,7 @@ fn malformed() -> AppError {
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct Scope {
+    #[serde(default)]
     pub registry_digest: String,
     pub restore_epoch: String,
     pub deployment_revision: String,
@@ -83,21 +85,6 @@ impl<'a> Census<'a> {
 
     fn page_id(&self, page: i64) -> Document {
         doc! {"generation": &self.id, "page": page}
-    }
-
-    async fn database_identity(&self) -> AppResult<Document> {
-        let config = self
-            .db
-            .client()
-            .database("admin")
-            .run_command(doc! {"replSetGetConfig": 1})
-            .await?;
-        let id = config
-            .get_document("config")
-            .and_then(|c| c.get_document("settings"))
-            .and_then(|s| s.get_object_id("replicaSetId"))
-            .map_err(|_| malformed())?;
-        Ok(doc! {"database": self.db.name(), "replica_set_id": id})
     }
 
     async fn catalog(&self) -> AppResult<Document> {
@@ -155,9 +142,11 @@ impl<'a> Census<'a> {
     async fn seal(&self, page: i64, batch: &Batch) -> AppResult<Bson> {
         let slot = page.to_string();
         let fields = ["journal", slot.as_str()];
-        let ctx = RecordContext::new(LOG, &self.id, "platform", &fields)?;
         let plain = Zeroizing::new(bson::to_vec(batch).map_err(|_| malformed())?);
-        let bytes = self.keys.encrypt_record(&plain, &ctx).await?;
+        let bytes = self
+            .keys
+            .seal_census_record(&self.id, &fields, &plain)
+            .await?;
         Ok(Bson::Binary(bson::Binary {
             subtype: bson::spec::BinarySubtype::Generic,
             bytes,
@@ -171,10 +160,12 @@ impl<'a> Census<'a> {
         };
         let slot = page.to_string();
         let fields = ["journal", slot.as_str()];
-        let ctx = RecordContext::new(LOG, &self.id, "platform", &fields)?;
         let opened = async {
             let ciphertext = row.get_binary_generic("batch").map_err(|_| malformed())?;
-            let plain = self.keys.decrypt_record(ciphertext, &ctx).await?;
+            let plain = self
+                .keys
+                .open_census_record(&self.id, &fields, ciphertext)
+                .await?;
             bson::from_slice(&plain).map_err(|_| malformed())
         }
         .await;
@@ -203,6 +194,10 @@ impl<'a> Census<'a> {
             id: Uuid::new_v4().to_string(),
             scope,
         };
+        let scope_revision = census
+            .scope_revision()
+            .await?
+            .ok_or_else(|| refused("Census lifecycle scope changed"))?;
         // The journal and its TTL index must exist before opening the stream.
         census
             .log()
@@ -217,7 +212,7 @@ impl<'a> Census<'a> {
         if !hello.contains_key("setName") || hello.contains_key("msg") {
             return Err(refused("Census requires an ordered replica-set stream"));
         }
-        let identity = census.database_identity().await?;
+        let identity = transaction_service::replica_database_identity(&census.db).await?;
         let mut stream = census.watch(None).await?;
         let catalog = census.catalog().await?;
         let deadline = bson::DateTime::from_millis(
@@ -248,7 +243,9 @@ impl<'a> Census<'a> {
         })
         .await
         .map_err(|_| refused("Census start marker unavailable"))??;
-        if census.catalog().await? != catalog || census.database_identity().await? != identity {
+        if census.catalog().await? != catalog
+            || transaction_service::replica_database_identity(&census.db).await? != identity
+        {
             return Err(refused("Census collection identity changed"));
         }
         let token = stream.resume_token().ok_or_else(malformed)?;
@@ -267,7 +264,7 @@ impl<'a> Census<'a> {
             .write_concern(WriteConcern::majority())
             .await?;
         census.log().insert_many([
-            doc! {"_id":&census.id,"protocol":PROTOCOL,"scope":bson::to_bson(&census.scope).map_err(|_|malformed())?,
+            doc! {"_id":&census.id,"protocol":PROTOCOL,"scope_revision":scope_revision,"scope":bson::to_bson(&census.scope).map_err(|_|malformed())?,
                 "database_identity":identity,"catalog":catalog,"checkpointed_at":bson::DateTime::now(),"head":0_i64,"expires_at":deadline,"lease_until":bson::DateTime::from_millis(0)},
             doc! {"_id":census.page_id(0),"batch":batch,"expires_at":deadline}
         ]).session(&mut tx).await?;
@@ -280,6 +277,7 @@ impl<'a> Census<'a> {
             .session(&mut tx)
             .await?;
         transaction_service::commit(&mut tx).await?;
+        census.state().await?;
         Ok((census, cut))
     }
 
@@ -303,7 +301,8 @@ impl<'a> Census<'a> {
             scope,
         };
         let state = census.state().await?;
-        if state.get_document("database_identity").ok() != Some(&census.database_identity().await?)
+        if state.get_document("database_identity").ok()
+            != Some(&transaction_service::replica_database_identity(&census.db).await?)
             || state.get_document("catalog").ok() != Some(&census.catalog().await?)
         {
             census.invalidate("database_identity_changed").await?;
@@ -326,6 +325,15 @@ impl<'a> Census<'a> {
         Ok(())
     }
 
+    async fn scope_revision(&self) -> AppResult<Option<i64>> {
+        super::key_lifecycle::census_scope_revision(
+            &self.db,
+            &self.scope.deployment_revision,
+            &self.scope.restore_epoch,
+        )
+        .await
+    }
+
     async fn state(&self) -> AppResult<Document> {
         let state = self
             .log()
@@ -334,6 +342,15 @@ impl<'a> Census<'a> {
             .ok_or_else(|| refused("Census generation unavailable"))?;
         if state.contains_key("invalid") {
             return Err(refused("Census generation invalidated"));
+        }
+        let stored_revision = match state.get("scope_revision") {
+            None => 0, // A pre-enrollment PR 7b journal.
+            Some(Bson::Int64(rev)) => *rev,
+            _ => return Err(malformed()),
+        };
+        if self.scope_revision().await? != Some(stored_revision) {
+            self.invalidate("lifecycle_scope_changed").await?;
+            return Err(refused("Census lifecycle scope changed"));
         }
         if state.get_i32("protocol") != Ok(PROTOCOL)
             || state.get("scope") != Some(&bson::to_bson(&self.scope).map_err(|_| malformed())?)
@@ -398,7 +415,7 @@ enum Change {
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;
 
 impl Census<'_> {
     /// Read one bounded page starting at the durable token. Discard the local

@@ -905,7 +905,7 @@ fn invalid_receiver() -> AppError {
     AppError::Internal("Channel receiver credential storage is invalid".into())
 }
 
-fn validate_receiver(link: &Link) -> AppResult<()> {
+pub(in crate::services) fn validate_receiver(link: &Link) -> AppResult<()> {
     if link.id.is_empty()
         || link.user_id.is_empty()
         || link
@@ -1342,9 +1342,23 @@ mod tests {
         // Simulate a previously public destination becoming private at delivery.
         c.link.receiver = Some(Receiver::Direct {
             url: "https://127.0.0.1/callback".into(),
-            secret_encrypted: keys.encrypt(b"test-signing-secret").await.unwrap(),
+            secret_encrypted: crate::crypto::record_field::encrypt(
+                &keys,
+                LINKS,
+                &c.link.id,
+                &c.link.user_id,
+                RECEIVER_SECRET,
+                b"test-signing-secret",
+            )
+            .await
+            .unwrap(),
             key_id: "test-key-id".into(),
         });
+        crate::services::credential_record_service::mark_version(
+            &mut c.link.secret_context_versions,
+            &keys,
+            RECEIVER_SECRET,
+        );
         db.collection::<Link>(LINKS)
             .replace_one(doc! {"_id": &c.link.id}, &c.link)
             .await

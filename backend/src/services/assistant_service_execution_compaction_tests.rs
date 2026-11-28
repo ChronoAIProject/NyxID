@@ -17,21 +17,23 @@ pub(super) async fn compact_connection(
 ) -> String {
     let id = connected(&f.state.db, owner, slug, url).await;
     let key = Uuid::new_v4().to_string();
-    let encrypted = f
-        .state
-        .encryption_keys
-        .encrypt(Uuid::new_v4().to_string().as_bytes())
-        .await
-        .unwrap();
+    let mut row = doc! {
+        "_id": &key, "user_id": owner, "label": slug, "credential_type": "api_key",
+        "status": "active", "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now(),
+    };
+    row.extend(
+        crate::services::credential_test_fixtures::api_key_fields(
+            &f.state.encryption_keys,
+            &key,
+            owner,
+            Uuid::new_v4().to_string().as_bytes(),
+        )
+        .await,
+    );
     f.state
         .db
         .collection::<Document>("user_api_keys")
-        .insert_one(doc! {
-            "_id":&key,"user_id":owner,"label":slug,"credential_type":"api_key",
-            "status":"active","credential_encrypted":bson::Binary{
-                subtype:bson::spec::BinarySubtype::Generic,bytes:encrypted},
-            "created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now(),
-        })
+        .insert_one(row)
         .await
         .unwrap();
     f.state

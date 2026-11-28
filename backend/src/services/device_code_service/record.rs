@@ -27,7 +27,7 @@ fn invalid() -> AppError {
     AppError::Internal("Node device delivery requires authenticated repair".into())
 }
 
-pub(super) struct Binding<'a> {
+pub(crate) struct Binding<'a> {
     row: &'a DeviceCode,
     actor: &'a str,
     org: Option<&'a str>,
@@ -60,7 +60,7 @@ impl<'a> Binding<'a> {
         })
     }
 
-    fn stored(row: &'a DeviceCode) -> AppResult<Self> {
+    pub(crate) fn stored(row: &'a DeviceCode) -> AppResult<Self> {
         Self::new(
             row,
             row.approved_by_user_id.as_deref().ok_or_else(invalid)?,
@@ -73,7 +73,7 @@ impl<'a> Binding<'a> {
         )
     }
 
-    fn path(&self, field: &'static str) -> [&str; 8] {
+    pub(crate) fn path(&self, field: &'static str) -> [&str; 8] {
         [
             field,
             if self.org.is_some() {
@@ -90,7 +90,7 @@ impl<'a> Binding<'a> {
         ]
     }
 
-    fn context<'b>(&'b self, path: &'b [&'b str]) -> AppResult<RecordContext<'b>> {
+    pub(crate) fn context<'b>(&'b self, path: &'b [&'b str]) -> AppResult<RecordContext<'b>> {
         RecordContext::new(
             COLLECTION_NAME,
             &self.row.id,
@@ -175,7 +175,7 @@ pub(super) async fn open_pair(
     Ok((key, refresh))
 }
 
-fn retained(source: &Document) -> AppResult<DeviceCode> {
+pub(crate) fn retained(source: &Document) -> AppResult<DeviceCode> {
     let row: DeviceCode = bson::from_document(source.clone()).map_err(|_| invalid())?;
     let key = row.delivery_api_key_encrypted.is_some();
     let refresh = row.delivery_refresh_token_encrypted.is_some();

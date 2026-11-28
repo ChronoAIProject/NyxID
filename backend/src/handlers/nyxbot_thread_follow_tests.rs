@@ -31,17 +31,13 @@ async fn discord_2187_followed_identity_preserves_upstream_discord_admission() {
         .replace_one(doc! {"_id":&row.id}, &row)
         .await
         .unwrap();
-    state
-        .db
-        .collection::<bson::Document>("channel_bots")
-        .update_one(
-            doc! {"_id":&row.channel_bot_id},
-            doc! {"$set":{"platform":"discord","platform_bot_id":"100",
-            "bot_token_encrypted":bson::Binary {subtype:bson::spec::BinarySubtype::Generic,
-            bytes:state.encryption_keys.encrypt(b"token").await.unwrap()}}},
-        )
-        .await
-        .unwrap();
+    set_bot_secrets(
+        &state,
+        &row,
+        doc! {"platform":"discord","platform_bot_id":"100"},
+        &[(BotSecret::Token, b"token")],
+    )
+    .await;
     // Follow resolution revalidates the complete live route, including its
     // callback. Keep the common direct fixture consistent with this Discord
     // group rather than silently falling back before selecting a child.
@@ -574,13 +570,9 @@ async fn direct_follow_uses_separate_native_children_and_owner_stop_without_mode
         .unwrap();
     let mut bot = bot_doc("telegram", "Helper");
     bot.insert("_id", &row.channel_bot_id);
-    bot.insert(
-        "bot_token_encrypted",
-        bson::Binary {
-            subtype: bson::spec::BinarySubtype::Generic,
-            bytes: state.encryption_keys.encrypt(b"token").await.unwrap(),
-        },
-    );
+    BotSecret::Token
+        .set_document(&state.encryption_keys, &mut bot, b"token")
+        .await;
     state
         .db
         .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)

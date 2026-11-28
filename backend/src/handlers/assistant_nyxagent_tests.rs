@@ -3207,6 +3207,8 @@ async fn cards_decided_during_a_turn_are_reported_to_the_next_turn_exactly_once(
         .unwrap();
     let ack = |kind: &str, status: &str, decided: Option<DateTime<Utc>>| AssistantAcknowledgement {
         meta_contexts: Vec::new(),
+        eligibility_revision: 0,
+        target_eligibility_revisions: Default::default(),
         org_maintenance_targets: Default::default(),
         org_maintain_revision: 0,
         activity_execution: None,

@@ -224,6 +224,7 @@ pub(super) async fn enqueue_with_uploads_ready(
                 }
                 let participating = access.execution_enrolled && svc::execution_permission_enrollment::live_enabled(db, actor, Some(session)).await?;
                 let request = GroupRequest {
+        eligibility_revision: 0,
         org_use_revisions: Default::default(),
                     execution_task: participating.then(|| crate::models::execution_permission::TaskAdmission {
                         channel_source: None,

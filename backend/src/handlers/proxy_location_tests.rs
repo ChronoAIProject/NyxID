@@ -148,11 +148,7 @@ async fn check_locations(node_routed: bool) {
             service.service_category = "internal".into();
             service.auth_method = method.into();
             service.auth_key_name = if method == "path" { "bot" } else { "key" }.into();
-            service.credential_encrypted = state
-                .encryption_keys
-                .encrypt(TOKEN.as_bytes())
-                .await
-                .unwrap();
+            set_catalog_credential(&state.encryption_keys, &mut service, TOKEN.as_bytes()).await;
         }
         db.collection::<downstream_service::DownstreamService>(downstream_service::COLLECTION_NAME)
             .insert_one(&service)

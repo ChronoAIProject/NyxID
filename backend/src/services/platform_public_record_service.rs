@@ -236,20 +236,24 @@ async fn verify_session(
         }
     } else {
         let encoded = decrypt_session(keys, row, "upstream_binding_ciphertext").await?;
-        #[derive(serde::Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Binding {
-            session_id: Option<Zeroizing<String>>,
-            response_id: Option<Zeroizing<String>>,
-        }
-        let binding: Binding = serde_json::from_str(&encoded).map_err(|_| invalid())?;
-        validate_binding_handles(
-            binding.session_id.as_ref().map(|s| s.as_str()),
-            binding.response_id.as_ref().map(|s| s.as_str()),
-        )?;
+        validate_encoded_binding(&encoded)?;
     }
     Ok(())
 }
+pub(super) fn validate_encoded_binding(encoded: &str) -> AppResult<()> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Binding {
+        session_id: Option<Zeroizing<String>>,
+        response_id: Option<Zeroizing<String>>,
+    }
+    let binding: Binding = serde_json::from_str(encoded).map_err(|_| invalid())?;
+    validate_binding_handles(
+        binding.session_id.as_ref().map(|s| s.as_str()),
+        binding.response_id.as_ref().map(|s| s.as_str()),
+    )
+}
+
 pub(crate) fn validate_binding_handles(
     session: Option<&str>,
     response: Option<&str>,
@@ -515,8 +519,28 @@ mod tests {
                 super::super::platform_public_credential_service::tests::fixture();
             let raw = "distinctive-public-agent-key";
             key.key_hash = crate::crypto::token::hash_token(raw);
-            row.credential_ciphertext = keys.encrypt(raw.as_bytes()).await.unwrap();
-            row.upstream_binding_ciphertext = keys.encrypt(binding).await.unwrap();
+            keys.set_contextual_record_writes(false);
+            row.credential_ciphertext = encrypt_session(
+                &keys,
+                &row.id,
+                &row.sponsor_owner_user_id,
+                &row.credential_api_key_id,
+                "credential_ciphertext",
+                raw.as_bytes(),
+            )
+            .await
+            .unwrap();
+            row.upstream_binding_ciphertext = encrypt_session(
+                &keys,
+                &row.id,
+                &row.sponsor_owner_user_id,
+                &row.credential_api_key_id,
+                "upstream_binding_ciphertext",
+                binding,
+            )
+            .await
+            .unwrap();
+            keys.set_contextual_record_writes(true);
             row.upstream_may_exist = true;
             db.collection::<crate::models::api_key::ApiKey>(
                 crate::models::api_key::COLLECTION_NAME,

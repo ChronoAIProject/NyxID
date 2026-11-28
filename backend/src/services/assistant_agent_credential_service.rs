@@ -44,7 +44,7 @@ pub enum KeyAuthority {
         AgentGrants,
         crate::models::agent_operation_scope::OperationScopes,
         String,
-        i64,
+        crate::models::org_membership::MemberUse,
     ),
 }
 
@@ -58,22 +58,26 @@ impl KeyAuthority {
     }
 
     pub fn for_agent(agent: &AssistantAgent) -> Self {
+        Self::for_member(agent, 0)
+    }
+
+    fn for_member(agent: &AssistantAgent, eligibility_revision: i64) -> Self {
         match agent.kind {
             AgentKind::Nyxbot => Self::Orchestrator,
             AgentKind::Specialist => Self::Subagent(
                 agent.grants.clone(),
                 agent.operation_scopes.clone(),
                 agent.user_id.clone(),
-                agent.org_use_revision,
+                agent.member_use(eligibility_revision),
             ),
         }
     }
 
-    pub(crate) fn org_use_revision(&self) -> i64 {
+    pub(crate) fn member_use(&self) -> crate::models::org_membership::MemberUse {
         match self {
             Self::Subagent(_, _, _, revision) => *revision,
-            Self::Collaboration(inner, _) => inner.org_use_revision(),
-            _ => 0,
+            Self::Collaboration(inner, _) => inner.member_use(),
+            _ => Default::default(),
         }
     }
 
@@ -170,7 +174,7 @@ pub async fn authority_in_session(
         false,
     ))
     .await?;
-    if current.org_use_revision() != conversation.org_use_revision {
+    if current.member_use() != conversation.member_use {
         return Err(AppError::Forbidden("Specialist use access changed".into()));
     }
     Ok(current)
@@ -365,9 +369,10 @@ pub(crate) async fn authority_with_access(
             agent.user_id.clone(),
         ));
     }
-    if agent.user_id != conversation.user_id
-        && !snapshot.is_some_and(|s| s.channel().is_some())
-        && !Box::pin(super::org_agent_service::member_rights_in_session(
+    let eligibility_revision = if let Some(channel) = snapshot.and_then(|s| s.channel()) {
+        channel.execution().member_use.eligibility_revision
+    } else if agent.user_id != conversation.user_id {
+        let rights = Box::pin(super::org_agent_service::member_rights_in_session(
             db,
             session,
             &conversation.user_id,
@@ -378,14 +383,17 @@ pub(crate) async fn authority_with_access(
                 super::org_agent_service::MemberFence::MemberAndOrg
             },
         ))
-        .await?
-        .can_use
-    {
-        return Err(AppError::Forbidden(
-            "Specialist use access is required".into(),
-        ));
-    }
-    Ok(KeyAuthority::for_agent(&agent))
+        .await?;
+        if !rights.can_use {
+            return Err(AppError::Forbidden(
+                "Specialist use access is required".into(),
+            ));
+        }
+        rights.eligibility_revision
+    } else {
+        0
+    };
+    Ok(KeyAuthority::for_member(&agent, eligibility_revision))
 }
 
 // MCP x-api-key initialization/tools/call require REST proxy scope. `proxy`

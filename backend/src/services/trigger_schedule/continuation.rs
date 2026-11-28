@@ -693,7 +693,7 @@ pub async fn fence_work(
             false,
         )
         .await?
-            != run.org_use_revision
+            != run.member_use
     {
         return Err(AppError::AssistantTurnRequired);
     }

@@ -13,11 +13,12 @@ use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::handlers::auth::{
     AuthClientMode, LoginResponse, apply_browser_session_cookies, build_cookie_with_same_site,
-    clear_cookie_with_same_site, extract_ip, extract_user_agent, resolve_auth_client_mode,
+    clear_cookie_with_same_site, extract_user_agent, resolve_auth_client_mode,
 };
 use crate::models::mfa_factor::{COLLECTION_NAME as MFA_FACTORS, MfaFactor};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::AuthUser;
+use crate::mw::rate_limit::AuditIp;
 use crate::services::{audit_service, mfa_service, token_service};
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
@@ -301,7 +302,7 @@ pub async fn verify(
     let mut completion = factor.expect("verified factor");
 
     // Issue real session tokens
-    let ip = extract_ip(&headers, Some(peer));
+    let ip = AuditIp::resolve(&headers, Some(peer), &state.config.trusted_proxy_ips).0;
     let ua = extract_user_agent(&headers);
     let client_mode = resolve_auth_client_mode(&headers, body.client.as_deref());
     let secure = state.config.use_secure_cookies();
@@ -575,6 +576,7 @@ pub async fn cancel(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::handlers::credential_record_fixtures::insert_recovery_factor;
     use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
     use crate::test_utils::{connect_test_database, test_app_state, test_auth_user, test_user};
     use axum::extract::State;
@@ -606,36 +608,13 @@ mod tests {
         let b = test_app_state(independent);
         // Same shape as issued recovery codes; never a fixed credential.
         let recovery = crate::crypto::token::generate_random_token()[..32].to_string();
-        let factor_id = uuid::Uuid::new_v4().to_string();
-        let secret_encrypted = crate::crypto::record_field::encrypt(
+        insert_recovery_factor(
+            &db,
             &a.encryption_keys,
-            MFA_FACTORS,
-            &factor_id,
             &id,
-            "secret_encrypted",
-            b"JBSWY3DPEHPK3PXP",
+            &crate::crypto::password::hash_password(&recovery).unwrap(),
         )
-        .await
-        .unwrap();
-        db.collection::<MfaFactor>(MFA_FACTORS)
-            .insert_one(MfaFactor {
-                id: factor_id,
-                user_id: id.clone(),
-                factor_type: "totp".into(),
-                secret_encrypted: Some(secret_encrypted),
-                secret_context_version: a.encryption_keys.contextual_record_writes().then_some(3),
-                recovery_codes: Some(serde_json::json!([crate::crypto::password::hash_password(
-                    &recovery
-                )
-                .unwrap()])),
-                last_totp_counter: None,
-                is_verified: true,
-                is_active: true,
-                created_at: chrono::Utc::now(),
-                updated_at: chrono::Utc::now(),
-            })
-            .await
-            .unwrap();
+        .await;
         // Independent, valid first-factor challenges must still contend on the
         // one exact recovery hash. Neither challenge grants account authority.
         let tokens = ["first-challenge", "second-challenge"];
@@ -896,28 +875,7 @@ mod tests {
         let state = test_app_state(db.clone());
         let recovery = "00112233445566778899001122334455";
         let hash = password::hash_password(recovery).unwrap();
-        db.collection::<MfaFactor>(MFA_FACTORS)
-            .insert_one(MfaFactor {
-                id: uuid::Uuid::new_v4().to_string(),
-                user_id: id.clone(),
-                factor_type: "totp".into(),
-                secret_encrypted: Some(
-                    state
-                        .encryption_keys
-                        .encrypt(b"JBSWY3DPEHPK3PXP")
-                        .await
-                        .unwrap(),
-                ),
-                secret_context_version: None,
-                recovery_codes: Some(serde_json::json!([hash])),
-                last_totp_counter: None,
-                is_verified: true,
-                is_active: true,
-                created_at: chrono::Utc::now(),
-                updated_at: chrono::Utc::now(),
-            })
-            .await
-            .unwrap();
+        insert_recovery_factor(&db, &state.encryption_keys, &id, &hash).await;
         let mut bases = Vec::new();
         let mut servers = Vec::new();
         for database in [db.clone(), independent] {
@@ -1066,31 +1024,13 @@ mod tests {
             "push_enabled":false,"created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()
         }).await.unwrap();
         let recovery = uuid::Uuid::new_v4().simple().to_string();
-        let row = MfaFactor {
-            id: uuid::Uuid::new_v4().to_string(),
-            user_id: id.clone(),
-            factor_type: "totp".into(),
-            secret_encrypted: Some(
-                state
-                    .encryption_keys
-                    .encrypt(b"JBSWY3DPEHPK3PXP")
-                    .await
-                    .unwrap(),
-            ),
-            secret_context_version: None,
-            recovery_codes: Some(serde_json::json!([
-                password::hash_password(&recovery).unwrap()
-            ])),
-            last_totp_counter: None,
-            is_verified: true,
-            is_active: true,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-        };
-        db.collection::<MfaFactor>(MFA_FACTORS)
-            .insert_one(row)
-            .await
-            .unwrap();
+        insert_recovery_factor(
+            &db,
+            &state.encryption_keys,
+            &id,
+            &password::hash_password(&recovery).unwrap(),
+        )
+        .await;
         let held = std::sync::Arc::new(tokio::sync::Notify::new());
         let release = std::sync::Arc::new(tokio::sync::Notify::new());
         let held_handler = held.clone();
@@ -1535,30 +1475,13 @@ mod tests {
             let state = test_app_state(db.clone());
             let mut invalid = state.clone();
             invalid.config.cookie_domain = Some("example.test\ninvalid".into());
-            db.collection::<MfaFactor>(MFA_FACTORS)
-                .insert_one(MfaFactor {
-                    id: uuid::Uuid::new_v4().to_string(),
-                    user_id: id.clone(),
-                    factor_type: "totp".into(),
-                    secret_encrypted: Some(
-                        state
-                            .encryption_keys
-                            .encrypt(b"JBSWY3DPEHPK3PXP")
-                            .await
-                            .unwrap(),
-                    ),
-                    secret_context_version: None,
-                    recovery_codes: Some(serde_json::json!([
-                        password::hash_password(recovery).unwrap()
-                    ])),
-                    last_totp_counter: None,
-                    is_verified: true,
-                    is_active: true,
-                    created_at: chrono::Utc::now(),
-                    updated_at: chrono::Utc::now(),
-                })
-                .await
-                .unwrap();
+            insert_recovery_factor(
+                &db,
+                &state.encryption_keys,
+                &id,
+                &password::hash_password(recovery).unwrap(),
+            )
+            .await;
             let pending = token::generate_random_token();
             token_service::create_mfa_pending_session_for_password(
                 &db,
@@ -1727,30 +1650,13 @@ mod tests {
                 .await
                 .unwrap();
             let state = test_app_state(db.clone());
-            db.collection::<MfaFactor>(MFA_FACTORS)
-                .insert_one(MfaFactor {
-                    id: uuid::Uuid::new_v4().to_string(),
-                    user_id: id.clone(),
-                    factor_type: "totp".into(),
-                    secret_encrypted: Some(
-                        state
-                            .encryption_keys
-                            .encrypt(b"JBSWY3DPEHPK3PXP")
-                            .await
-                            .unwrap(),
-                    ),
-                    secret_context_version: None,
-                    recovery_codes: Some(serde_json::json!([
-                        password::hash_password(code).unwrap()
-                    ])),
-                    last_totp_counter: None,
-                    is_verified: true,
-                    is_active: true,
-                    created_at: chrono::Utc::now(),
-                    updated_at: chrono::Utc::now(),
-                })
-                .await
-                .unwrap();
+            insert_recovery_factor(
+                &db,
+                &state.encryption_keys,
+                &id,
+                &password::hash_password(code).unwrap(),
+            )
+            .await;
             let request = device::initiate_v2(
                 &db,
                 state.auth_device_hmac_key.as_slice(),

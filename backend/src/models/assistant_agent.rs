@@ -216,6 +216,13 @@ pub struct AgentSkillMetadata {
 }
 
 impl AssistantAgent {
+    pub(crate) fn member_use(&self, eligibility_revision: i64) -> super::org_membership::MemberUse {
+        super::org_membership::MemberUse {
+            org_use_revision: self.org_use_revision,
+            eligibility_revision,
+        }
+    }
+
     pub fn is_nyxbot(&self) -> bool {
         self.kind == AgentKind::Nyxbot
     }

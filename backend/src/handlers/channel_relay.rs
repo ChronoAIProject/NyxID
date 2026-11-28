@@ -2852,6 +2852,7 @@ pub async fn resolve_sender(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::handlers::credential_record_fixtures::BotSecret;
     use futures::TryStreamExt;
     use jsonwebtoken::{Algorithm, Header, encode};
     use mongodb::bson::doc;
@@ -4622,16 +4623,6 @@ mod tests {
         let state = test_app_state(db.clone());
         let now = Utc::now();
         let user_id = Uuid::new_v4().to_string();
-        let bot_token_encrypted = state
-            .encryption_keys
-            .encrypt(if matches!(platform, "lark" | "feishu") {
-                b"app:secret"
-            } else {
-                b"bot-token"
-            })
-            .await
-            .expect("encrypt test bot token");
-
         let api_key = ApiKey {
             permission_policy_id: None,
             id: Uuid::new_v4().to_string(),
@@ -4666,7 +4657,7 @@ mod tests {
             scheduled_write_enabled: false,
         };
 
-        let bot = ChannelBot {
+        let mut bot = ChannelBot {
             guest_access_v1: false,
             guest_access_v1_revision: 0,
             meta_binding: None,
@@ -4693,7 +4684,7 @@ mod tests {
             registration_pin_encrypted: None,
             webhook_secret_encrypted: None,
             managed_setup: None,
-            bot_token_encrypted,
+            bot_token_encrypted: vec![],
             platform_bot_id: "bot_123".to_string(),
             platform_bot_username: "test_bot".to_string(),
             webhook_registered: true,
@@ -4708,6 +4699,15 @@ mod tests {
             created_at: now,
             updated_at: now,
         };
+
+        let token: &[u8] = if matches!(platform, "lark" | "feishu") {
+            b"app:secret"
+        } else {
+            b"bot-token"
+        };
+        BotSecret::Token
+            .set(&state.encryption_keys, &mut bot, token)
+            .await;
 
         let conversation = ChannelConversation {
             activity_callback: None,

@@ -778,7 +778,7 @@ pub(crate) async fn require_assignment_in_session(
 
 pub(crate) const REPLY_HANDLE_PREFIX: &str = "guest-interaction.v3:";
 
-fn reply_handle_fields(source: &ChannelMessage) -> AppResult<[&str; 7]> {
+pub(in crate::services) fn reply_handle_fields(source: &ChannelMessage) -> AppResult<[&str; 7]> {
     let turn = source.guest_relay.as_ref().ok_or_else(refused)?;
     let bot = source.channel_bot_id.as_deref().ok_or_else(refused)?;
     let event = source.platform_message_id.as_deref().ok_or_else(refused)?;
@@ -832,7 +832,7 @@ async fn seal_reply_handle(
     ))
 }
 
-fn decode_reply_handle(source: &ChannelMessage) -> AppResult<Vec<u8>> {
+pub(in crate::services) fn decode_reply_handle(source: &ChannelMessage) -> AppResult<Vec<u8>> {
     let encoded = source
         .thread_id
         .as_deref()

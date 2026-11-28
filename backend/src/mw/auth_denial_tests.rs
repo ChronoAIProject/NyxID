@@ -14,6 +14,46 @@ async fn json_body(response: axum::response::Response) -> Value {
 }
 
 #[tokio::test]
+async fn channel_history_rejects_verified_relay_credentials() {
+    let db = crate::test_utils::connect_test_database("channel_history_relay")
+        .await
+        .unwrap();
+    let state = crate::test_utils::test_app_state(db);
+    let token = jwt::generate_relay_access_token(
+        &state.jwt_keys,
+        &state.config,
+        &Uuid::new_v4(),
+        "proxy",
+        None,
+        &jwt::RelayAgentScope {
+            api_key_id: Uuid::new_v4().to_string(),
+            api_key_name: "agent".into(),
+            allowed_service_ids: vec![],
+            allowed_node_ids: vec![],
+            allow_all_services: false,
+            allow_all_nodes: false,
+        },
+    )
+    .unwrap();
+    let (_, private) = crate::routes::build_router();
+    let response = private
+        .with_state(state)
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/channel-relay/messages/conversation")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let body = json_body(response).await;
+    assert_eq!(body["details"]["reason"], "credential_type_unsupported");
+    assert_eq!(body["details"]["credential_type"], "relay");
+}
+
+#[tokio::test]
 async fn denial_guidance_preserves_all_early_layer_messages_and_admission() {
     let app = Router::new()
         .fallback(|| async { StatusCode::NO_CONTENT })

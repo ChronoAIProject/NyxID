@@ -64,6 +64,21 @@ pub struct OpenClawChannelMapping {
 
 pub const MAPPINGS_COLLECTION: &str = "openclaw_channel_mappings";
 
+pub(crate) async fn ensure_mapping_index(db: &mongodb::Database) -> mongodb::error::Result<()> {
+    // MongoDB 8 enforces uniqueness on new entries while allowing historical
+    // duplicate tuples to keep their existing IDs and webhook secrets.
+    db.run_command(doc! {
+        "createIndexes": MAPPINGS_COLLECTION,
+        "indexes": [{
+            "name": "openclaw_channel_sender_claim",
+            "key": { "channel": 1, "channel_user_id": 1 },
+            "prepareUnique": true,
+        }],
+    })
+    .await?;
+    Ok(())
+}
+
 /// Generate a random 32-byte webhook secret, returned as a hex string.
 pub fn generate_webhook_secret() -> String {
     let mut bytes = [0u8; 32];
@@ -152,35 +167,25 @@ pub async fn upsert_mapping(
     let secret = generate_webhook_secret();
     let secret_hash = hash_secret(&secret);
 
-    let existing = col
-        .find_one(doc! {
-            "channel": channel,
-            "channel_user_id": channel_user_id,
-        })
-        .await?;
-
-    if let Some(existing) = existing {
-        col.update_one(
-            doc! { "_id": &existing.id },
-            doc! { "$set": {
-                "nyxid_user_id": nyxid_user_id,
+    col.update_one(
+        doc! { "channel": channel, "channel_user_id": channel_user_id, "nyxid_user_id": nyxid_user_id },
+        doc! {
+            "$set": {
                 "webhook_secret_hash": &secret_hash,
                 "updated_at": bson::DateTime::from_chrono(now),
-            }},
-        )
-        .await?;
-    } else {
-        let mapping = OpenClawChannelMapping {
-            id: uuid::Uuid::new_v4().to_string(),
-            channel: channel.to_string(),
-            channel_user_id: channel_user_id.to_string(),
-            nyxid_user_id: nyxid_user_id.to_string(),
-            webhook_secret_hash: secret_hash,
-            created_at: now,
-            updated_at: now,
-        };
-        col.insert_one(&mapping).await?;
-    }
+            },
+            "$setOnInsert": {
+                "_id": uuid::Uuid::new_v4().to_string(),
+                "created_at": bson::DateTime::from_chrono(now),
+            },
+        },
+    ).upsert(true).await.map_err(|error| {
+        if crate::services::service_pool_service::is_duplicate_key(&error) {
+            AppError::Conflict("Channel user mapping is already assigned".into())
+        } else {
+            AppError::from(error)
+        }
+    })?;
 
     Ok(secret)
 }
@@ -240,6 +245,60 @@ impl std::fmt::Debug for OpenClawChannelMapping {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn mapping_claim_preserves_owner_and_rotates_legacy_secret() {
+        let db = crate::test_utils::connect_test_database("openclaw_owner")
+            .await
+            .unwrap();
+        let col = db.collection::<bson::Document>(MAPPINGS_COLLECTION);
+        let now = bson::DateTime::now();
+        let id = uuid::Uuid::new_v4().to_string();
+        col.insert_one(doc! { "_id": &id, "channel": "chat", "channel_user_id": "sender",
+            "nyxid_user_id": "owner", "webhook_secret_hash": hash_secret("initial"), "created_at": now,
+            "updated_at": now }).await.unwrap();
+        ensure_mapping_index(&db).await.unwrap();
+        let original = col.find_one(doc! { "_id": &id }).await.unwrap().unwrap();
+        assert!(matches!(
+            upsert_mapping(&db, "chat", "sender", "second").await,
+            Err(AppError::Conflict(_))
+        ));
+        assert_eq!(
+            col.find_one(doc! { "_id": &id }).await.unwrap().unwrap(),
+            original
+        );
+        let rotated = upsert_mapping(&db, "chat", "sender", "owner")
+            .await
+            .unwrap();
+        let row = col.find_one(doc! { "_id": id }).await.unwrap().unwrap();
+        assert_eq!(row.get_str("nyxid_user_id").unwrap(), "owner");
+        assert_eq!(
+            row.get_str("webhook_secret_hash").unwrap(),
+            hash_secret(&rotated)
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_mapping_claims_select_one_owner() {
+        let db = crate::test_utils::connect_test_database("openclaw_claim")
+            .await
+            .unwrap();
+        ensure_mapping_index(&db).await.unwrap();
+        let (a, b) = tokio::join!(
+            upsert_mapping(&db, "chat", "sender", "first"),
+            upsert_mapping(&db, "chat", "sender", "second"),
+        );
+        let (owner, secret) = match (a, b) {
+            (Ok(secret), Err(AppError::Conflict(_))) => ("first", secret),
+            (Err(AppError::Conflict(_)), Ok(secret)) => ("second", secret),
+            _ => panic!("expected one successful claim and one conflict"),
+        };
+        let col = db.collection::<OpenClawChannelMapping>(MAPPINGS_COLLECTION);
+        assert_eq!(col.count_documents(doc! {}).await.unwrap(), 1);
+        let row = col.find_one(doc! {}).await.unwrap().unwrap();
+        assert_eq!(row.nyxid_user_id, owner);
+        assert_eq!(row.webhook_secret_hash, hash_secret(&secret));
+    }
 
     #[test]
     fn verify_valid_signature() {

@@ -1,4 +1,6 @@
 use super::*;
+use crate::services::catalog_credential_record_service as catalog_record;
+use crate::services::credential_record_service as key_record;
 use crate::{
     models::{
         downstream_service::{PlatformKeyAudience, PlatformKeyConfig, ServiceInference},
@@ -34,6 +36,7 @@ async fn optional_provider_header_reaches_utility_inference_after_listing() {
     service.auth_key_name.clear();
     service.platform_key = None;
     service.credential_encrypted.clear();
+    service.secret_context_versions.clear();
     state
         .db
         .collection::<DownstreamService>(COLLECTION_NAME)
@@ -139,6 +142,19 @@ async fn optional_provider_header_reaches_utility_inference_after_listing() {
     state.db.drop().await.unwrap();
 }
 
+pub(crate) async fn set_platform_credential(state: &AppState, service: &mut DownstreamService) {
+    service.credential_encrypted = catalog_record::encrypt(
+        &state.encryption_keys,
+        &service.id,
+        catalog_record::owner(service).unwrap(),
+        PLATFORM.as_bytes(),
+    )
+    .await
+    .unwrap();
+    service.secret_context_versions =
+        catalog_record::initial_versions(&state.encryption_keys, true);
+}
+
 pub(crate) async fn fixture(
     protocol: InferenceWireProtocol,
 ) -> (AppState, DownstreamService, MockServer) {
@@ -157,11 +173,7 @@ pub(crate) async fn fixture(
     service.auth_method = "bearer".into();
     service.auth_key_name = "Authorization".into();
     service.requires_user_credential = false;
-    service.credential_encrypted = state
-        .encryption_keys
-        .encrypt(PLATFORM.as_bytes())
-        .await
-        .unwrap();
+    set_platform_credential(&state, &mut service).await;
     service.platform_key = Some(PlatformKeyConfig {
         purpose: Default::default(),
         enabled: true,
@@ -242,9 +254,25 @@ async fn completion(
 
 async fn binding(state: &AppState, service: &DownstreamService, owner: &str, binding: &str) {
     let now = bson::DateTime::now();
-    let key = state.encryption_keys.encrypt(OWN.as_bytes()).await.unwrap();
+    let key = key_record::encrypt(
+        &state.encryption_keys,
+        crate::models::user_api_key::COLLECTION_NAME,
+        "oneshot-key",
+        owner,
+        "credential_encrypted",
+        OWN.as_bytes(),
+    )
+    .await
+    .unwrap();
+    let mut versions = Default::default();
+    key_record::mark_version(
+        &mut versions,
+        &state.encryption_keys,
+        "credential_encrypted",
+    );
     state.db.collection::<Document>("user_api_keys").insert_one(doc! {
-        "_id":"oneshot-key","user_id":owner,"label":"Inference", "credential_type":"bearer",
+        "_id":"oneshot-key","user_id":owner,
+        "secret_context_versions": bson::to_bson(&versions).unwrap(),"label":"Inference", "credential_type":"bearer",
         "credential_encrypted":bson::Binary{ subtype:bson::spec::BinarySubtype::Generic, bytes:key },
         "status":"active","created_at":now,"updated_at":now,
     }).await.unwrap();
@@ -705,12 +733,16 @@ async fn assistant_oneshot_model_cache_skips_discovery_but_resolves_credentials_
             .is_some()
     );
     let rotated = "rotated-platform-credential";
-    let encrypted = state
-        .encryption_keys
-        .encrypt(rotated.as_bytes())
-        .await
-        .unwrap();
+    let encrypted = catalog_record::encrypt(
+        &state.encryption_keys,
+        &service.id,
+        catalog_record::owner(&service).unwrap(),
+        rotated.as_bytes(),
+    )
+    .await
+    .unwrap();
     state.db.collection::<Document>(COLLECTION_NAME).update_one(doc! {"_id":&service.id}, doc! {"$set":{
+        "secret_context_versions": catalog_record::version_update(&state.encryption_keys, true).unwrap(),
         "credential_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic, bytes:encrypted},
     }}).await.unwrap();
     assert!(
@@ -944,6 +976,7 @@ async fn other_service(state: &AppState, original: &DownstreamService) -> MockSe
     let mock = MockServer::start().await;
     let mut service = original.clone();
     service.id = uuid::Uuid::new_v4().to_string();
+    set_platform_credential(state, &mut service).await;
     service.slug = "zz-personal-fallback".into();
     service.base_url = mock.uri();
     state

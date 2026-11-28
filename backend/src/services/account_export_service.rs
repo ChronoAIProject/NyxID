@@ -1455,6 +1455,25 @@ async fn resolve_ids(
     Ok((ids, false))
 }
 
+async fn joined_parent_ids(
+    db: &mongodb::Database,
+    parent: &str,
+    owner: Document,
+) -> AppResult<(Vec<Bson>, bool)> {
+    let (mut ids, truncated) = resolve_ids(db, parent, owner).await?;
+    if parent == crate::models::mcp_session::MCP_SESSION_COLLECTION {
+        // A legacy parent can migrate between scope resolution and the child query.
+        let successors: Vec<_> = ids
+            .iter()
+            .filter_map(Bson::as_str)
+            .filter(|id| uuid::Uuid::try_parse(id).is_ok())
+            .map(|id| Bson::String(super::mcp_session_storage::hash(id)))
+            .collect();
+        ids.extend(successors);
+    }
+    Ok((ids, truncated))
+}
+
 /// Resolve private scope once per export, rather than joining each message.
 async fn message_scope(db: &mongodb::Database, person: &str) -> AppResult<(Document, bool)> {
     let mut private = private_conversation_filter("");
@@ -1936,7 +1955,7 @@ async fn build_until(
                 let resolved = if tokio::time::Instant::now() < deadline {
                     tokio::time::timeout_at(
                         deadline,
-                        resolve_ids(db, parent, doc! {*owner_field: account_id}),
+                        joined_parent_ids(db, parent, doc! {*owner_field: account_id}),
                     )
                     .await
                     .ok()

@@ -13,7 +13,7 @@ pub struct Member {
     pub group_id: String,
     pub agent_id: String,
     pub upper_seq: i64,
-    pub org_revision: Option<i64>,
+    pub org_revision: Option<crate::models::org_membership::MemberUse>,
     pub durable: bool,
 }
 
@@ -48,7 +48,7 @@ pub async fn admit(
     };
     if member
         .org_revision
-        .is_some_and(|revision| revision != row.org_use_revision)
+        .is_some_and(|revision| revision != row.member_use)
     {
         return Err(AppError::Forbidden("Specialist use access changed".into()));
     }

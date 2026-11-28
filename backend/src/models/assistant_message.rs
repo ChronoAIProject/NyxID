@@ -171,6 +171,11 @@ pub struct Steering {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct TurnMetadata {
+    #[serde(
+        default,
+        skip_serializing_if = "super::org_membership::is_initial_revision"
+    )]
+    pub eligibility_revision: i64,
     /// One entry per represented channel source, keyed by its accepted event ID.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub channel_text_completeness:

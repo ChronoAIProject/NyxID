@@ -8384,6 +8384,9 @@ Service account tokens do **not** include `sid`, `roles`, `groups`, `permissions
 
 ## Security Rollout Readiness
 
+For the admin endpoints that start and advance an encrypted-record census and
+read its dated report, see [Running a dated census](security/KEY_LIFECYCLE.md#running-a-dated-census).
+
 ```
 GET /api/v1/admin/security-readiness
 Authorization: Bearer <admin_or_operator_access_token>
@@ -9326,6 +9329,27 @@ access and returns `configured`, fleet `readiness`, `rollback_safe` and
 `drain_blockers`. It reads bounded, indexed metadata only; it neither changes
 rollout state nor returns instructions, transcripts, result bodies or credentials.
 
+#### Webhook delivery signing
+
+Webhook targets receive the event ID in both the JSON envelope and
+`X-NyxID-Delivery-Id`. Retries and redeliveries retain this ID.
+`X-NyxID-Signature-V2` has the form `sha256=<lowercase hex>`. Compute
+HMAC-SHA256 with the delivery signing secret over the following byte sequence:
+
+```text
+"nyxid-trigger-v2" || NUL || timestamp || NUL || delivery_id || NUL || raw_body
+```
+
+Each NUL is one zero byte. Use the ASCII bytes of `X-NyxID-Timestamp` and
+`X-NyxID-Delivery-Id` and the exact request body. Select the secret by
+`X-NyxID-Key-Id`, check timestamp freshness and compare signatures in constant
+time before deduplicating by the header ID.
+
+The existing `X-NyxID-Signature` still authenticates `timestamp + "." + raw_body`.
+During a rolling deployment, a receiver accepting that signature can use the
+verified envelope's `event_id` for deduplication. Once all sending replicas
+support v2, receivers using the header ID can require v2 on every delivery.
+
 #### Public ingress
 
 ```http
@@ -10256,12 +10280,29 @@ associated sandbox cannot be released: create Agents in its workspace or ask its
 owner to retire it. Stale fences return HTTP 409/code 1004; erasure fences refuse
 without a change. No new error code or existing refusal change is introduced.
 
+### POST `/api/v1/admin/cma-sandbox-reservations/{id}/release-empty-inventory`
+
+```json
+{"generation":1,"revision":2,"creation_revision":3,"reason":"Support case 2995"}
+```
+
+Releases an eligible held slot after a complete owner inventory check. Supply
+the three integers from inspection and a nonblank audit reason up to 512 UTF-8
+bytes. The reason is retained in the audit chain, so use a case reference or
+operational explanation free of credentials. Success returns `{"reservation": {...}}`.
+HTTP 409 keeps the slot held on stale fences, an ineligible creation, or an
+unexpired or unknown replay window. `cma_inventory_incomplete` covers failed,
+malformed or incomplete reads. `cma_inventory_unlinked_sandbox` identifies an
+unlinked live sandbox. A subsequent inspection of the released generation reports
+`unknown` with reason `released_after_inventory_check`.
+See [Admin inspection of held account slots](chat/12-cma-sessions.md#admin-inspection-of-held-account-slots).
+
 Inspection appends metadata-only `admin_cma_sandbox_reservation_inspected` under
 the admin actor and makes no owner state change. Resolution appends
 `admin_cma_sandbox_reservation_resolved` in the same transaction as the local
 change. Exact CMA GETs use the owner identity only for resource authorization;
 this direct management boundary does not create owner `service_request`/usage
-rows, charge billing or consume the owner's proxy rate limits. Refused resolutions also emit a best-effort metadata audit.
+rows, charge billing or consume the owner's proxy rate limits. Refused `/resolve` attempts also emit a best-effort metadata audit.
 Occupied-slot admission keeps its existing HTTP 409/code 1004/message bytes and
 emits `cma_sandbox_slot_occupied` at most once per owner/reservation per hour across
 upgraded replicas. A bounded process-local suppression cache precedes a separate

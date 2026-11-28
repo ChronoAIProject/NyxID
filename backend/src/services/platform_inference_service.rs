@@ -1226,6 +1226,8 @@ pub(crate) async fn funded_test_fixture() -> super::platform_onboarding_test_sup
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
+    use crate::services::catalog_credential_record_service as catalog_record;
+    use crate::services::credential_record_service as key_record;
 
     #[tokio::test]
     async fn startup_preserves_legacy_dedupe_and_multiple_runtime_turns() {
@@ -1489,12 +1491,16 @@ mod tests {
         service.name = "Funded public test model".into();
         service.base_url = f.server.uri();
         service.auth_method = "bearer".into();
-        service.credential_encrypted = f
-            .state
-            .encryption_keys
-            .encrypt(b"fake-catalog-credential")
-            .await
-            .unwrap();
+        service.credential_encrypted = catalog_record::encrypt(
+            &f.state.encryption_keys,
+            &service.id,
+            catalog_record::owner(&service).unwrap(),
+            b"fake-catalog-credential",
+        )
+        .await
+        .unwrap();
+        service.secret_context_versions =
+            catalog_record::initial_versions(&f.state.encryption_keys, true);
         service.platform_key = Some(PlatformKeyConfig {
             purpose: Default::default(),
             enabled: true,
@@ -1674,8 +1680,27 @@ mod tests {
                     .await
                     .unwrap();
                 let update = if models {
-                    doc! {"$set": {"credential_encrypted": bson::Binary {subtype: bson::spec::BinarySubtype::Generic,
-                    bytes: f.state.encryption_keys.encrypt(b"replacement-catalog-credential").await.unwrap()}}}
+                    let service = f
+                        .state
+                        .db
+                        .collection::<DownstreamService>(
+                            crate::models::downstream_service::COLLECTION_NAME,
+                        )
+                        .find_one(doc! {"_id": &f.profile.guide.as_ref().unwrap().model_service_id})
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    let encrypted = catalog_record::encrypt(
+                        &f.state.encryption_keys,
+                        &service.id,
+                        catalog_record::owner(&service).unwrap(),
+                        b"replacement-catalog-credential",
+                    )
+                    .await
+                    .unwrap();
+                    doc! {"$set": {"secret_context_versions": catalog_record::version_update(&f.state.encryption_keys, true).unwrap(),
+                    "credential_encrypted": bson::Binary {subtype: bson::spec::BinarySubtype::Generic,
+                    bytes: encrypted}}}
                 } else {
                     doc! {"$set": {"base_url": format!("{}/changed", f.server.uri())}}
                 };
@@ -2243,9 +2268,26 @@ mod tests {
             .insert_one(private)
             .await
             .unwrap();
+        let encrypted = key_record::encrypt(
+            &f.state.encryption_keys,
+            crate::models::user_api_key::COLLECTION_NAME,
+            &key_id,
+            &f.operator,
+            "credential_encrypted",
+            b"fake-operator-private-key-never-use",
+        )
+        .await
+        .unwrap();
+        let mut versions = Default::default();
+        key_record::mark_version(
+            &mut versions,
+            &f.state.encryption_keys,
+            "credential_encrypted",
+        );
         f.state.db.collection::<Document>(crate::models::user_api_key::COLLECTION_NAME).insert_one(doc! {
+            "secret_context_versions": bson::to_bson(&versions).unwrap(),
             "_id": key_id, "user_id": &f.operator, "label": "OPERATOR PRIVATE CREDENTIAL", "credential_type": "bearer", "status": "active",
-            "credential_encrypted": bson::Binary {subtype: bson::spec::BinarySubtype::Generic, bytes: f.state.encryption_keys.encrypt(b"fake-operator-private-key-never-use").await.unwrap()},
+            "credential_encrypted": bson::Binary {subtype: bson::spec::BinarySubtype::Generic, bytes: encrypted},
             "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now()}).await.unwrap();
         Mock::given(method("POST")).and(path("/chat/completions"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"model": "test-model", "choices": [{"message": {"content":

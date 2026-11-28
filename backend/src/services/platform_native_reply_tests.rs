@@ -5,6 +5,7 @@ use crate::models::{
     platform_manager_ingress::{IngressAudience, IngressPhase, PlatformManagerIngress},
 };
 use crate::services::platform_entry_native::tests as native;
+use crate::services::platform_entry_native::tests::credentials::BotSecret;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
     matchers::{header, method, path},
@@ -173,9 +174,17 @@ pub(crate) async fn discord_fixture(base: &str) -> (AppState, ChannelBot, Native
     discord_fixture_with_keys(base, crate::test_utils::test_encryption_keys()).await
 }
 
-async fn discord_fixture_with_keys(
+pub(crate) async fn discord_fixture_with_keys(
     base: &str,
     keys: crate::crypto::aes::EncryptionKeys,
+) -> (AppState, ChannelBot, NativeEntryReceipt) {
+    discord_fixture_with_token_writer(base, keys, None).await
+}
+
+async fn discord_fixture_with_token_writer(
+    base: &str,
+    keys: crate::crypto::aes::EncryptionKeys,
+    token_writer: Option<&crate::crypto::aes::EncryptionKeys>,
 ) -> (AppState, ChannelBot, NativeEntryReceipt) {
     let db = crate::test_utils::connect_transaction_test_database("native_discord_reply").await;
     let mut state = crate::test_utils::test_app_state(db.clone());
@@ -189,11 +198,13 @@ async fn discord_fixture_with_keys(
     bot.platform_bot_id = "200".into();
     bot.app_id = Some("100".into());
     bot.public_key = Some(hex::encode(signing.verifying_key().as_bytes()));
-    bot.bot_token_encrypted = state
-        .encryption_keys
-        .encrypt(b"synthetic-discord-bot-token")
-        .await
-        .unwrap();
+    BotSecret::Token
+        .set(
+            token_writer.unwrap_or(&state.encryption_keys),
+            &mut bot,
+            "synthetic-discord-bot-token",
+        )
+        .await;
     db.collection(crate::models::user::COLLECTION_NAME)
         .insert_one(crate::test_utils::test_user(
             &bot.user_id,
@@ -304,7 +315,14 @@ fn signed_discord_receipt_claim_uses_only_its_encrypted_interaction_followup() {
         "signed_discord_receipt_claim_uses_only_its_encrypted_interaction_followup",
         || async {
             let server = MockServer::start().await;
-            let (state, _, receipt) = discord_fixture(&server.uri()).await;
+            let mut compatible = crate::test_utils::test_encryption_keys();
+            compatible.set_contextual_record_writes(false);
+            let (state, _, receipt) = discord_fixture_with_token_writer(
+                &server.uri(),
+                crate::test_utils::test_encryption_keys(),
+                Some(&compatible),
+            )
+            .await;
             Mock::given(method("POST"))
                 .and(path("/webhooks/100/synthetic-interaction-token"))
                 .respond_with(
@@ -474,21 +492,43 @@ fn captured_connection_token_never_adopts_same_id_successor_and_refresh_keeps_ep
                 )
                 .await;
                 let authority = claim(&state, &receipt, &adapter).await.unwrap();
-                let successor = state
-                    .encryption_keys
-                    .encrypt(b"synthetic-successor-token")
-                    .await
-                    .unwrap();
+                let successor = native::credentials::connection_token(
+                    &state.encryption_keys,
+                    bot.connection_id.as_deref().unwrap(),
+                    &bot.user_id,
+                    "access_token_encrypted",
+                    b"synthetic-successor-token",
+                )
+                .await;
                 let rows = state
                     .db
                     .collection::<crate::models::user_api_key::UserApiKey>(
                         crate::models::user_api_key::COLLECTION_NAME,
                     );
                 let epoch = if replacement { 2_i64 } else { 1_i64 };
-                rows.update_one(doc! {"_id":bot.connection_id.as_ref().unwrap()},vec![doc! {"$set":{
-            "credential_epoch":if replacement {bson::Bson::Document(doc! {"$add":[{"$ifNull":["$credential_epoch",1_i64]},1_i64]})}else{bson::Bson::Int64(1)},
-            "access_token_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:successor},"updated_at":bson::DateTime::now(),
-        }}]).await.unwrap();
+                let next_epoch = if replacement {
+                    bson::Bson::Document(
+                        doc! {"$add": [{"$ifNull": ["$credential_epoch", 1_i64]}, 1_i64]},
+                    )
+                } else {
+                    bson::Bson::Int64(1)
+                };
+                let version = if state.encryption_keys.contextual_record_writes() {
+                    bson::Bson::Int32(3)
+                } else {
+                    bson::Bson::from("$$REMOVE")
+                };
+                rows.update_one(
+                    doc! {"_id": bot.connection_id.as_ref().unwrap()},
+                    vec![doc! {"$set": {
+                        "credential_epoch": next_epoch,
+                        "access_token_encrypted": successor,
+                        "secret_context_versions.access_token_encrypted": version,
+                        "updated_at": bson::DateTime::now(),
+                    }}],
+                )
+                .await
+                .unwrap();
                 assert_eq!(
                     rows.find_one(doc! {"_id":bot.connection_id.as_ref().unwrap()})
                         .await
@@ -566,18 +606,20 @@ fn token_expired_after_ingress_refreshes_before_final_claim_and_epoch_change_ref
                     )
                     .await
                     .unwrap();
-                let refresh = state
-                    .encryption_keys
-                    .encrypt(b"synthetic-refresh-token")
-                    .await
-                    .unwrap();
                 let rows = state
                     .db
                     .collection::<bson::Document>(crate::models::user_api_key::COLLECTION_NAME);
-                rows.update_one(doc! {"_id":bot.connection_id.as_ref().unwrap()},doc! {"$set":{
-            "expires_at":bson::DateTime::from_chrono(Utc::now()-Duration::minutes(1)),
-            "refresh_token_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:refresh},
-        }}).await.unwrap();
+                let update = native::credentials::refresh_update(
+                    &state.encryption_keys,
+                    &bot,
+                    doc! {
+                        "expires_at":bson::DateTime::from_chrono(Utc::now()-Duration::minutes(1)),
+                    },
+                )
+                .await;
+                rows.update_one(doc! {"_id":bot.connection_id.as_ref().unwrap()}, update)
+                    .await
+                    .unwrap();
                 if replace {
                     rows.update_one(doc! {"_id":bot.connection_id.as_ref().unwrap()},vec![doc! {"$set":{"credential_epoch":{"$add":[{"$ifNull":["$credential_epoch",1_i64]},1_i64]}}}]).await.unwrap();
                 }

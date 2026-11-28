@@ -6,6 +6,14 @@ const FIELD: &str = "request_ciphertext";
 const VERSION: &str = "request_context_version";
 const WIRE: &[u8] = br#"{ "name":"one", "name":"two\u0021" }"#;
 
+// Unmarked v2 fixtures from the server tests at 846b09d4d.
+const LEGACY_REQUEST: &str = concat!(
+    "0202003c91a13b8af61931e860740dae6af04bda0b031c78a79267cff72a495e0e9ddb2dcaec624d",
+    "0b0d4cd35bd62d9a1039134a447583f3652946e755510a394b850d2c2d295666b54506d18542b893",
+    "df4383857ef61bc4baa554d506163615a6980f0e1282588d08353dde3e413de9f0491f43ed24da3d",
+    "319505b0bf1a1819",
+);
+
 #[tokio::test]
 async fn cma_requests_authenticate_both_contexts_and_preserve_exact_source_winners() {
     let db = crate::test_utils::connect_transaction_test_database("cma_request_records").await;
@@ -20,7 +28,7 @@ async fn cma_requests_authenticate_both_contexts_and_preserve_exact_source_winne
     {
         let rows = db.collection::<Document>(entry.collection);
         let id = doc! {"_id": "one"};
-        let bytes = old.encrypt(WIRE).await.unwrap();
+        let bytes = hex::decode(LEGACY_REQUEST).unwrap();
         let original = doc! {
             "_id": "one",
             "user_id": "owner",
@@ -145,7 +153,7 @@ async fn cma_generation_resumes_after_rewrap_and_terminal_cleanup() {
             "user_id": "owner",
             "submission_state": "unknown",
             "request_hash": prepare_creation_request(WIRE).unwrap().hash,
-            FIELD: bson::to_bson(&keys.encrypt(WIRE).await.unwrap()).unwrap(),
+            FIELD: bson::to_bson(&hex::decode(LEGACY_REQUEST).unwrap()).unwrap(),
         };
         let cleared = doc! {
             "_id": "cleared",

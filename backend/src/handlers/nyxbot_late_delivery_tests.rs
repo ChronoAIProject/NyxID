@@ -13,6 +13,7 @@ mod image_delivery_tests;
 mod source_queue_tests;
 
 struct Fixture {
+    thread_id: String,
     calls: Calls,
     state: AppState,
     channel: NyxbotChannel,
@@ -21,6 +22,15 @@ struct Fixture {
     gateway: MockServer,
     upstream: tokio::task::JoinHandle<()>,
 }
+impl Fixture {
+    async fn seal_reference(
+        &self,
+        keys: &crate::crypto::aes::EncryptionKeys,
+        bytes: &[u8],
+    ) -> Vec<u8> {
+        seal_thread_reference(keys, &self.thread_id, OWNER, &self.channel.id, bytes).await
+    }
+}
 impl Drop for Fixture {
     fn drop(&mut self) {
         self.upstream.abort();
@@ -28,7 +38,14 @@ impl Drop for Fixture {
 }
 
 async fn fixture(name: &str) -> Fixture {
-    let (state, calls, upstream) = setup(name).await;
+    Box::pin(fixture_with_record_writes(name, true)).await
+}
+
+async fn fixture_with_record_writes(name: &str, contextual: bool) -> Fixture {
+    let (mut state, calls, upstream) = setup(name).await;
+    let mut keys = crate::test_utils::test_encryption_keys();
+    keys.set_contextual_record_writes(contextual);
+    state.encryption_keys = Arc::new(keys);
     let (mut channel, key) = Box::pin(channel(&state, "gateway")).await;
     channel.owner_sender_ids = vec!["7".into()];
     state
@@ -80,8 +97,9 @@ async fn fixture(name: &str) -> Fixture {
     ))
     .await
     .unwrap();
+    let thread_id = Uuid::new_v4().to_string();
     state.db.collection::<bson::Document>(THREADS).insert_one(doc! {
-        "_id": Uuid::new_v4().to_string(), "channel_id": &channel.id, "user_id": OWNER,
+        "_id": &thread_id, "channel_id": &channel.id, "user_id": OWNER,
         "partition": PARTITION, "conversation_id": &conversation.id, "kind": "private", "owner_chat": true,
         "platform_chat_id": "chat-1", "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now(),
     }).await.unwrap();
@@ -89,13 +107,12 @@ async fn fixture(name: &str) -> Fixture {
     let mut event = admission(&channel.id, "original");
     event.conversation_id = Some(conversation.id.clone());
     event.turn_id = Some(Uuid::new_v4().to_string());
-    event.event_context_ciphertext = Some(
-        state
-            .encryption_keys
-            .encrypt(br#"{"event_ref":"cmaeg1.ev.original"}"#)
-            .await
-            .unwrap(),
-    );
+    set_event_context(
+        &state.encryption_keys,
+        &mut event,
+        br#"{"event_ref":"cmaeg1.ev.original"}"#,
+    )
+    .await;
     event.delivery = Some(ChannelTurnDelivery {
         restart_owner_verified: false,
         notice_language: None,
@@ -135,6 +152,7 @@ async fn fixture(name: &str) -> Fixture {
         .await
         .unwrap();
     Fixture {
+        thread_id,
         calls,
         state,
         channel,
@@ -499,18 +517,7 @@ async fn guest_access_and_reply_mode_are_live_at_late_delivery() {
 #[tokio::test]
 async fn original_reply_target_survives_event_expiry_and_newer_chat_activity() {
     let f = fixture("channel_late_original_target").await;
-    let source = contextual_event_field(
-        &f.state.encryption_keys,
-        &f.event,
-        "event_context_ciphertext",
-        f.event.event_context_ciphertext.as_deref().unwrap(),
-    )
-    .await;
-    patch(
-        &f,
-        doc! {"event_context_ciphertext":source,"event_context_version":3},
-    )
-    .await;
+    assert_eq!(f.event.event_context_version, Some(3));
     delivery::detach(&f.state.db, &f.event.id).await.unwrap();
     late_delivery::sweep(&f.state).await.unwrap(); // mint before settlement
     let event = f
@@ -973,14 +980,15 @@ async fn checking_notice_arrives_after_five_seconds_without_consuming_final_answ
         .unwrap();
     patch(&f, doc! {"turn_id": &f.event.turn_id}).await;
     let reference = f
-        .state
-        .encryption_keys
-        .encrypt(b"cmaeg1.ev.original")
-        .await
-        .unwrap();
+        .seal_reference(&f.state.encryption_keys, b"cmaeg1.ev.original")
+        .await;
     f.state.db.collection::<bson::Document>(THREADS).update_one(
-        doc! {"channel_id": &f.channel.id, "partition": PARTITION},
-        doc! {"$set": {"event_ref_ciphertext": bson::Binary {subtype: bson::spec::BinarySubtype::Generic, bytes: reference}, "event_ref_expires_at": bson::DateTime::from_chrono(Utc::now() + ChronoDuration::hours(1))}},
+        doc! {"_id": &f.thread_id},
+        doc! {"$set": {
+            "event_ref_ciphertext": bson::Binary {subtype: bson::spec::BinarySubtype::Generic, bytes: reference},
+            "event_ref_context_version": event_record::version(&f.state.encryption_keys).map(i32::from),
+            "event_ref_expires_at": bson::DateTime::from_chrono(Utc::now() + ChronoDuration::hours(1)),
+        }},
     ).await.unwrap();
     let egress = crate::handlers::assistant_nyxagent::http_egress(
         f.state.clone(),
@@ -1055,6 +1063,7 @@ async fn guest_1995_route_refusal_is_safe_chat_text_for_stream_and_late_delivery
             let f = fixture("guest_1995_channel_refusal").await;
             settled(&f, false).await;
             let metadata = crate::models::assistant_message::TurnMetadata {
+                eligibility_revision: 0,
                 continued_after_restart: false,
                 voice_link_publication: None,
                 links_in_chat: None,
@@ -1116,11 +1125,12 @@ async fn guest_1995_route_refusal_is_safe_chat_text_for_stream_and_late_delivery
 
 async fn typing_fixture(
     name: &str,
+    contextual: bool,
 ) -> (
     Fixture,
     crate::models::assistant_conversation::AssistantConversation,
 ) {
-    let mut f = fixture(name).await;
+    let mut f = Box::pin(fixture_with_record_writes(name, contextual)).await;
     let request: engine::TurnRequest =
         serde_json::from_value(json!({"text":"Check", "conversation_id":&f.event.conversation_id}))
             .unwrap();
@@ -1146,19 +1156,24 @@ async fn typing_fixture(
         )
         .await
         .unwrap();
-    let encrypted = f
-        .state
-        .encryption_keys
-        .encrypt(br#"{"event_ref":"cmaeg1.ev.original","capabilities":{"typing":true}}"#)
-        .await
-        .unwrap();
-    patch(&f, doc! {"turn_id":&f.event.turn_id,"event_context_ciphertext":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:encrypted}}).await;
+    set_event_context(
+        &f.state.encryption_keys,
+        &mut f.event,
+        br#"{"event_ref":"cmaeg1.ev.original","capabilities":{"typing":true}}"#,
+    )
+    .await;
+    patch(&f, doc! {
+        "turn_id": &f.event.turn_id,
+        "event_context_ciphertext": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: f.event.event_context_ciphertext.clone().unwrap() },
+        "event_context_version": f.event.event_context_version.map(i32::from),
+    }).await;
     (f, row)
 }
 
 #[tokio::test]
 async fn channel_typing_refreshes_without_messages_and_stops_with_turn() {
-    let (f, row) = typing_fixture("channel_typing_lifecycle").await;
+    // The unwrap budget uses the v2_current counter for both stored fields.
+    let (f, row) = typing_fixture("channel_typing_lifecycle", false).await;
     Mock::given(method("POST"))
         .and(path("/events/cmaeg1.ev.original/typing"))
         .and(wiremock::matchers::header(
@@ -1222,7 +1237,7 @@ async fn pending_recovery(
         .await
         .unwrap();
     let payload = recovery::Payload::new("recovery-race", "nyxbot-test", Default::default());
-    let stored = GatewayResponse {
+    let mut stored = GatewayResponse {
         id: Uuid::new_v4().to_string(),
         response_id: "recovery-race".into(),
         user_id: OWNER.into(),
@@ -1236,10 +1251,13 @@ async fn pending_recovery(
         answer_delivery: None,
         revision: 0,
         payload_context_version: None,
-        payload_ciphertext: payload.seal_legacy(&f.state.encryption_keys).await.unwrap(),
+        payload_ciphertext: Vec::new(),
         created_at: Utc::now(),
         expires_at: Utc::now() + ChronoDuration::hours(1),
     };
+    recovery::storage::install(&f.state.encryption_keys, &mut stored, &payload)
+        .await
+        .unwrap();
     f.state
         .db
         .collection::<GatewayResponse>(RESPONSES)
@@ -1358,7 +1376,7 @@ async fn relay_recovery_and_late_sender_share_one_irreversible_claim() {
 #[tokio::test]
 async fn channel_typing_stops_on_first_platform_error_or_live_refusal() {
     for cause in ["platform", "stop", "event", "channel"] {
-        let (f, row) = typing_fixture("typing_refusal").await;
+        let (f, row) = typing_fixture("typing_refusal", true).await;
         Mock::given(method("POST"))
             .and(path("/events/cmaeg1.ev.original/typing"))
             .respond_with(if cause == "platform" {
@@ -2009,13 +2027,23 @@ async fn event_record_context_target_and_guest_setup_bind_source_owner_channel_a
     event.event_context_version = Some(3);
     let mut delivery = event.delivery.clone().unwrap();
     delivery.target_context_version = Some(3);
-    let legacy = keys.encrypt(b"fixture bytes").await.unwrap();
     for path in [
         "event_context_ciphertext",
         "delivery.target_ciphertext",
         "guest_setup_payload",
     ] {
-        let sealed = contextual_event_field(keys, &event, path, &legacy).await;
+        let sealed = bson::Binary {
+            subtype: bson::spec::BinarySubtype::Generic,
+            bytes: record::seal(
+                keys,
+                &event.id,
+                &event.user_id,
+                &[path, &event.channel_id],
+                b"fixture bytes",
+            )
+            .await
+            .unwrap(),
+        };
         for (identity, value) in [
             ("_id", "swapped"),
             ("user_id", "swapped"),
@@ -2053,6 +2081,17 @@ async fn event_record_context_target_and_guest_setup_bind_source_owner_channel_a
             }
         }
     }
+    let mut compatible = crate::test_utils::test_encryption_keys();
+    compatible.set_contextual_record_writes(false);
+    let legacy = record::seal(
+        &compatible,
+        &event.id,
+        &event.user_id,
+        &[record::GUEST, &event.channel_id],
+        b"fixture bytes",
+    )
+    .await
+    .unwrap();
     let mut raw = bson::to_document(&event).unwrap();
     raw.insert(
         "guest_setup_payload",

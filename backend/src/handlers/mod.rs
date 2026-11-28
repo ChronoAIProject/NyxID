@@ -3,10 +3,12 @@ pub mod admin_anonymous_endpoints;
 pub mod admin_billing;
 #[cfg(test)]
 mod admin_billing_tests;
+pub(crate) mod admin_encrypted_census;
 pub mod admin_encrypted_records;
 pub mod admin_feature_flags;
 pub mod admin_groups;
 pub mod admin_helpers;
+pub(crate) mod admin_key_lifecycle;
 pub mod admin_machine_runtime_billing;
 pub mod admin_nodes;
 pub mod admin_ownership;

@@ -333,7 +333,7 @@ async fn decrypt_field(
     validate_plaintext(field, &plaintext)?;
     Ok(plaintext)
 }
-fn validate_plaintext(field: &str, value: &[u8]) -> AppResult<()> {
+pub(super) fn validate_plaintext(field: &str, value: &[u8]) -> AppResult<()> {
     let text = std::str::from_utf8(value)
         .map_err(|_| AppError::Internal("Saved login encoding unavailable".into()))?;
     let max = match field {
@@ -612,13 +612,12 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(legacy.secret_context_version, None);
-        // A compatible old reader receives the exact prior encrypted format.
         assert_eq!(
-            keys.decrypt(&legacy.username_encrypted)
+            materialize(&keys, &legacy, "username", 0)
                 .await
                 .unwrap()
-                .as_slice(),
-            b"legacy-username"
+                .as_str(),
+            "legacy-username"
         );
         assert!(
             migrate_secret_snapshot(&db, &keys, &bson::to_document(&legacy).unwrap())

@@ -1533,6 +1533,39 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             "/usage/workspace",
             get(handlers::admin_usage::get_workspace).put(handlers::admin_usage::save_workspace),
         )
+        .route(
+            "/encrypted-records/censuses",
+            post(handlers::admin_encrypted_census::start),
+        )
+        .route(
+            "/encrypted-records/censuses/{id}/advance",
+            post(handlers::admin_encrypted_census::advance),
+        )
+        .route(
+            "/encrypted-records/censuses/{id}",
+            get(handlers::admin_encrypted_census::status),
+        )
+        .route(
+            "/encrypted-records/censuses/{id}/families",
+            get(handlers::admin_encrypted_census::families),
+        )
+        .route(
+            "/encrypted-records/censuses/{id}/findings",
+            get(handlers::admin_encrypted_census::findings),
+        )
+        .route("/key-lifecycle", get(handlers::admin_key_lifecycle::status))
+        .route(
+            "/key-lifecycle/enroll",
+            post(handlers::admin_key_lifecycle::enroll),
+        )
+        .route(
+            "/key-lifecycle/dependencies",
+            get(handlers::admin_key_lifecycle::dependencies),
+        )
+        .route(
+            "/key-lifecycle/evidence",
+            get(handlers::admin_key_lifecycle::history).post(handlers::admin_key_lifecycle::append),
+        )
         .route("/audit-log/verify", get(handlers::admin::verify_audit_log))
         .route(
             "/encrypted-records",
@@ -1703,6 +1736,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route(
             "/cma-sandbox-reservations/{id}/resolve",
             post(handlers::admin_cma_sandbox_reservations::resolve),
+        )
+        .route(
+            "/cma-sandbox-reservations/{id}/release-empty-inventory",
+            post(handlers::admin_cma_sandbox_reservations::release_empty_inventory),
         )
         .route(
             "/channel-platforms/{platform}/delivery",

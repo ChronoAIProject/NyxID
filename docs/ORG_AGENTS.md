@@ -38,9 +38,22 @@ person cannot revive work admitted before the removal.
 
 Departure or demotion to Viewer prunes explicit selections transactionally.
 Rejoining or regaining Member status requires a fresh selection on a restricted
-list. Under inheritance, promotion restores role-based eligibility. After a
-Member → Viewer → Member transition, older work tied to the surviving membership
-may become usable again under inheritance.
+list. Under inheritance, promotion restores eligibility for new work. A demotion
+from Admin or Member to Viewer advances the person's membership eligibility
+revision in the same transaction as the role change. Removal, self-leave,
+account disable and personal erasure also advance it. Promotion and saving the
+same role preserve it. A rejoin retains the counter and receives a new join
+timestamp.
+
+Delayed work records the acting member's eligibility revision alongside the
+specialist's use or maintenance revision. Both must still match at execution.
+An allowed new turn obtains a fresh thread key after a change. Earlier keys,
+queued events, confirmations, group assignments and resumptions stay refused.
+A missing revision reads as zero on both memberships and work. This requires
+no backfill. During rollout an older replica can demote a member without
+advancing the counter, and older execution readers ignore the counter. Full
+enforcement starts once all writers and readers are upgraded. Rollback needs
+no data change.
 
 Genuine non-member guests use the specialist’s existing channel guest policy.
 A verified org member excluded from the user list is refused on the member

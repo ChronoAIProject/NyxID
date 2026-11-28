@@ -11,6 +11,11 @@ use crate::{
     errors::{AppError, AppResult},
 };
 
+#[allow(
+    dead_code,
+    reason = "The census runner consumes these snapshot-only adapters"
+)]
+pub(crate) mod observation;
 mod previous_labels;
 
 type FieldLabels = (&'static str, &'static [&'static str]);
@@ -1702,6 +1707,7 @@ mod tests {
     mod cma_requests;
     mod event_bindings;
     mod gateway_transport;
+    mod historical;
     mod learning_proposals;
     mod registry;
     mod swaps;
@@ -1852,10 +1858,9 @@ mod tests {
             else {
                 return;
             };
-            let standard = crate::test_utils::test_encryption_keys();
             let rows = db.collection::<Document>("provider_configs");
             rows.insert_one(doc! {"_id":"held-provider","client_id_encrypted":bson::Binary {
-                subtype:bson::spec::BinarySubtype::Generic,bytes:standard.encrypt(b"held-client").await.unwrap()
+                subtype:bson::spec::BinarySubtype::Generic,bytes:hex::decode(historical::HELD_CLIENT_ID).unwrap()
             }}).await.unwrap();
             let held = std::sync::Arc::new(HeldWrap {
                 inner: crate::crypto::local_key_provider::LocalKeyProvider::new([0x11; 32], None),
@@ -1921,7 +1926,7 @@ mod tests {
         };
         let keys = crate::test_utils::test_encryption_keys();
         let rows = db.collection::<Document>("provider_configs");
-        let legacy = keys.encrypt(b"fixture-client").await.unwrap();
+        let legacy = hex::decode(historical::FIXTURE_CLIENT_ID).unwrap();
         for index in 0..35 {
             rows.insert_one(doc!{"_id":format!("provider-{index:03}"),"client_id_encrypted":bson::Binary{
                 subtype:bson::spec::BinarySubtype::Generic,bytes:if index==0{vec![1,2,3]}else{legacy.clone()}

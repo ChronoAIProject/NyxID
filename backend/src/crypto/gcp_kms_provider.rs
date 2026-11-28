@@ -205,6 +205,21 @@ impl KeyProvider for GcpKmsProvider {
         Err(AppError::Internal("GCP KMS decrypt failed".to_string()))
     }
 
+    async fn unwrap_for_observation(
+        &self,
+        wrapped: &WrappedKey,
+    ) -> Result<super::key_provider::Unwrapped, AppError> {
+        use super::record_field::authenticated::Slot;
+        let dek = self.unwrap_dek(wrapped).await?;
+        let name = self.keys.key_name_for(wrapped.key_id)?;
+        let slot = if wrapped.key_id == self.keys.current_key_id {
+            Slot::Current
+        } else {
+            Slot::Previous
+        };
+        Ok(super::key_provider::Unwrapped::gcp(dek, slot, name))
+    }
+
     fn current_key_id(&self) -> u8 {
         self.keys.current_key_id()
     }

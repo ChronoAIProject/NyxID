@@ -101,6 +101,20 @@ pub(crate) async fn commit(session: &mut mongodb::ClientSession) -> AppResult<()
     retry_commit(session).await
 }
 
+pub(super) async fn replica_database_identity(db: &mongodb::Database) -> AppResult<bson::Document> {
+    let config = db
+        .client()
+        .database("admin")
+        .run_command(bson::doc! {"replSetGetConfig": 1})
+        .await?;
+    let id = config
+        .get_document("config")
+        .and_then(|c| c.get_document("settings"))
+        .and_then(|s| s.get_object_id("replicaSetId"))
+        .map_err(|_| AppError::Internal("Replica-set identity unavailable".into()))?;
+    Ok(bson::doc! {"database": db.name(), "replica_set_id": id})
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

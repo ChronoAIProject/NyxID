@@ -8,6 +8,13 @@ use crate::{
     services::{assistant_group_service as groups, channel_image_delivery as images},
 };
 
+// Unmarked group-only image from the pre-conversion cleanup fixture.
+const LEGACY_GROUP_IMAGE: &str = concat!(
+    "0202003c21b18ae2c728ba1745314de64fd48d4e0f0db51be3b6ecddc0fd29d23ac8b8cdfbc26902",
+    "3dc6cbbf6c24ab763dab393b0b309429458fe4a34136c323ce1e3a8eb40f85368951f279929037e1",
+    "299b0c90917faa53a176571375193e83",
+);
+
 /// A tool image bound to a group transcript (no conversation of its own).
 async fn group_image(state: &AppState, owner: &str, group_id: &str) -> String {
     let id = Uuid::new_v4().to_string();
@@ -20,7 +27,7 @@ async fn group_image(state: &AppState, owner: &str, group_id: &str) -> String {
             "content_type": "image/png", "size": 4_i64,
             "data_encrypted": bson::Binary {
                 subtype: bson::spec::BinarySubtype::Generic,
-                bytes: state.encryption_keys.encrypt(b"png!").await.unwrap(),
+                bytes: hex::decode(LEGACY_GROUP_IMAGE).unwrap(),
             },
             "created_at": bson::DateTime::now(),
         })

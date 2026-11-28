@@ -644,8 +644,8 @@ responses use `Cache-Control: no-store` and the request body is capped at
 4096 bytes.
 
 Every installation-authenticated worker endpoint checks current account and
-organization activity, Member/Admin eligibility, the membership ID and join
-timestamp, the pool token epoch, and the enrolled worker identity. Authenticated
+organization activity, Member/Admin eligibility, the membership ID, join
+timestamp and eligibility revision, the pool token epoch, and the enrolled worker identity. Authenticated
 re-enrollment after a membership or pool-token epoch change requires a new
 credential (409, code 11016); the CLI persists one and retries once. Raw worker
 credentials cannot renew their own authority. Worker bundle responses include

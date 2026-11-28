@@ -3,6 +3,7 @@ use crate::models::assistant_attachment::COLLECTION_NAME as ATTACHMENTS;
 use crate::models::user::{COLLECTION_NAME as USERS, UserType};
 use crate::services::assistant_agent_credential_service as credentials;
 use crate::services::assistant_engine_policy as engine_policy;
+use crate::services::catalog_credential_record_service as catalog_record;
 use crate::test_utils::{connect_transaction_test_database, test_app_state, test_user};
 
 fn request(id: Option<&str>, text: &str) -> TurnRequest {
@@ -1599,7 +1600,7 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
         automation_thread: false,
         voice_parent_conversation_id: None,
         guest_model_setup: false,
-        org_use_revision: 0,
+        member_use: Default::default(),
         shared_agent_thread: false,
         agent_owner_id: None,
         id: format!("nyxa-{}", Uuid::new_v4().simple()),
@@ -3373,7 +3374,9 @@ async fn catalog_contract_reports_decrypted_credential_presence() {
     row.forward_access_token = true;
     row.inject_delegation_token = false;
     // Legacy create paths encrypted an absent credential; that is "not configured".
-    row.credential_encrypted = state.encryption_keys.encrypt(b"").await.unwrap();
+    // Unmarked v2 bytes captured from this test on 437f0ec66.
+    const EMPTY_VECTOR: &str = "0202003c1387a89e36f712976ddaec0b7a17d2a729fb05817461841bd18ae14b1a3aba8c5c7cc6731a798769152409ecc268ad591093799dcb8a753c718a2cd4e276b277c707eca852569671b2dd3124bd7096efaf0b1baae07bb3a3";
+    row.credential_encrypted = hex::decode(EMPTY_VECTOR).unwrap();
     let services = db.collection::<crate::models::downstream_service::DownstreamService>(
         crate::models::downstream_service::COLLECTION_NAME,
     );
@@ -3381,12 +3384,20 @@ async fn catalog_contract_reports_decrypted_credential_presence() {
     let contract = catalog_contract(&db, &state.encryption_keys).await.unwrap();
     assert_eq!(contract.master_credential_configured, Some(false));
     assert!(contract.valid());
+    let encrypted = catalog_record::encrypt(
+        &state.encryption_keys,
+        &row.id,
+        catalog_record::owner(&row).unwrap(),
+        b"real-secret",
+    )
+    .await
+    .unwrap();
     services
         .update_one(
             doc! {"_id": &row.id},
-            doc! {"$set": {"credential_encrypted": bson::Binary {
+            doc! {"$set": {"secret_context_versions":catalog_record::version_update(&state.encryption_keys, true).unwrap(),"credential_encrypted": bson::Binary {
                 subtype: bson::spec::BinarySubtype::Generic,
-                bytes: state.encryption_keys.encrypt(b"real-secret").await.unwrap(),
+                bytes: encrypted,
             }}},
         )
         .await

@@ -194,8 +194,26 @@ async fn connection(
         .insert_one(row)
         .await
         .unwrap();
-    let encrypted = state.encryption_keys.encrypt(raw.as_bytes()).await.unwrap();
-    state.db.collection::<bson::Document>(crate::models::user_api_key::COLLECTION_NAME).insert_one(doc!{"_id":kid,"user_id":owner,"label":slug,"credential_type":auth,"credential_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:encrypted},"status":"active","credential_epoch":1_i64,"created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()}).await.unwrap();
+    let mut key = doc! {
+        "_id": &kid, "user_id": owner, "label": slug, "credential_type": auth,
+        "status": "active", "credential_epoch": 1_i64,
+        "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now(),
+    };
+    key.extend(
+        crate::services::credential_test_fixtures::api_key_fields(
+            &state.encryption_keys,
+            &kid,
+            owner,
+            raw.as_bytes(),
+        )
+        .await,
+    );
+    state
+        .db
+        .collection::<bson::Document>(crate::models::user_api_key::COLLECTION_NAME)
+        .insert_one(key)
+        .await
+        .unwrap();
     id
 }
 async fn persist_binding(state: &AppState, b: &Binding) {
@@ -401,11 +419,28 @@ async fn fixture_with_model(
             fields.insert("platform_key", doc! {"enabled":true,"audience":"public"});
             fields.insert("requires_user_credential", false);
             fields.insert("service_category", "internal");
+            let mut service = state
+                .db
+                .collection::<DownstreamService>(crate::models::downstream_service::COLLECTION_NAME)
+                .find_one(doc! {"_id": catalog})
+                .await
+                .unwrap()
+                .unwrap();
+            crate::services::credential_test_fixtures::catalog_secret(
+                &state.encryption_keys,
+                &mut service,
+                b"test-model",
+            )
+            .await;
+            fields.insert(
+                "secret_context_versions",
+                bson::to_bson(&service.secret_context_versions).unwrap(),
+            );
             fields.insert(
                 "credential_encrypted",
                 bson::Binary {
                     subtype: bson::spec::BinarySubtype::Generic,
-                    bytes: state.encryption_keys.encrypt(b"test-model").await.unwrap(),
+                    bytes: service.credential_encrypted,
                 },
             );
             state.db.collection::<bson::Document>("user_services").update_one(doc!{"_id":&model},doc!{"$set":{"credential_binding":"platform","source":"auto_provision","api_key_id":bson::Bson::Null}}).await.unwrap();
@@ -3434,12 +3469,12 @@ async fn platform_binding(f: &mut Fixture) -> ProviderAccount {
     let r = binding::live(&f.state, &f.b).await.unwrap();
     let mut catalog = r.service;
     catalog.requires_user_credential = false;
-    catalog.credential_encrypted = f
-        .state
-        .encryption_keys
-        .encrypt(b"carrier-fixture")
-        .await
-        .unwrap();
+    crate::services::credential_test_fixtures::catalog_secret(
+        &f.state.encryption_keys,
+        &mut catalog,
+        b"carrier-fixture",
+    )
+    .await;
     catalog.platform_key = Some(PlatformKeyConfig {
         purpose: Default::default(),
         enabled: true,
@@ -3816,14 +3851,30 @@ async fn sms_final_dispatch_uses_refreshed_material_without_replacing_credential
         .unwrap()
         .unwrap();
     let raw = format!("{}:refreshed-auth-token", f.b.account_id);
-    let encrypted = f
-        .state
-        .encryption_keys
-        .encrypt(raw.as_bytes())
+    let id = connection.api_key_id.as_deref().unwrap();
+    let keys = &f.state.encryption_keys;
+    let field = "credential_encrypted";
+    let bytes = crate::services::credential_record_service::encrypt(
+        keys,
+        crate::models::user_api_key::COLLECTION_NAME,
+        id,
+        &connection.user_id,
+        field,
+        raw.as_bytes(),
+    )
+    .await
+    .unwrap();
+    let mut set = doc! {field: bson::Binary {subtype:bson::spec::BinarySubtype::Generic, bytes}};
+    let mut unset = bson::Document::new();
+    crate::services::credential_record_service::mark_classic_update(
+        &mut set, &mut unset, keys, field,
+    );
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::user_api_key::COLLECTION_NAME)
+        .update_one(doc! {"_id": id}, doc! {"$set": set, "$unset": unset})
         .await
         .unwrap();
-    f.state.db.collection::<bson::Document>(crate::models::user_api_key::COLLECTION_NAME)
-        .update_one(doc! {"_id":connection.api_key_id.as_deref().unwrap()}, doc! {"$set":{"credential_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:encrypted}}}).await.unwrap();
     let seen = Arc::new(AtomicUsize::new(0));
     let count = seen.clone();
     let expected = format!(

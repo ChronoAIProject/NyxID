@@ -139,7 +139,9 @@ async fn contextualize(keys: &EncryptionKeys, rows: &mut Document) {
             )
         };
         let context = RecordContext::new(collection, id, owner, &parts).unwrap();
-        let bytes = keys.decrypt(ciphertext).await.unwrap();
+        let bytes = crate::crypto::record_field::decrypt_context(keys, &context, None, ciphertext)
+            .await
+            .unwrap();
         let sealed = bson::Binary {
             subtype: bson::spec::BinarySubtype::Generic,
             bytes: keys.encrypt_record(&bytes, &context).await.unwrap(),
@@ -304,15 +306,20 @@ async fn gateway_replay_refresh_and_finish_select_the_writer_encoding() {
     let (state, _, server) = setup("gateway_replay_replacement").await;
     let mut rows = Box::pin(written_rows(&state)).await;
     let source = rows.get_document_mut("gateway").unwrap();
-    let row: GatewayResponse = bson::from_document(source.clone()).unwrap();
+    let mut row: GatewayResponse = bson::from_document(source.clone()).unwrap();
     let payload =
         recovery::Payload::new(&row.response_id, "fixture-conversation", Default::default());
-    let sealed = payload.seal_legacy(&state.encryption_keys).await.unwrap();
+    let mut compatible = crate::test_utils::test_encryption_keys();
+    compatible.set_contextual_record_writes(false);
+    recovery::storage::install(&compatible, &mut row, &payload)
+        .await
+        .unwrap();
+    assert_eq!(row.payload_context_version, None);
     source.insert(
         "payload_ciphertext",
         bson::Binary {
             subtype: bson::spec::BinarySubtype::Generic,
-            bytes: sealed,
+            bytes: row.payload_ciphertext,
         },
     );
     source.remove("payload_context_version");
@@ -385,15 +392,35 @@ async fn event_record_seven_day_media_and_nested_claims_survive_exact_source_mig
         "conversation":"queued-chat", "agent":"guest-agent", "profile":"model", "text":"guest question"
     });
     let keys = &state.encryption_keys;
-    let encrypted_context = keys
-        .encrypt(&serde_json::to_vec(&context).unwrap())
-        .await
-        .unwrap();
-    let encrypted_target = keys.encrypt(b"original-target").await.unwrap();
-    let encrypted_guest = keys
-        .encrypt(&serde_json::to_vec(&guest).unwrap())
-        .await
-        .unwrap();
+    let id = source.get_str("_id").unwrap();
+    let owner = source.get_str("user_id").unwrap();
+    let encrypted_context = record::seal(
+        keys,
+        id,
+        owner,
+        &[record::CONTEXT, channel],
+        &serde_json::to_vec(&context).unwrap(),
+    )
+    .await
+    .unwrap();
+    let encrypted_target = record::seal(
+        keys,
+        id,
+        owner,
+        &[record::TARGET, channel],
+        b"original-target",
+    )
+    .await
+    .unwrap();
+    let encrypted_guest = record::seal(
+        keys,
+        id,
+        owner,
+        &[record::GUEST, channel],
+        &serde_json::to_vec(&guest).unwrap(),
+    )
+    .await
+    .unwrap();
     let created = Utc::now() - ChronoDuration::days(6);
     let id = source.get_str("_id").unwrap().to_owned();
     let binary = |bytes| bson::Binary {

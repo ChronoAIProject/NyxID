@@ -147,15 +147,19 @@ async fn prepared(name: &str) -> Fixture {
     let f = fixture(name).await;
     crate::services::security_readiness_service::ready_test_replica(&f.state.db).await;
     settled(&f, false).await;
-    let target = f
-        .state
-        .encryption_keys
-        .encrypt(b"cmaeg1.rt.original")
-        .await
-        .unwrap();
+    let target = event_record::seal(
+        &f.state.encryption_keys,
+        &f.event.id,
+        &f.event.user_id,
+        &[event_record::TARGET, &f.event.channel_id],
+        b"cmaeg1.rt.original",
+    )
+    .await
+    .unwrap();
     patch(&f, doc! {
         "delivery.state":"pending",
         "delivery.target_ciphertext":bson::Binary { subtype:bson::spec::BinarySubtype::Generic, bytes:target },
+        "delivery.target_context_version": event_record::version(&f.state.encryption_keys).map(i32::from),
         "delivery.target_expires_at":bson::DateTime::from_chrono(Utc::now()+ChronoDuration::hours(23)),
         "status":"completed","dispatch_identity.version":1,
         "dispatch_identity.keys":[dispatch_identity::dispatch_key(&f.channel.id,"original-post")],
@@ -669,12 +673,7 @@ async fn gateway_reask_local_request_and_decryption_errors_are_not_transport_fai
                     doc! {"$set":{channel_key::FIELD:bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:ciphertext},
                     channel_key::VERSION_PATH:3}}).await.unwrap();
             } else {
-                let key = f
-                    .state
-                    .encryption_keys
-                    .encrypt(b"invalid\nheader")
-                    .await
-                    .unwrap();
+                let key = channel_key::seal(&f.state.encryption_keys, &f.channel.id, &f.channel.user_id, f.channel.agent_api_key_id.as_deref().unwrap(), "invalid\nheader").await.unwrap();
                 f.state
                     .db
                     .collection::<bson::Document>(CHANNELS)

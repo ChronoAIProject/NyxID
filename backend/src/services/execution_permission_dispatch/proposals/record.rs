@@ -168,6 +168,19 @@ impl Field {
     }
 }
 
+pub(crate) fn checked_envelope(envelope: &Document) -> AppResult<ExecutionProposal> {
+    if envelope.keys().any(|key| {
+        key.strip_prefix('v')
+            .is_some_and(|v| !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()))
+            && !matches!(key.as_str(), "v1" | "v2" | "v3" | "v4")
+    }) {
+        return Err(conflict());
+    }
+    let parsed = bson::from_document(envelope.clone()).map_err(|_| conflict())?;
+    Arm::select(&parsed)?;
+    Ok(parsed)
+}
+
 /// Inspect the complete selected arm before publishing either field. A non-proposal
 /// approval and a selected arm cleared by retention have no material to rewrap.
 async fn inspect(keys: &EncryptionKeys, row: &Document, rewrap: bool) -> AppResult<Document> {
@@ -177,14 +190,7 @@ async fn inspect(keys: &EncryptionKeys, row: &Document, rewrap: bool) -> AppResu
         Some(Bson::Document(e)) => e,
         _ => return Err(conflict()),
     };
-    if envelope.keys().any(|key| {
-        key.strip_prefix('v')
-            .is_some_and(|v| !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()))
-            && !matches!(key.as_str(), "v1" | "v2" | "v3" | "v4")
-    }) {
-        return Err(conflict());
-    }
-    let parsed = bson::from_document(envelope.clone()).map_err(|_| conflict())?;
+    let parsed = checked_envelope(envelope)?;
     let arm = Arm::select(&parsed)?;
     for field in [Field::Payload, Field::Result] {
         let (slot, value, marker) = arm.field(field);

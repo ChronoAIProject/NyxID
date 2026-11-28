@@ -16,6 +16,7 @@ use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::{ACCESS_TOKEN_COOKIE_NAME, AuthUser, SESSION_COOKIE_NAME};
+use crate::mw::rate_limit::AuditIp;
 use crate::services::{
     audit_service, auth_service, feature_flag_service, invite_code_service, role_service,
     token_service,
@@ -92,34 +93,6 @@ pub(crate) enum AuthClientMode {
 }
 
 // --- Helper functions ---
-
-/// Extract the client IP from proxy headers, falling back to the TCP peer address.
-///
-/// Checks (in order): X-Forwarded-For, X-Real-IP, then the peer socket address.
-pub(crate) fn extract_ip(headers: &HeaderMap, peer_addr: Option<SocketAddr>) -> Option<String> {
-    // 1. X-Forwarded-For (first IP in the chain)
-    if let Some(forwarded) = headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .map(|v| v.split(',').next().unwrap_or("").trim().to_string())
-        .filter(|s| !s.is_empty())
-    {
-        return Some(forwarded);
-    }
-
-    // 2. X-Real-IP
-    if let Some(real_ip) = headers
-        .get("x-real-ip")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-    {
-        return Some(real_ip);
-    }
-
-    // 3. TCP peer address
-    peer_addr.map(|addr| addr.ip().to_string())
-}
 
 /// Extract the User-Agent header.
 pub(crate) fn extract_user_agent(headers: &HeaderMap) -> Option<String> {
@@ -385,7 +358,7 @@ pub async fn register(
                     Some(fake_user_id.clone()),
                     "register".to_string(),
                     Some(serde_json::json!({ "email": body.email })),
-                    extract_ip(&headers, Some(peer)),
+                    AuditIp::resolve(&headers, Some(peer), &state.config.trusted_proxy_ips).0,
                     extract_user_agent(&headers),
                     None,
                     None,
@@ -447,7 +420,7 @@ pub async fn register(
         Some(result.user_id.clone()),
         "register".to_string(),
         Some(serde_json::json!({ "email": body.email })),
-        extract_ip(&headers, Some(peer)),
+        AuditIp::resolve(&headers, Some(peer), &state.config.trusted_proxy_ips).0,
         extract_user_agent(&headers),
         None,
         None,
@@ -649,7 +622,7 @@ pub(crate) async fn finish_password_login(
         }
     }
 
-    let ip = extract_ip(&headers, Some(peer));
+    let ip = AuditIp::resolve(&headers, Some(peer), &state.config.trusted_proxy_ips).0;
     let ua = extract_user_agent(&headers);
 
     // Telemetry context is derived here from the X-NyxID-Client headers
@@ -1269,7 +1242,7 @@ pub async fn setup(
             "email": body.email,
             "method": "bootstrap"
         })),
-        extract_ip(&headers, Some(peer)),
+        AuditIp::resolve(&headers, Some(peer), &state.config.trusted_proxy_ips).0,
         extract_user_agent(&headers),
         None,
         None,
@@ -1331,7 +1304,9 @@ pub async fn cli_token(
         &state.config,
         &state.jwt_keys,
         &user_id_str,
-        extract_ip(&headers, Some(peer)).as_deref(),
+        AuditIp::resolve(&headers, Some(peer), &state.config.trusted_proxy_ips)
+            .0
+            .as_deref(),
         user_agent.as_deref(),
         auth_user.derived_mfa_authority(),
     )
@@ -1508,34 +1483,6 @@ mod tests {
     }
 
     #[test]
-    fn extract_ip_from_x_forwarded_for() {
-        let mut h = HeaderMap::new();
-        h.insert("x-forwarded-for", "1.2.3.4, 5.6.7.8".parse().unwrap());
-        assert_eq!(extract_ip(&h, None), Some("1.2.3.4".to_string()));
-    }
-
-    #[test]
-    fn extract_ip_from_x_real_ip() {
-        let mut h = HeaderMap::new();
-        h.insert("x-real-ip", "10.0.0.1".parse().unwrap());
-        assert_eq!(extract_ip(&h, None), Some("10.0.0.1".to_string()));
-    }
-
-    #[test]
-    fn extract_ip_falls_back_to_peer() {
-        let peer = "192.168.1.1:8080".parse().ok();
-        assert_eq!(
-            extract_ip(&HeaderMap::new(), peer),
-            Some("192.168.1.1".to_string())
-        );
-    }
-
-    #[test]
-    fn extract_ip_returns_none_when_nothing_available() {
-        assert_eq!(extract_ip(&HeaderMap::new(), None), None);
-    }
-
-    #[test]
     fn build_cookie_includes_all_attributes() {
         let c = build_cookie("name", "val", 3600, "/", true, Some(".example.com"));
         assert!(c.contains("name=val"));
@@ -1605,14 +1552,6 @@ mod tests {
         assert!(c.contains("Max-Age=0"));
         assert!(c.contains("SameSite=None"));
         assert!(c.contains("Domain=.example.com"));
-    }
-
-    #[test]
-    fn extract_ip_x_forwarded_for_takes_priority_over_real_ip() {
-        let mut h = HeaderMap::new();
-        h.insert("x-forwarded-for", "1.1.1.1".parse().unwrap());
-        h.insert("x-real-ip", "2.2.2.2".parse().unwrap());
-        assert_eq!(extract_ip(&h, None), Some("1.1.1.1".to_string()));
     }
 
     #[test]

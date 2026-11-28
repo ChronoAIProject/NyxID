@@ -68,12 +68,17 @@ async fn decrypt_factor_secret(
         || AppError::Internal("MFA secret format is unavailable".into()),
     )
     .await?;
+    validate_factor_seed(&plaintext, &factor.user_id)?;
+    Ok(plaintext)
+}
+
+pub(super) fn validate_factor_seed(plaintext: &[u8], owner: &str) -> AppResult<()> {
     // Readiness requires a usable TOTP seed, including the library's key-size
     // validation. Authentication of an empty or malformed secret is insufficient.
     if plaintext.len() > 1024 {
         return Err(AppError::Internal("Invalid MFA secret".into()));
     }
-    let text = std::str::from_utf8(&plaintext)
+    let text = std::str::from_utf8(plaintext)
         .map_err(|_| AppError::Internal("Invalid MFA secret".into()))?;
     let secret = Secret::Encoded(text.to_owned());
     let _totp = create_totp(
@@ -81,9 +86,9 @@ async fn decrypt_factor_secret(
             .to_bytes()
             .map_err(|_| AppError::Internal("Invalid MFA secret".into()))?,
         "NyxID",
-        &factor.user_id,
+        owner,
     )?;
-    Ok(plaintext)
+    Ok(())
 }
 
 pub(crate) async fn verify_current_secret(
@@ -1077,6 +1082,9 @@ pub fn notify_mfa_disabled(state: &crate::AppState, user_id: &str) {
 }
 
 #[cfg(test)]
+mod historical;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::models::user::{User, UserType};
@@ -1095,7 +1103,7 @@ mod tests {
     #[tokio::test]
     async fn contextual_mfa_migration_preserves_authority_and_rejects_swaps_and_stale_snapshots() {
         let (db, mut keys, user) = fixture("mfa_context_migration").await;
-        let legacy = factor(&db, &keys, &user, &["00112233445566778899001122334455"]).await;
+        let legacy = legacy_factor(&db, &user, &["00112233445566778899001122334455"]).await;
         let legacy_secret = decrypt_factor_secret(&keys, &legacy).await.unwrap();
         assert!(
             migrate_secret_snapshot(&db, &keys, &bson::to_document(&legacy).unwrap())
@@ -1183,7 +1191,7 @@ mod tests {
             .unwrap();
         assert_eq!(legacy.secret_context_version, None);
         assert_eq!(
-            keys.decrypt(legacy.secret_encrypted.as_ref().unwrap())
+            decrypt_factor_secret(&keys, &legacy)
                 .await
                 .unwrap()
                 .as_slice(),
@@ -1215,7 +1223,7 @@ mod tests {
     #[tokio::test]
     async fn legacy_array_secret_migrates_from_raw_snapshot_without_normalizing_cas() {
         let (db, keys, user) = fixture("mfa_array_migration").await;
-        let legacy = factor(&db, &keys, &user, &[]).await;
+        let legacy = legacy_factor(&db, &user, &[]).await;
         let mut source = db
             .collection::<bson::Document>(MFA_FACTORS)
             .find_one(doc! {"_id":&legacy.id})
@@ -1269,17 +1277,52 @@ mod tests {
         id: &str,
         codes: &[&str],
     ) -> MfaFactor {
+        let factor_id = Uuid::new_v4().to_string();
         let secret = Secret::generate_secret().to_encoded().to_string();
+        let encrypted = encrypt_factor_secret(keys, &factor_id, id, secret.as_bytes())
+            .await
+            .unwrap();
+        insert_factor(
+            db,
+            id,
+            codes,
+            factor_id,
+            encrypted,
+            keys.contextual_record_writes().then_some(3),
+        )
+        .await
+    }
+
+    async fn legacy_factor(db: &mongodb::Database, owner: &str, codes: &[&str]) -> MfaFactor {
+        insert_factor(
+            db,
+            owner,
+            codes,
+            Uuid::new_v4().to_string(),
+            hex::decode(super::historical::UNMARKED_FACTOR).unwrap(),
+            None,
+        )
+        .await
+    }
+
+    async fn insert_factor(
+        db: &mongodb::Database,
+        owner: &str,
+        codes: &[&str],
+        factor_id: String,
+        encrypted: Vec<u8>,
+        version: Option<u32>,
+    ) -> MfaFactor {
         let mut hashes = Vec::new();
         for code in codes {
             hashes.push(password::hash_password(code).unwrap());
         }
         let factor = MfaFactor {
-            id: Uuid::new_v4().to_string(),
-            user_id: id.into(),
+            id: factor_id,
+            user_id: owner.into(),
             factor_type: "totp".into(),
-            secret_encrypted: Some(keys.encrypt(secret.as_bytes()).await.unwrap()),
-            secret_context_version: None,
+            secret_encrypted: Some(encrypted),
+            secret_context_version: version,
             recovery_codes: Some(serde_json::json!(hashes)),
             last_totp_counter: None,
             is_verified: true,
@@ -1765,10 +1808,7 @@ mod tests {
     async fn totp_counter_is_single_use_across_clients_and_monotonic_with_skew() {
         let (db, keys, id) = fixture("mfa_totp_replay").await;
         let stored = factor(&db, &keys, &id, &[]).await;
-        let plaintext = keys
-            .decrypt(stored.secret_encrypted.as_ref().unwrap())
-            .await
-            .unwrap();
+        let plaintext = decrypt_factor_secret(&keys, &stored).await.unwrap();
         let secret = Secret::Encoded(std::str::from_utf8(&plaintext).unwrap().to_owned())
             .to_bytes()
             .unwrap();

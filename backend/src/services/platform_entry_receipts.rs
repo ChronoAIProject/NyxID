@@ -12,6 +12,7 @@ use crate::{
 };
 use bson::{Bson, Document, doc};
 use chrono::{Duration, Utc};
+use futures::TryStreamExt;
 use mongodb::{ClientSession, Database};
 
 /// This type cannot be deserialized from normalized gateway activity.
@@ -148,6 +149,7 @@ pub(crate) async fn record_in_session(
         message_id: native.message_id.clone(),
         original_private_human: true,
         content_commitment: String::new(),
+        cleanup_fence: 0,
         received_at: now,
         expires_at: now + Duration::minutes(10),
     };
@@ -189,6 +191,72 @@ pub(crate) async fn record_in_session(
         text: zeroize::Zeroizing::new(native.text().to_owned()),
     })
 }
+
+/// Remove expired native receipts and their encrypted child handles in bounded
+/// transactions. The parent fence is incremented before either deletion so a
+/// writer that tries to create a late child conflicts with this transaction.
+pub(crate) async fn cleanup_expired(db: &Database, batch_limit: i64) -> AppResult<u64> {
+    let limit = batch_limit.clamp(1, 256);
+    let parents = db.collection::<Document>(NATIVE_RECEIPTS);
+    let candidates = parents
+        .find(doc! {"expires_at": {"$lte": bson::DateTime::now()}})
+        .sort(doc! {"expires_at": 1})
+        .limit(limit)
+        .projection(doc! {"_id": 1, "expires_at": 1})
+        .await?
+        .try_collect::<Vec<_>>()
+        .await?;
+    let handles =
+        db.collection::<Document>(crate::models::platform_native_reply_handle::COLLECTION_NAME);
+    let mut removed = 0_u64;
+    for candidate in candidates {
+        let id = candidate.get_str("_id").map_err(|_| refused())?.to_owned();
+        let expiry = candidate
+            .get_datetime("expires_at")
+            .map_err(|_| refused())?
+            .to_owned();
+        let context = (id, expiry);
+        let deleted =
+            super::transaction_service::run_db_only(db, &context, |session, (id, expiry)| {
+                let parents = parents.clone();
+                let handles = handles.clone();
+                Box::pin(async move {
+                    let Some(parent) = parents
+                        .find_one_and_update(
+                            doc! {"_id": id.as_str(), "expires_at": {"$lte": expiry}},
+                            doc! {"$inc": {"cleanup_fence": 1_i64}},
+                        )
+                        .projection(doc! {"cleanup_fence": 1})
+                        .return_document(mongodb::options::ReturnDocument::After)
+                        .session(&mut *session)
+                        .await?
+                    else {
+                        return Ok(false);
+                    };
+                    let fence = parent.get_i64("cleanup_fence").map_err(|_| refused())?;
+                    handles
+                        .delete_many(doc! {"receipt_id": id.as_str()})
+                        .session(&mut *session)
+                        .await?;
+                    Ok(parents
+                        .delete_one(doc! {"_id": id.as_str(), "cleanup_fence": fence})
+                        .session(session)
+                        .await?
+                        .deleted_count
+                        == 1)
+                })
+            })
+            .await?;
+        if deleted {
+            removed += 1;
+        }
+    }
+    Ok(removed)
+}
+
+#[cfg(test)]
+#[path = "platform_entry_receipts_tests.rs"]
+mod tests;
 
 pub(crate) struct GatewayReceiptInput<'a> {
     pub(crate) profile_id: &'a str,

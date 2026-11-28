@@ -273,6 +273,7 @@ pub async fn create(
     let members = resolve_members(db, owner, member_ids).await?;
     let now = Utc::now();
     let group = AssistantGroup {
+        pending_eligibility_revisions: Default::default(),
         pending_org_use_revisions: Default::default(),
         collaboration: None,
         id: format!("nyxg-{}", Uuid::new_v4().simple()),
@@ -429,7 +430,9 @@ pub async fn list(db: &Database, owner: &str) -> AppResult<Vec<AssistantGroup>> 
 
 /// A stored member is not execution authority. Keep unavailable members visible
 /// so losing a share never silently changes the meaning of an addressed message.
+#[derive(Clone)]
 pub struct Member {
+    pub member_use: crate::models::org_membership::MemberUse,
     pub agent: AssistantAgent,
     pub available: bool,
     /// A specialist owned by another person, even after its share is revoked.
@@ -531,6 +534,12 @@ pub async fn members(db: &Database, owner: &str, group: &AssistantGroup) -> AppR
                 .find(|p| has_shared_access && p.id == agent.user_id)
                 .and_then(|p| p.display_name.clone());
             Member {
+                member_use: agent.member_use(
+                    memberships
+                        .iter()
+                        .find(|m| m.org_user_id == agent.user_id)
+                        .map_or(0, |m| m.eligibility_revision),
+                ),
                 agent,
                 available,
                 shared: shared_member,
@@ -963,7 +972,7 @@ async fn append_following_bound(
     let source_thread = source.map(|row| row.id.clone());
     let member_source = source.and_then(|row| {
         super::org_agent_service::ordinary_member_org(row)
-            .map(|org| (org.to_owned(), row.org_use_revision))
+            .map(|org| (org.to_owned(), row.member_use))
     });
     let filter = owner_filter(owner, group_id)?;
     let db = db.clone();
@@ -1254,7 +1263,11 @@ pub(crate) fn address_update(owner: &str, ids: &[String], members: &[Member]) ->
     {
         revisions.insert(
             format!("pending_org_use_revisions.{}", member.id),
-            member.org_use_revision,
+            member.member_use.org_use_revision,
+        );
+        revisions.insert(
+            format!("pending_eligibility_revisions.{}", member.id),
+            member.member_use.eligibility_revision,
         );
     }
     let mut update = doc! {"$addToSet":{"pending_agent_ids":{"$each":ids}}};
