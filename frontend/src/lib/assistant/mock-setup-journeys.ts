@@ -20,7 +20,7 @@ interface MockLink {
 }
 interface MockSetupState {
   links: MockLink[];
-  bots: CreateChannelBotResponse[];
+  bots: (CreateChannelBotResponse & { readonly demo_owner_id?: string })[];
 }
 
 function state(): MockSetupState {
@@ -55,6 +55,11 @@ export function createMockConnectReply(): string {
 
 export function mockCreatedBotCount(): number {
   return state().bots.length;
+}
+
+/** Registered demo bots remain available to the real agent connection picker. */
+export function mockCreatedBots(): readonly (CreateChannelBotResponse & { readonly demo_owner_id?: string })[] {
+  return state().bots;
 }
 
 const TELEGRAM: ChannelPlatformDescriptor = {
@@ -220,9 +225,10 @@ export function mockSetupResponse(
       throw new Error("Enter a dummy Telegram bot token to continue.");
     }
     const current = state();
-    const bot: CreateChannelBotResponse = {
+    const bot: CreateChannelBotResponse & { demo_owner_id?: string } = {
       id: crypto.randomUUID(),
       platform: "telegram",
+      demo_owner_id: typeof request.target_org_id === "string" ? request.target_org_id : undefined,
       label: String(request.label || "Helper"),
       platform_bot_username: "helper_bot",
       status: "active",

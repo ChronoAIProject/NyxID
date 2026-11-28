@@ -16,6 +16,7 @@ import { createPortal } from "react-dom";
 import { Search, X } from "lucide-react";
 import {
   DrawerSearchContext,
+  DrawerNavigationContext,
   DRAWER_SEARCH_TABS,
   drawerMatchRanges,
   matchDrawerEntries,
@@ -41,6 +42,8 @@ export function DrawerSearchProvider({
     ReadonlyMap<string, readonly DrawerSearchEntry[]>
   >(new Map());
   const pages = useRef(new Map<string, DrawerSearchPage>());
+  const navigation = useRef<((id: string) => Promise<void>) | null>(null);
+  const navigate = useCallback(async (id: string) => { await navigation.current?.(id); }, []);
   const register = useCallback(
     (id: string, value: readonly DrawerSearchEntry[]) =>
       setEntries((current) => new Map(current).set(id, value)),
@@ -72,9 +75,11 @@ export function DrawerSearchProvider({
       }}
     >
       <DrawerSearchResultsContext.Provider
-        value={{ entries: [...entries.values()].flat(), pages }}
+        value={{ entries: [...entries.values()].flat(), pages, navigation }}
       >
+        <DrawerNavigationContext value={navigate}>
         {children}
+        </DrawerNavigationContext>
       </DrawerSearchResultsContext.Provider>
     </DrawerSearchContext.Provider>
   );
@@ -82,6 +87,7 @@ export function DrawerSearchProvider({
 const DrawerSearchResultsContext = createContext<{
   entries: DrawerSearchEntry[];
   pages: RefObject<Map<string, DrawerSearchPage>>;
+  navigation: RefObject<((id: string) => Promise<void>) | null>;
 } | null>(null);
 function Match({
   text,
@@ -131,7 +137,7 @@ export function AgentDrawerSearch({
 }) {
   useUiTranslation();
   const context = useContext(DrawerSearchResultsContext)!;
-  const searchLabel = `Search ${title} agent details`;
+  const searchLabel = translateUi("Search {{agent}} agent details", { agent: title });
   const input = useRef<HTMLInputElement>(null);
   const toggle = useRef<HTMLButtonElement>(null);
   const [placeholder, setPlaceholder] = useState(searchLabel);
@@ -146,7 +152,7 @@ export function AgentDrawerSearch({
       const style = getComputedStyle(node);
       context.font = style.font;
       const width = node.clientWidth - parseFloat(style.paddingLeft || "0") - parseFloat(style.paddingRight || "0");
-      setPlaceholder([searchLabel, `Search ${title}`, "Search agent"].find((text) => context.measureText(text).width <= width) ?? "Search");
+      setPlaceholder([searchLabel, translateUi("Search {{agent}}", { agent: title }), translateUi("Search agent")].find((text) => context.measureText(text).width <= width) ?? translateUi("Search"));
     };
     measure();
     const observer = new ResizeObserver(measure);
@@ -209,7 +215,7 @@ export function AgentDrawerSearch({
         ].find((element) => element.dataset.drawerSearchTarget === pending.id);
       if (target?.isConnected && !target.closest("[hidden],[inert]")) {
         target.scrollIntoView?.({ block: "center", behavior: "instant" });
-        if (!target.hasAttribute("tabindex")) target.tabIndex = -1;
+        if (!target.matches("input, textarea, select, button, a[href], [tabindex]")) target.tabIndex = -1;
         target.focus({ preventScroll: true });
         setHighlighted(target);
         setPending(undefined);
@@ -254,6 +260,13 @@ export function AgentDrawerSearch({
       setOpening(false);
     }
   }
+  useLayoutEffect(() => {
+    context.navigation.current = async (id) => {
+      const entry = context.entries.find((candidate) => candidate.id === id);
+      if (entry) await reveal(entry);
+    };
+    return () => { context.navigation.current = null; };
+  });
   function move(event: React.KeyboardEvent, id?: string) {
     if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
     if (!ordered.length) return;
@@ -334,8 +347,8 @@ export function AgentDrawerSearch({
             </p>
           ) : (
             groups.map(({ label, rows }) => (
-              <GroupedList key={label} title={label}>
-                <ul aria-label={translateUi("{{value1}} search results", { value1: label })}>
+              <GroupedList key={label} title={translateUi(label)}>
+                <ul aria-label={translateUi("{{value1}} search results", { value1: translateUi(label) })}>
                   {rows.map((entry) => (
                     <GroupedRow
                       key={entry.id}
@@ -347,7 +360,7 @@ export function AgentDrawerSearch({
                         <button
                           type="button"
                           className="flex min-h-11 w-full px-4 py-2.5 text-left focus-visible:outline-none"
-                          aria-label={`${entry.title} ${entry.breadcrumb ?? DRAWER_SEARCH_TABS[entry.tab]}`}
+                          aria-label={`${entry.title} ${entry.breadcrumb ?? translateUi(DRAWER_SEARCH_TABS[entry.tab])}`}
                           ref={(element) => {
                             if (element) buttons.current.set(entry.id, element);
                             else buttons.current.delete(entry.id);
@@ -364,7 +377,7 @@ export function AgentDrawerSearch({
                               <Match
                                 text={
                                   entry.breadcrumb ??
-                                  DRAWER_SEARCH_TABS[entry.tab]
+                                  translateUi(DRAWER_SEARCH_TABS[entry.tab])
                                 }
                                 query={query}
                               />

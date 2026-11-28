@@ -12,6 +12,8 @@ export interface ChannelBotConnectProps {
   readonly platform: ChannelPlatform;
   readonly label: string;
   readonly orgId: string | null;
+  /** Contextual registration may resume only requests owned by this account. */
+  readonly expectedOwnerId?: string;
   readonly form: UseFormReturn<CreateChannelBotFormData>;
   readonly fullPage?: boolean;
   readonly stayInPlace?: boolean;

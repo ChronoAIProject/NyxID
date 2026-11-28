@@ -111,7 +111,7 @@ export function ServiceGrantPicker({
     ...value.filter((slug) => !known.has(slug)).map((slug) => ({ slug, label: slug, unavailable: undefined })),
   ];
   useDrawerSearchEntries(keys.isPending ? [] : rows.map((service) => ({
-    id: `service-${service.slug}`, title: service.label, breadcrumb: `Access › Services › ${service.slug}`,
+    id: `service-${service.slug}`, title: service.label, breadcrumb: `${translateUi("Access")} › ${translateUi("Services")} › ${service.slug}`,
     keywords: `${service.slug} ${value.includes(service.slug) ? "Granted" : "Available"}`,
     reveal: () => setSearch(""),
   })));

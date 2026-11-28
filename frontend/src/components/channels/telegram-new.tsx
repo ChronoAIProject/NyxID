@@ -13,6 +13,7 @@ import { ErrorBanner } from "@/components/shared/error-banner";
 export function TelegramNew({
   label,
   orgId,
+  expectedOwnerId,
   requestId,
   fullPage = false,
   stayInPlace = false,
@@ -22,6 +23,7 @@ export function TelegramNew({
 }: {
   readonly label: string;
   readonly orgId: string | null;
+  readonly expectedOwnerId?: string;
   readonly requestId?: string;
   readonly fullPage?: boolean;
   readonly stayInPlace?: boolean;
@@ -43,6 +45,9 @@ export function TelegramNew({
     url: string;
   } | null>(null);
   const request = configuration.data?.request;
+  const ownerMatches = (value: typeof request) => !expectedOwnerId || value?.owner_user_id === expectedOwnerId;
+  const ownerMismatch = Boolean(request && !ownerMatches(request));
+  const [responseOwnerMismatch, setResponseOwnerMismatch] = useState(false);
   const requestExpiresAt = request?.expires_at;
   const canOpenCreationForm = request?.can_open_creation_form;
   const [now, setNow] = useState(Date.now);
@@ -91,15 +96,17 @@ export function TelegramNew({
   useEffect(() => {
     if (
       request?.status === "connected" &&
+      (!expectedOwnerId || request.owner_user_id === expectedOwnerId) &&
       request.channel_bot_id &&
       completed.current !== request.id
     ) {
       completed.current = request.id;
       onConnected(request.channel_bot_id, request.bot_username);
     }
-  }, [request, onConnected]);
+  }, [request, onConnected, expectedOwnerId]);
 
   async function prepare() {
+    if (configuration.isPending || pending || (getCurrentRequest() && !ownerMatches(getCurrentRequest()))) return;
     // Opening the tab in the click preserves browser popup permission across the API call.
     const tab = window.open("about:blank", "_blank");
     if (tab) tab.opener = null;
@@ -116,10 +123,15 @@ export function TelegramNew({
           ? await launch.mutateAsync(request.id)
           : await begin.mutateAsync({
               label,
-              target_org_id: orgId ?? undefined,
+              target_org_id: expectedOwnerId ?? orgId ?? undefined,
               auto_connect: true,
             });
       if (!active.current || !actor || currentActor.current !== actor) {
+        tab?.close();
+        return;
+      }
+      if (!ownerMatches(result.request)) {
+        setResponseOwnerMismatch(true);
         tab?.close();
         return;
       }
@@ -136,7 +148,7 @@ export function TelegramNew({
   }
 
   async function openCreationForm(index = 0) {
-    if (!request?.can_open_creation_form || !actor || Date.parse(request.expires_at) <= Date.now()) return;
+    if (!request?.can_open_creation_form || !ownerMatches(request) || !ownerMatches(getCurrentRequest()) || !actor || Date.parse(request.expires_at) <= Date.now()) return;
     const captured = request;
     const tab = window.open("about:blank", "_blank");
     if (tab) tab.opener = null;
@@ -145,7 +157,7 @@ export function TelegramNew({
     try {
       const result = await creationLink.mutateAsync(captured.id);
       const latest = getCurrentRequest();
-      if (!active.current || currentActor.current !== actor || latest?.id !== captured.id
+      if (!active.current || currentActor.current !== actor || !ownerMatches(latest) || !ownerMatches(result.request) || latest?.id !== captured.id
         || latest.revision !== captured.revision || latest.status !== "waiting_bot"
         || !latest.can_open_creation_form || Date.parse(latest.expires_at) <= Date.now()
         || Date.parse(result.request.expires_at) <= Date.now() || result.request.id !== captured.id
@@ -169,19 +181,20 @@ export function TelegramNew({
   }
 
   async function regenerate() {
-    if (!request || pending) return;
+    if (!request || pending || !ownerMatches(request) || !ownerMatches(getCurrentRequest())) return;
     creationLink.reset();
     setRecovery(null);
     try { await regenerateUsername.mutateAsync(request.id); } catch { /* Displayed below. */ }
   }
 
   async function finishLegacyRequest() {
-    if (!request) return;
+    if (!request || !ownerMatches(request) || !ownerMatches(getCurrentRequest())) return;
     try {
       const result = await connect.mutateAsync(request);
       if (
         active.current &&
         currentActor.current === actor &&
+        ownerMatches(result) &&
         result.status === "connected" &&
         result.channel_bot_id
       )
@@ -204,6 +217,15 @@ export function TelegramNew({
           variant="outline"
           onClick={() => void configuration.refetch()}
         >{translateUi("Check progress")}</Button>
+      </div>
+    );
+  if (ownerMismatch || responseOwnerMismatch)
+    return (
+      <div className="space-y-3 type-secondary">
+        <p role="status">{translateUi("An existing Telegram setup belongs to a different account or organization. Open it separately to manage it, or choose another platform here. This agent’s organization has not changed.")}</p>
+        <Button asChild variant="outline">
+          <a href="/channel-bots?connect=telegram-new" target="_blank" rel="noopener noreferrer">{translateUi("Open existing Telegram setup")}</a>
+        </Button>
       </div>
     );
   if (!configuration.data?.available && !request?.setup_notice)
@@ -415,6 +437,7 @@ export function TelegramNew({
               size="sm"
               disabled={pending}
               onClick={() => {
+                if (!ownerMatches(request) || !ownerMatches(getCurrentRequest())) return;
                 void cancel
                   .mutateAsync(request.id)
                   .then(async () => {

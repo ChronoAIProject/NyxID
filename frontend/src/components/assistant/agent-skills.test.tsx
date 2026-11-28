@@ -14,6 +14,7 @@ function signIn(features: string[] = []) {
 const mocks = vi.hoisted(() => ({
   current: vi.fn(),
   save: vi.fn(),
+  write: vi.fn(),
   toggle: vi.fn(),
   search: vi.fn(),
   versions: vi.fn(),
@@ -33,7 +34,7 @@ vi.mock("@/hooks/use-agent-skills", () => ({
     error: null,
   }),
   useSetSkillPreload: () => ({ mutate: vi.fn(), isPending: false, error: null }),
-  useSetAgentSkills: () => ({ mutate: mocks.save, isPending: false }),
+  useSetAgentSkills: mocks.write,
   useSkillSearch: mocks.search,
   useSkillVersions: mocks.versions,
   useSkillPreview: mocks.preview,
@@ -52,6 +53,7 @@ const pin = {
 beforeEach(() => {
   vi.clearAllMocks();
   signIn();
+  mocks.write.mockReturnValue({ mutate: mocks.save, isPending: false });
   mocks.current.mockReturnValue({
     data: {
       revision: 4,
@@ -299,7 +301,7 @@ it("never tests a pin until its Test button is clicked", () => {
   render(<AgentSkills agentId="agent" />);
   fireEvent.click(screen.getByRole("button", { name: /^Research/ }));
   expect(mocks.attachedPreview).toHaveBeenLastCalledWith("agent", "");
-  fireEvent.click(screen.getByRole("button", { name: "Test Research" }));
+  fireEvent.click(screen.getByRole("button", { name: "Check access to Research" }));
   expect(mocks.attachedPreview).toHaveBeenLastCalledWith("agent", "skill-id");
 });
 
@@ -504,4 +506,26 @@ it("shows NyxBot’s specialist mode and settings link without locking NyxBot", 
   expect(
     screen.getByRole("switch", { name: "Use built-in Guide" }),
   ).toBeEnabled();
+});
+
+it("scopes immediate success to the affected pin and focuses the list after removing its detail", async () => {
+  signIn([FEATURE_FLAG.SKILL_PIN_DISABLE]);
+  const other = { ...pin, skill_id: "other", name: "Writing" };
+  let current = { revision: 4, skills: [pin, other], metadata: {} };
+  mocks.current.mockImplementation(() => ({ data: current }));
+  mocks.save.mockImplementation((body, options) => { current = { ...current, revision: 5, skills: body.skills }; options.onSuccess(); });
+  const view = render(<AgentSkills agentId="agent" />);
+  fireEvent.click(screen.getByRole("button", { name: /^Research/ }));
+  fireEvent.click(screen.getByRole("switch", { name: "Use Research" }));
+  mocks.write.mockReturnValue({ mutate: mocks.save, isPending: false, isSuccess: true });
+  view.rerender(<AgentSkills agentId="agent" />);
+  expect(screen.getByText("Skills updated.")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Back to Skills" }));
+  fireEvent.click(screen.getByRole("button", { name: /^Writing/ }));
+  expect(screen.queryByText("Skills updated.")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Remove Writing" }));
+  view.rerender(<AgentSkills agentId="agent" />);
+  expect(screen.queryByRole("button", { name: "Remove Writing" })).not.toBeInTheDocument();
+  await waitFor(() => expect(screen.getByRole("region", { name: "Skills" })).toHaveFocus());
+  expect(screen.getByText("Skills updated.")).toBeInTheDocument();
 });

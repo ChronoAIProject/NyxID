@@ -117,8 +117,8 @@ function mount(subject = agent) {
 }
 async function edit() {
   fireEvent.click(screen.getByText("Google Drive", { exact: true }));
-  await waitFor(() => expect(screen.getByRole("button", { name: "Edit connection order" })).toBeEnabled());
-  fireEvent.click(screen.getByRole("button", { name: "Edit connection order" }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "Edit connection order · All my agents" })).toBeEnabled());
+  fireEvent.click(screen.getByRole("button", { name: "Edit connection order · All my agents" }));
   fireEvent.click(screen.getByRole("button", { name: "Move Personal up" }));
 }
 it("saves account-wide order from Details with the live version and survives reopening", async () => {
@@ -180,7 +180,7 @@ it("shows only explicitly granted specialist connections and offers no account-w
   expect(list).toHaveTextContent("Personal");
   expect(list).not.toHaveTextContent("Work");
   expect(
-    screen.queryByRole("button", { name: "Edit connection order" }),
+    screen.queryByRole("button", { name: "Edit connection order · All my agents" }),
   ).not.toBeInTheDocument();
   expect(window.fetch).not.toHaveBeenCalled();
 });
@@ -188,19 +188,19 @@ it("makes a destroyed agent's order read-only", async () => {
   mount({ ...agent, status: "destroyed" });
   fireEvent.click(screen.getByText("Google Drive", { exact: true }));
   expect(
-    screen.getByRole("button", { name: "Edit connection order" }),
+    screen.getByRole("button", { name: "Edit connection order · All my agents" }),
   ).toBeDisabled();
   expect(writes).toHaveLength(0);
 });
 
 it("leaves pristine connection-order editing without a save bar or request", async () => {
   mount();
-  const editButton = screen.getByRole("button", { name: "Edit connection order" });
+  const editButton = screen.getByRole("button", { name: "Edit connection order · All my agents" });
   await waitFor(() => expect(editButton).toBeEnabled());
   fireEvent.click(editButton);
   expect(screen.queryByRole("region", { name: "Unsaved changes" })).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "Done" }));
-  expect(screen.getByRole("button", { name: "Edit connection order" })).toBeEnabled();
+  expect(screen.getByRole("button", { name: "Edit connection order · All my agents" })).toBeEnabled();
   expect(screen.queryByRole("button", { name: "Move Personal up" })).toBeNull();
   expect(writes).toEqual([]);
 });

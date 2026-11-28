@@ -4,6 +4,7 @@ import { transitionAssistantIdentity } from "./identity";
 import {
   cmaProxyPath,
   listCmaConnections,
+  listCmaSessionOrigins,
   listCmaAgents,
   listActiveCmaSessions,
   resolveCmaRoutes,
@@ -1267,4 +1268,19 @@ describe("initial task outcome from Agent detail", () => {
     respond(Response.json(agent));
     await expect(result).rejects.toMatchObject({ name: "AbortError" });
   });
+});
+
+it("reads a valid empty scoped CMA origin page through the DEV preview boundary", async () => {
+  const previous = window.location.href;
+  window.history.replaceState(null, "", "/assistant?mock=1&nyxbot=1");
+  // Mock mode is deliberately latched on the session's first API request.
+  const preview = await import("@/lib/mock-data");
+  vi.spyOn(preview, "isMockMode").mockReturnValue(true);
+  try {
+    await expect(listCmaSessionOrigins("owner", new AbortController().signal, "fixture-chat")).resolves.toEqual([]);
+    expect(requests).toHaveLength(0);
+    const aborted = new AbortController();
+    aborted.abort();
+    await expect(listCmaSessionOrigins("owner", aborted.signal, "fixture-chat")).rejects.toMatchObject({ name: "AbortError" });
+  } finally { window.history.replaceState(null, "", previous); }
 });

@@ -1,4 +1,5 @@
 import { drawerSectionInfo } from "./drawer-section-info";
+import { translateUi } from "@/i18n/use-ui-translation";
 import {
   createContext,
   useCallback,
@@ -33,7 +34,7 @@ export const DRAWER_SEARCH_TABS: Record<DrawerSearchTab, string> = {
   overview: "Overview",
   grants: "Access",
   skills: "Skills",
-  memory: "Memory",
+  memory: "Agent memory",
   channels: "Channels",
 };
 export function normalizeDrawerSearch(text: string): string {
@@ -51,7 +52,7 @@ export function matchDrawerEntries(
     .flatMap((entry) => {
       const title = normalizeDrawerSearch(entry.title);
       const all = normalizeDrawerSearch(
-        `${entry.title} ${entry.breadcrumb ?? DRAWER_SEARCH_TABS[entry.tab]} ${entry.keywords ?? ""}`,
+        `${entry.title} ${entry.breadcrumb ?? translateUi(DRAWER_SEARCH_TABS[entry.tab])} ${entry.keywords ?? ""}`,
       );
       if (!words.every((word) => all.includes(word))) return [];
       const rank =
@@ -122,6 +123,8 @@ export const DrawerSearchRevealContext = createContext<{ readonly pages: readonl
 export const DrawerSearchTabContext = createContext<DrawerSearchTab | null>(
   null,
 );
+/** Contextual links use the same retained-page, draft-guard and focus path as search. */
+export const DrawerNavigationContext = createContext<((id: string) => Promise<void>) | null>(null);
 
 /** Registration follows section data and is a no-op outside an agent drawer. */
 export function useDrawerSearchEntries(
@@ -130,7 +133,11 @@ export function useDrawerSearchEntries(
   const context = useContext(DrawerSearchContext);
   const tab = useContext(DrawerSearchTabContext);
   const inherited = useContext(DrawerSearchRevealContext);
-  const currentEntries = entries.map((entry) => ({ ...inherited, ...entry, keywords: `${entry.keywords ?? ""} ${[entry.title, ...(entry.breadcrumb?.split(" › ") ?? [])].map((title) => drawerSectionInfo(title) ?? "").join(" ")}` }));
+  const currentEntries = entries.map((entry) => ({ ...inherited, ...entry,
+    title: entry.title,
+    breadcrumb: entry.breadcrumb?.split(" › ").map((part, index) => index === 0 ? translateUi(part === "Memory" ? "Agent memory" : part) : part).join(" › "),
+    keywords: `${entry.title} ${entry.breadcrumb ?? ""} ${entry.keywords ?? ""} ${[entry.title, ...(entry.breadcrumb?.split(" › ") ?? [])].map((title) => drawerSectionInfo(title) ?? "").join(" ")}`,
+  }));
   const id = useId();
   const latest = useRef(currentEntries);
   useLayoutEffect(() => {

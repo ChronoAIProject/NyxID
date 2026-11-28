@@ -76,6 +76,9 @@ it("creates no connection or Key grant on load; publication is explicit and name
   ).toBeInTheDocument();
   await userEvent.click(button);
   await screen.findByRole("link", { name: "Manage Agent Key access" });
+  expect(screen.getByText("Voice connection created")).toBeVisible();
+  expect(screen.getByText(/All-services Keys can already include it; selected-service Keys may need an access change/)).toBeVisible();
+  expect(screen.getByText(/A created connection does not confirm device readiness/)).toBeVisible();
   const writes = mocks.request.mock.calls.filter(
     ([, options]) => options?.method,
   );
@@ -85,6 +88,21 @@ it("creates no connection or Key grant on load; publication is explicit and name
       { method: "PUT", authorityGuard: expect.any(Function) },
     ],
   ]);
+});
+
+it("reconciles a failed creation through readback without making a second creation request", async () => {
+  let created = false;
+  mocks.request.mockImplementation(async (_path, options) => {
+    if (options?.method === "PUT") { created = true; throw new Error("Creation response was lost"); }
+    return { service: created ? service : null };
+  });
+  show();
+  const create = await screen.findByRole("button", { name: "Create voice connection" });
+  await waitFor(() => expect(create).toBeEnabled());
+  await userEvent.click(create);
+  expect(await screen.findByText("Voice connection created")).toBeVisible();
+  expect(screen.queryByText("Creation response was lost")).toBeNull();
+  expect(mocks.request.mock.calls.filter(([, options]) => options?.method === "PUT")).toHaveLength(1);
 });
 
 it("does not expose publication for shared, organization or destroyed Bots", () => {

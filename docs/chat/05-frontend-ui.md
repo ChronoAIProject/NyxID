@@ -2,6 +2,26 @@
 
 Last verified against Aevatar console commit `e7ba2e6eb` (2026-08-25).
 
+## Agent details
+
+Agent details retains Overview, Access, Skills, Memory and Channels in the existing grouped drawer. Available controls follow live ownership, sharing role, maintainer rights, lifecycle and feature flags.
+
+| Tab | Organization |
+| --- | --- |
+| Overview | Ownership and saved approval source; Profile with identity, model and working Instructions; Tone and style; Call instructions; authorized avatar, governance, sharing, automations and lifecycle controls. |
+| Access | Approval behavior first, followed by service grants, guest operations, machines, saved logins, account connections and optional Device voice. Organization members without maintenance rights can read their allowed grants; shared users manage their own connection consent. |
+| Skills | Attached and built-in skills, Find skills, preload settings, history and learning proposals. Skill access checks verify package readability. |
+| Memory | Personal or organization notes, or role-appropriate private and published team memory for shared agents. |
+| Channels | Eligible connections, registration, owner verification, audience, per-chat posting, diagnostics and the agent-wide Channel progress reply draft. When Channels is unavailable, the progress editor appears in Overview. |
+
+Instructions, approval override and channel progress retain independent drafts across tabs, nested pages and search. Review changes shows each changed section and translated field/value labels while preserving user content. Save changes reports partial success independently; Discard resets remaining drafts to saved values. The visible pinned summary names changed sections. Cross-links and search share the same draft guards, reveal path and focus handling; the readable Access target also exists for organization non-maintainers.
+
+Connection, verification, audience, memory Forget/Delete and skill actions report their immediate outcomes separately. They are not undone by discarding staged forms. Adding or editing a memory note uses its registered Review changes / Save changes form. Learning is analysis of eligible conversations, and may yield a private proposal or none. A publication request can immediately publish and attach under the approving chat’s Full access mode; otherwise the server returns its confirmation card. Threshold editing is available only while learning is enabled, accepts integers 1–50 and displays the server-accepted value after saving.
+
+Register a bot inside Agent details keeps the selected agent and retained drafts. Continue returns to Available bots; registration, connection and messaging-account verification remain separate steps. An organization specialist locks the registration owner. Managed Telegram setup resumes only requests for that owner; unrelated saved requests can be managed separately and cannot change the contextual scope or complete this registration. Choosing another platform remains available.
+
+Search uses translated static labels, full or compact accessible prompts and breadcrumbs, including the Agent memory label. User-provided names, note text and skill titles remain verbatim. Section help caches only its finite static reverse lookup and refreshes when language or catalogs change.
+
 The assistant page presents one continuous transcript, an anchored composer, and a conversation sidebar. Network and stream states change the same surface in place; loading, thinking, streaming, terminal, and recovery states do not replace the application shell.
 
 The NyxBot sidebar lists visible personal and organization specialists, with
@@ -190,7 +210,7 @@ browser artifacts as inert fenced text.
 | Fresh direct channel setup | Existing bot setup dialog | Explicit finish verifies metadata and sends a continuation to the source chat |
 | Telegram request recovery | Existing bot setup dialog, retaining the exact request ID | Plain Back to chat; existing server watch or app webhook owns completion |
 | Agent Key creation | Existing key form and one-time result dialog | Explicit Back to chat verifies the resource ID and sends a continuation to the source chat |
-| Agent details / Grants | Existing sheet over the selected chat | Existing permission controls |
+| Agent details / Access | Existing sheet over the selected chat | Existing permission controls |
 | Automations, Machines, Saved logins and canonical Studio management links | Existing route within the same app | Existing page controls; Back returns to chat |
 
 The shared platform completion contract accepts only a resource kind and UUID.

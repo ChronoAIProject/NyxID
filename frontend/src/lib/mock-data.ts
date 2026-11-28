@@ -1,4 +1,4 @@
-import { mockSetupResponse } from "@/lib/assistant/mock-setup-journeys";
+import { mockCreatedBots, mockSetupResponse } from "@/lib/assistant/mock-setup-journeys";
 import { ApiError } from "@/lib/api-client";
 import { mockSystemSkillsConfig, updateMockSystemSkills, mockSkillCatalog } from "@/lib/assistant/mock-system-skills";
 
@@ -3212,9 +3212,22 @@ export function getMockResponse(
     }
   }
   // Demo events never leave the local fixture.
+  if (method === "GET" && path === "/assistant/nyxagent/cma-sessions") return { sessions: [], connections: [], next_cursor: null };
+  if (method === "GET" && path === "/saved-logins") return [];
+  if (method === "GET" && path === "/service-preferences") return { groups: [], version: 0, updated_at: null };
+  if (method === "GET" && path === "/triggers") return { triggers: [] };
   if (path === "/users/me/analytics/events" && method === "POST") return null;
   const setup = mockSetupResponse(path, method, body);
   if (setup !== undefined) return setup;
+  if (method === "GET" && path === "/channel-bots") {
+    const registered = mockCreatedBots().map((bot) => ({
+      ...bot, user_id: bot.demo_owner_id ?? MOCK_USER.id, is_active: true, webhook_registered: true,
+      platform_bot_id: bot.id, conversations_count: 0,
+      created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+    }));
+    const bots = [...MOCK_CHANNEL_BOTS_DATA, ...registered];
+    return { bots, total: bots.length };
+  }
   if (
     method === "GET" &&
     path === "/catalog" &&

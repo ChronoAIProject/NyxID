@@ -2,7 +2,7 @@ import { Label } from "@/components/ui/label";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { getFormattingLocale } from "@/lib/formatting-locale";
-import { useDrawerSearchEntries } from "@/lib/drawer-search";
+import { DrawerNavigationContext, useDrawerSearchEntries, useDrawerSearchTarget } from "@/lib/drawer-search";
 import { Search } from "lucide-react";
 import {
   GroupedList,
@@ -11,7 +11,7 @@ import {
   GroupedSelectTrigger,
   GroupedDisclosure,
 } from "@/components/ui/grouped-list";
-import { useState, type ReactNode } from "react";
+import { useContext, useRef, useState, type ReactNode } from "react";
 import type { UseQueryResult } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
@@ -128,12 +128,12 @@ function TestResult({
   useUiTranslation();
   if (result.isFetching) {
     return (
-      <p role="status" className="text-13 text-text-tertiary">{translateUi("Testing…")}</p>
+      <p role="status" className="text-13 text-text-tertiary">{translateUi("Checking skill access…")}</p>
     );
   }
   if (result.error) {
     return (
-      <p role="alert" className="text-13 text-destructive">{translateUi("Test failed: ")}{result.error.message}
+      <p role="alert" className="text-13 text-destructive">{translateUi("Could not read skill: ")}{result.error.message}
       </p>
     );
   }
@@ -147,7 +147,7 @@ function TestResult({
   }
   return (
     <div role="status" className="space-y-1">
-      <p className="text-13 text-foreground">{translateUi("Test passed: the agent reads ")}{data.name} {data.version} (
+      <p className="text-13 text-foreground">{translateUi("Package readable: the agent reads ")}{data.name} {data.version} (
         {data.size_bytes.toLocaleString(getFormattingLocale())}{translateUi(" bytes).")}</p>
       {data.excerpt ? (
         <pre
@@ -176,6 +176,8 @@ function AttachedSkill({
   edit,
   children,
   error,
+  pending,
+  saved,
   open,
   onOpenChange,
 }: {
@@ -195,6 +197,8 @@ function AttachedSkill({
   readonly edit: () => void;
   readonly children?: ReactNode;
   readonly error?: string;
+  readonly pending: boolean;
+  readonly saved: boolean;
   readonly open: boolean;
   readonly onOpenChange: (open: boolean) => void;
 }) {
@@ -202,7 +206,7 @@ function AttachedSkill({
   const versions = useSkillVersions(skill.skill_id);
   const latest = versions.data?.items[0]?.version;
   const searchId = `skill-${skill.skill_id}`;
-  useDrawerSearchEntries([{ id: searchId, title: skill.name, breadcrumb: `Skills › ${skill.name}`,
+  useDrawerSearchEntries([{ id: searchId, title: skill.name, breadcrumb: `${translateUi("Skills")} › ${skill.name}`,
     keywords: `${description ?? ""} ${skill.version} ${skill.disabled ? "Disabled" : "Enabled"} preload`,
     pages: [searchId], reveal: () => onOpenChange(true),
   }]);
@@ -238,6 +242,9 @@ function AttachedSkill({
           footer={
             <>
               {description ? <p>{description}</p> : null}
+              <p>{translateUi("Version, enabled state and removal apply immediately. Discard in the drawer does not undo them. Preload edits use Save changes.")}</p>
+              <p>{translateUi("Check skill access verifies that the pinned package can be read. It does not run a task or measure skill quality.")}</p>
+              {open && pending ? <p role="status">{translateUi("Updating skills…")}</p> : open && saved ? <p role="status">{translateUi("Skills updated.")}</p> : null}
               {open && error ? (
                 <p role="alert" className="text-destructive">
                   {error}
@@ -260,10 +267,10 @@ function AttachedSkill({
           <GroupedRow asChild interactive>
             <button
               type="button"
-              aria-label={translateUi("Test {{value1}}", { value1: skill.name })}
+              aria-label={translateUi("Check access to {{value1}}", { value1: skill.name })}
               disabled={testResult?.isFetching}
               onClick={test}
-            >{translateUi("Test skill")}</button>
+            >{translateUi("Check skill access")}</button>
           </GroupedRow>
           {canEdit ? (
             <GroupedRow asChild interactive>
@@ -341,13 +348,20 @@ export function AgentSkills({
   const search = useSkillSearch(query, page);
   const versions = useSkillVersions(selected?.id, versionPage);
   const preview = useSkillPreview(selected?.id, version);
+  const [feedbackSkill, setFeedbackSkill] = useState<string>();
+  const attachedList = useRef<HTMLElement>(null);
   const disabled = readOnly || write.isPending || !current.data;
   const save = (skills: AgentSkill[]) => {
     if (!current.data) return;
+    setFeedbackSkill(activeSkill ?? selected?.id);
     write.mutate(
       { expected_revision: current.data.revision, skills },
       {
         onSuccess: () => {
+          if (activeSkill && !skills.some((skill) => skill.skill_id === activeSkill)) {
+            setActiveSkill(undefined);
+            requestAnimationFrame(() => attachedList.current?.focus({ preventScroll: true }));
+          }
           setSelected(undefined);
           setVersion("");
         },
@@ -377,14 +391,17 @@ export function AgentSkills({
     });
   };
   const [activeSkill, setActiveSkill] = useState<string>();
+  const navigate = useContext(DrawerNavigationContext);
+  const skillSearchInput = useRef<HTMLInputElement>(null);
+  const findSkillsTarget = useDrawerSearchTarget({ id: "find-skills", title: translateUi("Find skills"), breadcrumb: "Skills", keywords: "Search Ornn catalog" });
   const [historyOpen, setHistoryOpen] = useState(false);
   useDrawerSearchEntries([
-    { id: "skill-history", title: "History", breadcrumb: "Skills › History", keywords: "Skill activity", pages: ["skill-history"], reveal: () => setHistoryOpen(true) },
-    ...(!readOnly ? (search.data?.items ?? []).map((item) => ({ id: `catalog-skill-${item.id}`, title: item.name, breadcrumb: "Skills › Find skills", keywords: item.description ?? "",
+    { id: "skill-history", title: translateUi("History"), breadcrumb: translateUi("Skills") + " › " + translateUi("History"), keywords: "Skill activity", pages: ["skill-history"], reveal: () => setHistoryOpen(true) },
+    ...(!readOnly ? (search.data?.items ?? []).map((item) => ({ id: `catalog-skill-${item.id}`, title: item.name, breadcrumb: translateUi("Skills") + " › " + translateUi("Find skills"), keywords: item.description ?? "",
       pages: ["skill-version"], reveal: () => { setActiveSkill(undefined); choose(item.id, item.name); },
     })) : []),
-    ...(history.data?.items ?? []).map((item) => ({ id: `skill-history-${item.id}`, title: HISTORY_LABELS[item.event_type] ?? "Skill activity",
-      breadcrumb: "Skills › History", keywords: `${item.skills.map((pin) => `${pin.name} ${pin.version}`).join(" ")} ${item.created_at} Revision ${item.revision ?? ""}`,
+    ...(history.data?.items ?? []).map((item) => ({ id: `skill-history-${item.id}`, title: translateUi(HISTORY_LABELS[item.event_type] ?? "Skill activity"),
+      breadcrumb: translateUi("Skills") + " › " + translateUi("History"), keywords: `${item.skills.map((pin) => `${pin.name} ${pin.version}`).join(" ")} ${item.created_at} Revision ${item.revision ?? ""}`,
       pages: ["skill-history"], reveal: () => setHistoryOpen(true) })),
   ]);
   const errors = [
@@ -399,10 +416,15 @@ export function AgentSkills({
   return (
     <section
       id={id}
-      tabIndex={id ? -1 : undefined}
+      ref={attachedList}
+      tabIndex={-1}
       aria-label={translateUi("Skills")}
       className="space-y-6 outline-none"
     >
+      {!readOnly ? <GroupedList><GroupedDisclosure onClick={() => {
+        if (navigate) void navigate("find-skills");
+        else { skillSearchInput.current?.scrollIntoView?.({ block: "center" }); skillSearchInput.current?.focus(); }
+      }}>{translateUi("Find skills")}</GroupedDisclosure></GroupedList> : null}
       {current.data?.system_skills && current.data.system_skills.length > 0 && (
         <section aria-label={translateUi("Built-in skills")} className="space-y-3">
           <h4 className="type-section-heading">{translateUi("Built-in skills")}</h4>
@@ -493,7 +515,9 @@ export function AgentSkills({
         title={translateUi("Attached skills")}
         footer={
           <>
-            <p>{translateUi("Teach this agent with pinned Ornn skills. Skills never grant permissions. Up to 16 skills.")}</p>
+            <p>{translateUi("Skills provide reusable procedures; Instructions guide behavior and Memory keeps facts and preferences. Skills never grant permissions. Up to 16 skills.")}</p>
+            {!readOnly ? <p>{translateUi("Attaching, changing, disabling and removing skills apply immediately. Discard in the drawer does not undo them.")}</p> : null}
+            {!activeSkill && write.isPending ? <p role="status">{translateUi("Updating skills…")}</p> : !activeSkill && write.isSuccess ? <p role="status">{translateUi("Skills updated.")}</p> : null}
             {current.data ? (
               <p>
                 {current.data.skills.length}/16 skills · Revision{" "}
@@ -525,12 +549,14 @@ export function AgentSkills({
             error={
               selected
                 ? undefined
-                : errors.map((error) => error!.message).join(" ")
+                : errors.filter((error) => error !== write.error || feedbackSkill === skill.skill_id).map((error) => error!.message).join(" ")
             }
             description={current.data.metadata[skill.skill_id]?.description}
             size={current.data.metadata[skill.skill_id]?.size_bytes}
             disabled={disabled || improve.isPending}
             canDisable={canDisable}
+            pending={write.isPending && feedbackSkill === skill.skill_id}
+            saved={write.isSuccess && feedbackSkill === skill.skill_id}
             canEdit={canEdit && !readOnly}
             test={() => test(skill.skill_id)}
             testResult={testing === skill.skill_id ? tested : undefined}
@@ -568,7 +594,7 @@ export function AgentSkills({
               <>
                 <GroupedList
                   title={translateUi("Draft")}
-                  footer={translateUi("Editing a copy of {{value1}} {{value2}}. Saving changes only the draft; the attached version stays in use until you publish the draft from its confirmation card in NyxBot's home thread.", { value1: skill.name, value2: skill.version })}
+                  footer={translateUi("Editing a copy of {{value1}} {{value2}}. Saving changes only the draft. Publication follows the approving chat’s policy; the attached version stays in use until the revised skill is published and attached.", { value1: skill.name, value2: skill.version })}
                 >
                   <GroupedRow title={translateUi("Skill draft")} />
                 </GroupedList>
@@ -627,7 +653,7 @@ export function AgentSkills({
         <>
           <GroupedList
             title={translateUi("Find skills")}
-            search={{ id: "find-skills", title: "Find skills", breadcrumb: "Skills", keywords: "Search Ornn catalog" }}
+            search={false}
             footer={
               search.data?.items.length === 0
                 ? translateUi("No visible skills found.")
@@ -644,6 +670,7 @@ export function AgentSkills({
                 }}
               >
                 <GroupedInput
+                  ref={(element) => { skillSearchInput.current = element; findSkillsTarget(element); }}
                   className="min-w-0 flex-1"
                   aria-label={translateUi("Search Ornn skills")}
                   placeholder={translateUi("Search Ornn skills")}

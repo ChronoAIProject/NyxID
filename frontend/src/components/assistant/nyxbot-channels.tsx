@@ -27,6 +27,7 @@ import { ChannelChats } from "@/components/assistant/nyxbot-channel-chats";
 import { useChannelBots } from "@/hooks/use-channel-bots";
 import { OrgSpecialistChannelSettings } from "@/components/assistant/org-specialist-channel-settings";
 import { BotAudienceSettings } from "@/components/assistant/bot-audience-settings";
+import { ChannelBotSetup } from "@/components/channels/channel-bot-setup";
 import { useGroupedDraftGuard } from "@/lib/grouped-drafts";
 import { useFeature } from "@/hooks/use-feature-flag";
 import { FEATURE_FLAG } from "@/lib/feature-flags";
@@ -267,9 +268,11 @@ export function ChannelBotsManager({
   }
 
   const [availableOpen, setAvailableOpen] = useState(false);
+  const [registerOpen, setRegisterOpen] = useState(false);
+  const canRegister = !agent || (!agent.share_role && agent.status !== "destroyed" && agent.can_maintain !== false && (agent.owner_kind !== "org" || (orgChannels && adminOf(agent.owner_id))));
   const [search, setSearch] = useState("");
   useDrawerSearchEntries(available.map((bot) => ({ id: `available-bot-${bot.id}`, title: bot.label,
-    breadcrumb: "Channels › Available bots", keywords: channelPlatformName(bot.platform), pages: ["available-bots"],
+    breadcrumb: translateUi("Channels") + " › " + translateUi("Available bots"), keywords: channelPlatformName(bot.platform), pages: ["available-bots"],
     reveal: () => { setSearch(""); setAvailableOpen(true); },
   })));
   return (
@@ -363,7 +366,7 @@ export function ChannelBotsManager({
                   }
                 >
                   <GroupedRow
-                    search={{ id: `connected-bot-${row.id}`, title: row.bot_label, breadcrumb: "Channels › Connected bot", keywords: `${row.bot_username ?? ""} ${channelPlatformName(row.platform)} ${channelStatus[row.status] ?? "Unavailable"} ${row.org_specialist ? "Organization specialist" : row.owner_linked ? "Owner linked" : "Owner not linked"}` }}
+                    search={{ id: `connected-bot-${row.id}`, title: row.bot_label, breadcrumb: translateUi("Channels") + " › " + translateUi("Connected bot"), keywords: `${row.bot_username ?? ""} ${channelPlatformName(row.platform)} ${channelStatus[row.status] ?? "Unavailable"} ${row.org_specialist ? "Organization specialist" : row.owner_linked ? "Owner linked" : "Owner not linked"}` }}
                     title={
                       <>
                         {row.bot_label}
@@ -410,7 +413,7 @@ export function ChannelBotsManager({
                     <GroupedRow
                       asChild
                       interactive
-                      search={{ id: `retry-gateway-${row.id}`, title: "Retry native gateway now", breadcrumb: `Channels › ${row.bot_label}`, keywords: "Discord gateway activation retry" }}
+                      search={{ id: `retry-gateway-${row.id}`, title: translateUi("Retry native gateway now"), breadcrumb: `${translateUi("Channels")} › ${row.bot_label}`, keywords: "Discord gateway activation retry" }}
                     >
                       <button type="button" disabled={busy || !row.owner_linked} onClick={() => void retryNative(row)}>{translateUi("Retry native gateway now")}</button>
                     </GroupedRow>
@@ -488,15 +491,29 @@ export function ChannelBotsManager({
       <GroupedList
         title={translateUi("Channel bots")}
         footer={
-          !available.length && !bots.isPending && !bots.error
-            ? bots.data?.length
-              ? translateUi("All your channel bots are connected to other agents. Move one here with its agent selector in NyxBot settings.")
-              : translateUi("You have no channel bots yet. Register one under Channel Bots, then connect it here.")
-            : undefined
+          <>
+          <p>{translateUi("Connecting and disconnecting bots, account verification, audience changes and per-chat settings apply immediately. Discard in the drawer does not undo them. Channel progress reply uses Save changes.")}</p>
+          {!available.length && !bots.isPending && !bots.error
+            ? canRegister
+              ? translateUi("No additional eligible bots. Register a bot here, or manage existing connections in NyxBot settings.")
+              : translateUi("No additional eligible bots. Ask the agent’s administrator to register or connect a bot.")
+            : null}
+          </>
         }
       >
-        <GroupedDisclosure data-drawer-page-trigger="available-bots" search={{ id: "connect-another-bot", title: "Connect another bot", breadcrumb: "Channels" }} onClick={() => setAvailableOpen(true)}>{translateUi("Connect another bot")}</GroupedDisclosure>
+        <GroupedDisclosure data-drawer-page-trigger="available-bots" search={{ id: "connect-another-bot", title: translateUi("Connect another bot"), breadcrumb: "Channels" }} onClick={() => setAvailableOpen(true)}>{translateUi("Connect another bot")}</GroupedDisclosure>
+        {canRegister ? <GroupedDisclosure search={{ id: "register-channel-bot", title: translateUi("Register a bot"), breadcrumb: "Channels", keywords: "setup first bot messaging" }} onClick={() => setRegisterOpen(true)}>{translateUi("Register a bot")}</GroupedDisclosure> : null}
       </GroupedList>
+      {registerOpen ? <ChannelBotSetup open onOpenChange={setRegisterOpen} defaultOrgId={agent?.owner_kind === "org" ? agent.owner_id ?? null : null} stayInPlace
+        lockOrgScope={agent?.owner_kind === "org"}
+        completionDescription={translateUi("Registration is complete. Continue to choose this bot and connect it to {{agent}}; account verification follows connection.", { agent: agent ? agentLabel(agent) : "NyxBot" })}
+        continueLabel={translateUi("Continue to connection setup")}
+        onContinue={async () => {
+          setRegisterOpen(false);
+          setSearch("");
+          setAvailableOpen(true);
+          await bots.refetch();
+        }} /> : null}
       <GroupedDetail
         searchPage="available-bots"
         open={availableOpen}
@@ -554,7 +571,7 @@ export function ChannelBotsManager({
                       <div className="min-w-0 flex-1">
                         <p>{bot.label}</p>
                         <p className="type-secondary text-text-tertiary">
-                          {channelPlatformName(bot.platform)}
+                          {channelPlatformName(bot.platform)} · {translateUi("Registered; not connected")}
                           {bot.user_id !== currentUserId
                             ? translateUi(" · {{value}}", { value: orgName(bot.user_id) ?? "" })
                             : ""}

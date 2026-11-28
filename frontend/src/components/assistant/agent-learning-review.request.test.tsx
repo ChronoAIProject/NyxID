@@ -56,12 +56,12 @@ it("rebuilds a legacy learned package from the panel instead of publishing it", 
     <AgentLearningReview agentId="agent" />
   </QueryClientProvider>);
   expect(await screen.findByText(/older NyxID version that can't preserve the skill's tools\/runtimes/)).toBeVisible();
-  expect(screen.queryByRole("button", { name: "Publish & request confirmation" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Publish & attach" })).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "Review updated package" }));
   await waitFor(() => expect(posted(`${base}/proposals/proposal/reprepare`)).toBeDefined());
   expect(posted(`${base}/proposals/proposal/reprepare`).body).toBe(JSON.stringify({}));
-  // The rebuilt draft publishes through the ordinary two-step confirmation.
-  expect(await screen.findByRole("button", { name: "Publish & request confirmation" })).toBeVisible();
+  // The rebuilt draft uses the ordinary policy-aware publication request.
+  expect(await screen.findByRole("button", { name: "Publish & attach" })).toBeVisible();
   expect(screen.queryByRole("button", { name: "Review updated package" })).not.toBeInTheDocument();
 });
 
@@ -85,21 +85,41 @@ function show() {
   </QueryClientProvider>);
 }
 
-it("explains the two steps first, then finishes an unattached publication through approve", async () => {
+it("accepts immediate publication on the first explicit request without inventing a second card", async () => {
+  let published = false;
+  fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+    const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+    if (init?.method === "POST") {
+      published = true;
+      return json({ status: "pinned" });
+    }
+    if (url === `${base}/proposals`) return json({ proposals: [{ ...legacyProposal, status: published ? "pinned" : "pending", failure_code: null }] });
+    return json({ enabled: true });
+  });
+  show();
+  expect(await screen.findByText(/The approving chat's mode may differ/)).toBeVisible();
+  fireEvent.click(screen.getByRole("button", { name: "Publish & attach" }));
+  expect(await screen.findByText("pinned")).toBeVisible();
+  expect(posted(`${base}/proposals/proposal/approve`).body).toBe(JSON.stringify({}));
+  expect(screen.queryByRole("button", { name: "Confirm publish & attach" })).not.toBeInTheDocument();
+  expect(fetchMock.mock.calls.filter(([url, init]) => url.endsWith("/approve") && init?.method === "POST")).toHaveLength(1);
+});
+
+it("explains possible immediate publication, then finishes an unattached publication through approve", async () => {
   respondWith(unattached, [
     { status: "confirmation_required", acknowledgement: { acknowledgement_id: "card-9" } },
     { status: "pinned" },
   ]);
   show();
   expect(await screen.findByText("1.0.1")).toBeVisible();
-  expect(screen.getByText(/Publishing takes two steps: this button first asks for an owner confirmation card/)).toBeVisible();
+  expect(screen.getByText(/This request may publish the private skill and attach it immediately/)).toBeVisible();
   // A publication that reached Ornn cannot be rejected or published again.
   expect(screen.queryByRole("button", { name: "Reject" })).not.toBeInTheDocument();
-  expect(screen.queryByRole("button", { name: "Publish & request confirmation" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Publish & attach" })).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "Finish publishing" }));
   await waitFor(() => expect(posted(`${base}/proposals/proposal/approve`).body).toBe(JSON.stringify({})));
   fireEvent.click(await screen.findByRole("button", { name: "Confirm finish publishing" }));
-  expect(screen.getByText(/Step 2 of 2: Confirming this exact card publishes the private skill/)).toBeVisible();
+  expect(screen.getByText(/Confirming this exact card authorizes publication and attachment/)).toBeVisible();
   await waitFor(() => expect(fetchMock.mock.calls.filter(([url, init]) => url === `${base}/proposals/proposal/approve` && (init as RequestInit).method === "POST")).toHaveLength(2));
   const confirm = fetchMock.mock.calls.filter(([url]) => url === `${base}/proposals/proposal/approve`)[1]![1] as RequestInit;
   expect(confirm.body).toBe(JSON.stringify({ acknowledgement_id: "card-9" }));

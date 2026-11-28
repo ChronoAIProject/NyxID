@@ -15,6 +15,15 @@ const ROOT = "/assistant/nyxagent";
 let fixture: NyxAgentHttpFixtures;
 let now: number;
 
+it("provides the live grant inventory shape for the preview Access editor", async () => {
+  const inventory = await call("GET", "/grant-services");
+  expect(inventory.body).toEqual({ services: [{ id: "github", slug: "github", label: "GitHub", executable: true, catalog_slug: "github" }] });
+  expect(getMockResponse("/saved-logins?available=true")).toEqual([]);
+  expect(getMockResponse("/service-preferences")).toEqual({ groups: [], version: 0, updated_at: null });
+  expect(getMockResponse("/triggers")).toEqual({ triggers: [] });
+
+});
+
 async function call(method: string, endpoint: string, body?: unknown) {
   const response = await fixture.handler({
     endpoint: `${ROOT}${endpoint}`,
@@ -382,4 +391,16 @@ describe("built-in skills HTTP fixtures", () => {
       window.history.replaceState(null, "", previous);
     }
   });
+});
+
+it("persists approval, channel progress and call instructions independently in local fixtures", async () => {
+  const { researcher } = await agentIds();
+  await call("PATCH", `/agents/${researcher}`, { access_mode_override: "ask_every_time" });
+  await call("PATCH", `/agents/${researcher}`, { channel_checking_notice: true });
+  await call("PATCH", `/agents/${researcher}`, { voice_instructions: "Speak briefly" });
+  fixture = new NyxAgentHttpFixtures();
+  const { body } = await call("GET", `/agents/${researcher}`);
+  expect(body).toMatchObject({ agent: { access_mode_override: "ask_every_time", channel_checking_notice: true, voice_instructions: "Speak briefly" } });
+  await call("PATCH", `/agents/${researcher}`, { access_mode_override: null });
+  expect((await call("GET", `/agents/${researcher}`)).body).toMatchObject({ agent: { access_mode_override: null, channel_checking_notice: true, voice_instructions: "Speak briefly" } });
 });

@@ -132,7 +132,7 @@ function AvatarEditorPage({
     {
       id: searchPage,
       title: "Edit avatar",
-      breadcrumb: "Overview › Avatar",
+      breadcrumb: translateUi("Overview") + " › " + translateUi("Avatar"),
       keywords:
         "face shape eyes palette colour background dither ASCII style reactions voice motion",
       pages: [searchPage],

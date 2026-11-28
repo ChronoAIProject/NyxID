@@ -80,6 +80,9 @@ export function ChannelBotSetup({
   onComplete,
   onContinue,
   onFinish,
+  continueLabel,
+  completionDescription,
+  lockOrgScope = false,
   returnTo,
   initialTelegramRequestId,
 }: {
@@ -98,6 +101,11 @@ export function ChannelBotSetup({
   readonly onContinue?: () => void | Promise<void>;
   /** A verified, metadata-only completion back to the source chat. */
   readonly onFinish?: (botId: string) => Promise<void>;
+  /** Contextual callers can return to connection setup without claiming an agent binding. */
+  readonly continueLabel?: string;
+  readonly completionDescription?: string;
+  /** Keep contextual organization registration with the selected specialist's owner. */
+  readonly lockOrgScope?: boolean;
   readonly returnTo?: string;
   readonly initialTelegramRequestId?: string;
 }) {
@@ -335,12 +343,13 @@ export function ChannelBotSetup({
                 <p className="type-card-title">
                   {createdBot?.label || label || translateUi("Channel bot created")}
                 </p>
+                {completionDescription && createdBot?.webhook_secret ? <p className="text-13 text-muted-foreground">{translateUi("Save the verification secret below. It will not be shown again.")}</p> : null}
                 <p className="text-13 text-muted-foreground">
-                  {stayInPlace && connectedBotId
+                  {completionDescription ?? (stayInPlace && connectedBotId
                     ? translateUi("{{value1}} is connected. NyxBot will continue in this chat.", { value1: connectedBotLabel || label || "Your bot" })
                     : createdBot?.webhook_secret
                     ? translateUi("Save the verification secret below. It will not be shown again.")
-                    : translateUi("Your bot has been added to NyxID. Open it to review setup and assign an agent.")}
+                    : translateUi("Your bot has been added to NyxID. Open it to review setup and assign an agent."))}
                 </p>
               </div>
             </div>
@@ -395,9 +404,9 @@ export function ChannelBotSetup({
                 }
               }}
             >
-              {stayInPlace && connectedBotId
+              {continueLabel ?? (stayInPlace && connectedBotId
                 ? translateUi("Back to chat")
-                : onContinue ? (returnTo ? translateUi("Back to chat") : translateUi("Continue")) : fullPage ? translateUi("Open channel bot") : translateUi("Done")}
+                : onContinue ? (returnTo ? translateUi("Back to chat") : translateUi("Continue")) : fullPage ? translateUi("Open channel bot") : translateUi("Done"))}
               {fullPage && <ArrowRight aria-hidden="true" />}
             </Button>
           </div>
@@ -408,6 +417,7 @@ export function ChannelBotSetup({
             platform={platform}
             label={label}
             orgId={targetOrgId}
+            expectedOwnerId={lockOrgScope ? defaultOrgId ?? undefined : undefined}
             form={form}
             fullPage={fullPage}
             stayInPlace={stayInPlace}
@@ -440,7 +450,7 @@ export function ChannelBotSetup({
                       id="scope"
                       aria-describedby="scope-description"
                       value={targetOrgId}
-                      disabled={disabled || Boolean(link)}
+                      disabled={disabled || Boolean(link) || lockOrgScope}
                       onChange={(next) =>
                         setValue("target_org_id", next ?? undefined)
                       }
@@ -450,7 +460,7 @@ export function ChannelBotSetup({
                       id="scope-description"
                       className="text-13 text-muted-foreground"
                     >
-                      {scopeDescription ??
+                      {lockOrgScope ? translateUi("This bot must belong to the specialist’s organization to connect to it.") : scopeDescription ??
                         (fullPage
                           ? link ? translateUi("The requesting app selected this account.") : translateUi("Choose your personal account or an organization.")
                           : translateUi("Choose where this bot lives. Org bots are visible to every org admin and can be bound to org-owned agent keys."))}

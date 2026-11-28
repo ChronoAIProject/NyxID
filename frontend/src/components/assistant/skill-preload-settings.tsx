@@ -90,7 +90,7 @@ export function SkillPreloadSettings({
         }
       >
         <GroupedRow
-          title={translateUi("Preload for every turn")}
+          title={translateUi("Include these files in every chat")}
           accessory={
             <Switch
               aria-label={translateUi("Preload {{value1}}", { value1: name })}

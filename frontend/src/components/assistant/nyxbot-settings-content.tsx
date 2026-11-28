@@ -215,7 +215,7 @@ function SettingsForm({ settings }: { readonly settings: NyxAgentSettings }) {
                       className="flex items-start gap-2 text-warning"
                     >
                       <AlertTriangle aria-hidden="true" className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                      <span>{translateUi("Approvals are bypassed: NyxBot deletes keys, channel bots, services and nodes and changes access without asking you first. Deletions cannot be undone. Automation, machine, saved-login, publication and service-approval confirmations are also bypassed and recorded in chat.")}</span>
+                      <span>{translateUi("NyxBot can delete keys, channel bots, services and nodes and change access automatically within its permissions. Deletions cannot be undone. Automatic approvals are recorded in chat; protected organization connections can still require your instruction or approval.")}</span>
                     </div>
                   </GroupedFooter>
                 ) : null}

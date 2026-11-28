@@ -38,14 +38,14 @@ export function GroupedList({
   ...props
 }: ComponentProps<"section"> & {
   readonly info?: string;
-  readonly search?: DrawerSearchMetadata;
+  readonly search?: DrawerSearchMetadata | false;
   readonly title?: string;
   readonly footer?: ReactNode;
 }) {
   const drawer = useContext(DrawerSectionInfoContext);
   const help = info ?? (drawer && title ? drawerSectionInfo(title) : undefined);
   const id = useId();
-  const metadata = search ?? (drawer && title ? { id: `section-${id}`, title } : undefined);
+  const metadata = search === false ? undefined : search ?? (drawer && title ? { id: `section-${id}`, title } : undefined);
   const searchTarget = useDrawerSearchTarget(metadata ? { ...metadata, keywords: `${metadata.keywords ?? ""} ${help ?? ""}` } : undefined);
   const [footerContainer, setFooterContainer] = useState<HTMLDivElement | null>(
     null,

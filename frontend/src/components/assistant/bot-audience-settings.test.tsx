@@ -1,8 +1,9 @@
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { BotAudienceSettings } from "./bot-audience-settings";
+import { DrawerNavigationContext } from "@/lib/drawer-search";
 import {
   assistantAgentSchema,
   nyxAgentChannelAgentSchema,
@@ -24,6 +25,17 @@ const agent = assistantAgentSchema.parse({
   status: "idle",
   created_at: at,
   last_active_at: at,
+});
+
+it.each([false, true])("reveals Access on primary activation and preserves modified links (org: %s)", async (org) => {
+  const navigate = vi.fn().mockResolvedValue(undefined);
+  render(<QueryClientProvider client={client}><DrawerNavigationContext value={navigate}><BotAudienceSettings channel={channel("active", org)} agent={agent} canManage /></DrawerNavigationContext></QueryClientProvider>);
+  const link = await screen.findByRole("link", { name: /Agent details → Access/ });
+  expect(link).toHaveAttribute("href", "/assistant?agent=agent&details=grants");
+  fireEvent.click(link, { ctrlKey: true });
+  expect(navigate).not.toHaveBeenCalled();
+  fireEvent.click(link);
+  expect(navigate).toHaveBeenCalledWith("agent-service-access");
 });
 function channel(status = "active", org = true) {
   return nyxAgentChannelAgentSchema.parse({
@@ -173,7 +185,7 @@ it("enables with a switch-only revision-bound request and shows Grants before en
     }),
   );
   expect(
-    screen.getByRole("link", { name: /Agent details → Grants/ }),
+    screen.getByRole("link", { name: /Agent details → Access/ }),
   ).toHaveAttribute("href", "/assistant?agent=agent&details=grants");
 });
 it("shows one legacy notice without a budget or service editor", async () => {
@@ -181,7 +193,7 @@ it("shows one legacy notice without a budget or service editor", async () => {
   mount();
   expect(
     await screen.findByText(
-      "Existing guest limits are kept. Review them in Grants.",
+      "Existing guest limits are kept. Review them in Access.",
     ),
   ).toBeVisible();
   expect(screen.queryByText(/Enabling guests applies/)).not.toBeInTheDocument();
@@ -199,7 +211,7 @@ it.each([true, false])("explains when the saved list excludes guest services (mo
   mount();
   expect(await screen.findByText(/This bot's saved limits exclude services listed for guests/)).toBeVisible();
   expect(screen.getByText(modelOnly ? "Model-only chat" : /Calendar: Use/)).toBeVisible();
-  expect(screen.getByRole("link", { name: /Agent details → Grants/ })).toHaveAttribute(
+  expect(screen.getByRole("link", { name: /Agent details → Access/ })).toHaveAttribute(
     "href", "/assistant?agent=agent&details=grants",
   );
   expect(writes).toEqual([]);
@@ -268,7 +280,7 @@ it("explains personal billing, links specialist grants and saves private audienc
     screen.queryByText(/paid by the organization/),
   ).not.toBeInTheDocument();
   expect(
-    screen.getByRole("link", { name: /Agent details → Grants/ }),
+    screen.getByRole("link", { name: /Agent details → Access/ }),
   ).toHaveAttribute("href", "/assistant?agent=agent&details=grants");
   await userEvent.click(
     screen.getByRole("combobox", {
