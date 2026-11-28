@@ -170,6 +170,34 @@ test("unsupported and denied proposals never expose ordinary decision controls",
   }
 });
 
+test("waiting and cancelled decoded group proposals retain exact read-only Review and visible state", async () => {
+  const reviewPath = `/assistant?c=nyxg-${"b".repeat(32)}`;
+  for (const [state, label] of [["waiting", "Waiting for approval"], ["cancelled", "Cancelled"]] as const) {
+    for (const version of [1, 2, 3, 4, 5]) {
+      const path = version === 2 ? "/assistant/approvals" : reviewPath;
+      const page = historySchema.parse({
+        conversation: { id: `nyxa-${"a".repeat(32)}`, title: "Review", model: "nyxagent/chat", created_at: "2026-10-28", last_message_at: "2026-10-28", message_count: 0, active_turn: null },
+        messages: [], before_seq: null, approvals: [{ ...approval, review_path: path, execution_proposal: {
+          version, state, supported: true, can_decide: false, review_path: path,
+        } }],
+      });
+      let decisions = 0;
+      const x = render("./AssistantPendingState.tsx", "AssistantApprovalCard", {
+        approval: page.approvals[0], disabled: false, onDecide: async () => { decisions++; },
+      });
+      assert.match(x.text(), new RegExp(label));
+      assert.equal(x.button("Approve and send"), undefined);
+      assert.equal(x.button("Deny"), undefined);
+      assert.ok(x.button("Review in the web app"));
+      x.button("Review in the web app").props.onPress();
+      await x.h.settle();
+      assert.deepEqual(x.openedUrls, [`https://app.example.test${path}`]);
+      assert.equal(decisions, 0);
+      x.h.unmount();
+    }
+  }
+});
+
 test("real chat hook refuses both native choices for decoded proposals, including stale controls, and preserves ordinary approval", async () => {
   const id = `nyxa-${"a".repeat(32)}`;
   const raw = {
@@ -193,7 +221,7 @@ test("real chat hook refuses both native choices for decoded proposals, includin
   h.mount(() => hook(id));
   await h.settle();
   const stale = h.value().decideApproval;
-  for (const proposal of [{ version: 4, state: "pending", supported: true, can_decide: true, review_path: `/assistant?c=${id}&card=${approval.id}` }, { version: 999 }, { version: 4, state: "denied", supported: true, can_decide: false, review_path: `/assistant?c=${id}&card=${approval.id}` }]) {
+  for (const proposal of [...["pending", "waiting", "cancelled", "denied"].map((state) => ({ version: 4, state, supported: true, can_decide: state === "pending", review_path: `/assistant?c=${id}&card=${approval.id}` })), { version: 999 }]) {
     const decoded = historySchema.parse({ ...raw, approvals: [{ ...approval, execution_proposal: proposal }] });
     h.value().history.approvals[0] = decoded.approvals[0];
     for (const approved of [true, false]) await assert.rejects(stale(approval.id, approved), /Review this execution permission/);

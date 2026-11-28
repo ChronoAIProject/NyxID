@@ -5,6 +5,7 @@ import { historySchema } from "./assistantTypes";
 
 const id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const conversation = `nyxa-${"a".repeat(32)}`;
+const group = `nyxg-${"b".repeat(32)}`;
 const path = `/assistant?c=${conversation}&card=${id}`;
 const proposal = { version: 4, state: "pending", supported: true, can_decide: true, review_path: path };
 const raw = {
@@ -16,7 +17,7 @@ function row(value: unknown, topPath?: string) {
 }
 
 test("assistant history retains every server-produced proposal review destination exactly", () => {
-  for (const [version, reviewPath] of [[1, path], [3, path], [4, path], [5, path], [2, "/assistant/approvals"], [1, `/assistant?c=${id}`], [3, `/assistant?c=${id}`]] as const) {
+  for (const [version, reviewPath] of [[1, path], [3, path], [4, path], [5, path], [2, "/assistant/approvals"], [1, `/assistant?c=${group}`], [3, `/assistant?c=${group}`], [4, `/assistant?c=${group}`], [5, `/assistant?c=${group.toUpperCase().replace("NYXG", "nyxg")}`]] as const) {
     const decoded = row({ ...proposal, version, review_path: reviewPath }, reviewPath);
     assert.equal(decoded.execution_proposal?.version, version);
     assert.equal(decoded.review_path, reviewPath);
@@ -24,8 +25,26 @@ test("assistant history retains every server-produced proposal review destinatio
   }
 });
 
+test("every proposal writer state survives history decoding for every supported version", () => {
+  // v1/v3/v4/v5 share resume/lifecycle writers; v2 has its own delivery/watch writers.
+  const states = ["pending", "queued", "preparing", "dispatched", "waiting", "completed", "denied", "expired", "cancelled", "not_sent", "unknown"];
+  for (const version of [1, 2, 3, 4, 5]) for (const state of states) {
+    const reviewPath = version === 2 ? "/assistant/approvals" : path;
+    const decoded = row({ ...proposal, version, state, can_decide: false, review_path: reviewPath });
+    assert.equal(decoded.execution_proposal?.state, state, `v${version} ${state}`);
+    assert.equal(decoded.execution_proposal?.can_decide, false);
+    assert.equal(assistantApprovalReviewPath(decoded), reviewPath);
+  }
+});
+
+test("group review bounds match real nyxg IDs and never accept guessed UUID routes", () => {
+  for (const target of [id, "b".repeat(32), "nyxg-" + "b".repeat(31), "nyxg-" + "z".repeat(32), "NYXG-" + "b".repeat(32), `${group}&card=${id}`, `${group}&c=${group}`, `${group}&g=${group}`]) {
+    assert.equal(assistantApprovalReviewPath(row({ ...proposal, review_path: `/assistant?c=${target}` })), undefined, target);
+  }
+});
+
 test("bad proposal metadata never becomes an ordinary approval or gains a Review link", () => {
-  for (const value of [false, 0, "future", [], {}, { ...proposal, version: 999 }, { ...proposal, supported: false }, { ...proposal, supported: "true" }, { ...proposal, can_decide: undefined }, { ...proposal, state: "unsupported" }, { ...proposal, state: "future_state" }]) {
+  for (const value of [false, 0, "future", [], {}, { ...proposal, version: 999 }, { ...proposal, supported: false }, { ...proposal, supported: "true" }, { ...proposal, can_decide: undefined }, { ...proposal, state: "unsupported" }, { ...proposal, state: "failed" }, { ...proposal, state: "future_state" }]) {
     const decoded = row(value);
     assert.ok(decoded.execution_proposal);
     assert.equal(assistantApprovalReviewPath(decoded), undefined);

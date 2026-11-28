@@ -239,6 +239,7 @@ export class NyxAgentTransport {
   private rowRevisions = new Map<string, number>();
   private pendingTitles = new Map<string, string>();
   private listeners = new Set<() => void>();
+  private historyReadObservers = new Set<(id: string) => (error: unknown) => void>();
   private index = new Map<string, NyxAgentConversation>();
   private histories = new Map<string, NyxAgentHistory>();
   private historyRequests = new Map<string, number>();
@@ -265,6 +266,12 @@ export class NyxAgentTransport {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
   };
+
+  /** Capture source authority before I/O, including pagination and internal refreshes. */
+  observeHistoryReads(observer: (id: string) => (error: unknown) => void): () => void {
+    this.historyReadObservers.add(observer);
+    return () => this.historyReadObservers.delete(observer);
+  }
 
   readonly getRevision = () => this.revision;
 
@@ -425,6 +432,7 @@ export class NyxAgentTransport {
 
   async history(id: string, beforeSeq?: number, reviewCard?: string | null) {
     const generation = this.identity();
+    const onError = [...this.historyReadObservers].map((observe) => observe(id));
     const request = (this.historyRequests.get(id) ?? 0) + 1;
     this.historyRequests.set(id, request);
     // Internal refreshes and pagination retain the linked card. The route
@@ -444,11 +452,16 @@ export class NyxAgentTransport {
     );
     let response: unknown;
     try {
-      response = await fetchHistory(card ? `${endpoint}&card=${encodeURIComponent(card)}` : endpoint);
+      try {
+        response = await fetchHistory(card ? `${endpoint}&card=${encodeURIComponent(card)}` : endpoint);
+      } catch (error) {
+        // Older replicas reject the additive query field; ordinary history still works.
+        if (!card || !(error instanceof ApiError) || error.status !== 400) throw error;
+        response = await fetchHistory(endpoint);
+      }
     } catch (error) {
-      // Older replicas reject the additive query field; ordinary history still works.
-      if (!card || !(error instanceof ApiError) || error.status !== 400) throw error;
-      response = await fetchHistory(endpoint);
+      for (const refuse of onError) refuse(error);
+      throw error;
     } finally {
       this.requests.delete(controller);
     }

@@ -41,6 +41,14 @@ class NyxAgentDecisions {
   private draining = false;
 
   constructor() {
+    nyxAgentTransport.observeHistoryReads((conversationId) => {
+      const source = this.capture(conversationId, useAuthStore.getState().user?.id, getAssistantIdentityRevision());
+      return (error) => {
+        if (this.isCurrentSource(source) && error instanceof ApiError && (error.status === 403 || error.status === 404)) {
+          this.refuse(conversationId);
+        }
+      };
+    });
     nyxAgentTransport.subscribe(() => this.drain());
     subscribeAssistantIdentity(() => {
       this.queued.clear();
@@ -155,11 +163,8 @@ class NyxAgentDecisions {
       const readKey = `${source.identityRevision}:${conversationId}`;
       if (!this.isCurrentSource(source) || this.reads.has(readKey)) continue;
       this.reads.add(readKey);
-      void nyxAgentTransport.history(conversationId).catch((error: unknown) => {
-        if (this.isCurrentSource(source) && error instanceof ApiError && (error.status === 403 || error.status === 404)) {
-          this.refuse(conversationId);
-        }
-      }).finally(() => this.reads.delete(readKey));
+      void nyxAgentTransport.history(conversationId).catch(() => undefined)
+        .finally(() => this.reads.delete(readKey));
     }
   }
 }

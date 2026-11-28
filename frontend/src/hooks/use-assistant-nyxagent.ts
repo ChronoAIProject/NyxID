@@ -237,8 +237,9 @@ export function useNyxAgentAssistantChat({
   const lastDecision = useRef(Number.NEGATIVE_INFINITY);
   // Observation belongs to the view; accepted decisions belong to the transport.
   useEffect(() => {
-    if ((historyDenied || !enabled) && selectedConversationId) nyxAgentDecisions.refuse(selectedConversationId);
-  }, [historyDenied, enabled, selectedConversationId]);
+    if (!enabled && selectedConversationId && userId === useAuthStore.getState().user?.id &&
+      identityRevision === getAssistantIdentityRevision()) nyxAgentDecisions.refuse(selectedConversationId);
+  }, [enabled, selectedConversationId, userId, identityRevision]);
   useEffect(() => {
     if (!enabled || !userId || !selectedConversationId) return;
     return nyxAgentDecisions.observe(selectedConversationId);

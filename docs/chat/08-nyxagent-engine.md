@@ -825,10 +825,13 @@ refreshes history every two seconds, with at most one such read in flight per
 source and identity revision. A selected, enabled source uses its existing
 history observer. This also observes server-started turns that have no local
 stream subscription. The additional timer and reads stop when every queued
-source has an observer or no queued work remains. A source read's 403/404
-discards all surviving entries for that source and identity,
-including cards queued while the read was pending; a refusal for another selected
-thread cannot erase valid work.
+source has an observer or no queued work remains. Every transport history read
+captures its source, acting identity and source authority revision before I/O,
+including selected refreshes, older-page reads and internal stream/recovery/final
+refreshes. A read's 403/404 discards all surviving entries for that same identity
+and source authority revision, including cards queued while the read was pending,
+even after navigation or unmount. A refusal from an earlier identity or authority
+revision, a transient error or a refusal for another source cannot erase valid work.
 Before sending, the browser requires a positive user decision and filters
 non-allowed decisions and malformed deadlines against the latest loaded source
 history. An allowed action must also be before its exact expiry; allowed
@@ -1048,6 +1051,10 @@ deleted with its threads. Deleting a thread deletes only that thread.
 
 Group chats (`assistant_groups`, `assistant_group_messages`, routes
 `/assistant/nyxagent/groups[/{id}[/messages]]`) hold the owner plus 1–8 agents.
+Server-issued `/assistant?c=<group>` links select the same crew as `?g=<group>`.
+The shared browser search parser recognizes group IDs with the `nyxg-` prefix
+and 32 hexadecimal characters before choosing a chat engine; an explicit `g`
+selector takes precedence and draft selection keeps its ordinary behavior.
 A user message goes to the members it `@mentions`, else to the lead (NyxBot when
 it is a member); members hand work on with `@name`, bounded by the owner's
 `max_group_handoffs` (per request, default 6) and `max_group_handoffs_per_hour`

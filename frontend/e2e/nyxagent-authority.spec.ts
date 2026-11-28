@@ -138,6 +138,36 @@ test("an allowed source settles once across the real crew route and return", asy
   expect(await submittedTurns(page, source)).toHaveLength(2);
 });
 
+test("the server-issued c=nyxg Review URL opens the real crew", async ({ page }) => {
+  await openAssistant(page, { faults: { nyxagentEnabled: true } });
+  const sidebar = page.getByRole("navigation", { name: "Agents and conversations" });
+  await sidebar.getByRole("button", { name: "Create new agent", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Crew" }).click();
+  const dialog = page.getByRole("dialog", { name: "New crew", exact: true });
+  await dialog.getByRole("textbox", { name: "Name", exact: true }).fill("Server review destination");
+  await dialog.getByRole("button", { name: "Create crew", exact: true }).click();
+  const heading = page.getByRole("heading", { name: "Server review destination", exact: true });
+  await expect(heading).toBeVisible();
+  const group = new URL(page.url()).searchParams.get("g")!;
+  expect(group).toMatch(/^nyxg-[a-f0-9]{32}$/);
+  // This is AssistantPage::Group's emitted path, plus the local fixture marker.
+  await page.goto(`/assistant?c=${group}&mock=1`, { waitUntil: "domcontentloaded" });
+  await expect(heading).toBeVisible();
+  expect(new URL(page.url()).searchParams.get("c")).toBe(group);
+  await sendMessage(page, "Summarize this crew's next step");
+  await expect(page.getByRole("main").getByText("Summarize this crew's next step", { exact: true })).toBeVisible();
+  await expect(heading).toBeVisible();
+  const history = await page.evaluate(async (id) => {
+    const response = await globalThis.__nyxidAssistantHttpMock!({
+      endpoint: `/assistant/nyxagent/groups/${id}/messages?limit=100`, init: { method: "GET" },
+    });
+    return await response!.json() as { group: { id: string }; messages: { role: string; text: string }[] };
+  }, group);
+  expect(history.group.id).toBe(group);
+  expect(history.messages.filter((message) => message.role === "user").map((message) => message.text))
+    .toEqual(["Summarize this crew's next step"]);
+});
+
 test("an allowed source survives selecting a restricted specialist without taking its focus", async ({ page }) => {
   await openAssistant(page, { faults: { nyxagentEnabled: true, markContinuations: true, progressStallMs: 7000 } });
   await page.evaluate(() => {

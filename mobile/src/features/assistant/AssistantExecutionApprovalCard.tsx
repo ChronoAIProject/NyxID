@@ -25,7 +25,9 @@ export function AssistantExecutionApprovalCard({ approval, disabled }: {
   const proposal = approval.execution_proposal;
   const path = assistantApprovalReviewPath(approval);
   const label = proposal?.state === "denied" ? "Request denied"
-    : proposal?.state === "expired" ? "expired" : "Review in the web app";
+    : proposal?.state === "expired" ? "expired"
+    : proposal?.state === "cancelled" ? "Cancelled"
+    : proposal?.state === "waiting" ? "Waiting for approval" : "Review in the web app";
   async function openReview() {
     const current = assistantApprovalReviewPath(approval);
     if (disabled || opening.current || !current) return;

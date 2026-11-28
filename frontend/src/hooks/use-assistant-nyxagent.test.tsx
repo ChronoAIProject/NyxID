@@ -5,6 +5,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { continuationForAll, continuationText, useNyxAgentAssistantChat, useNyxAgentThreads } from "./use-assistant-nyxagent";
 import { nyxBotQueryKeys } from "@/hooks/use-nyxbot-agents";
 import { nyxAgentTransport } from "@/lib/assistant/nyxagent-transport";
+import { nyxAgentDecisions } from "@/lib/assistant/nyxagent-decisions";
 import { useAuthStore } from "@/stores/auth-store";
 import { useCreditsDenialStore } from "@/stores/credits-denial-store";
 import type { NyxAgentAcknowledgement, NyxAgentHistory } from "@/schemas/assistant-nyxagent";
@@ -805,6 +806,90 @@ it.each([403, 404])("an off-selection %s fences cards queued during the same sou
   await act(() => vi.advanceTimersByTimeAsync(4000));
   expect(sourceReads).toBe(1);
   expect(send).not.toHaveBeenCalled();
+  f.unmount();
+});
+
+it.each([403, 404, 500])("source-owned history reads fence late %s across navigation and unmount", async (status) => {
+  for (const entryPoint of ["refreshHistory", "loadOlder", "transport"] as const) {
+    for (const leave of ["navigate", "unmount"] as const) {
+      page.before_seq = 1;
+      page.conversation.active_turn = { turn_id: "turn", started_at: "2026-09-17T00:00:00Z", activities: [], attachments: [] };
+      const f = decisionNavigationFixture(true);
+      await waitFor(() => expect(f.result.current.acknowledgements).toHaveLength(1));
+      const send = vi.spyOn(nyxAgentTransport, "send").mockResolvedValue(undefined);
+      await act(async () => {
+        const decision = f.result.current.decideAcknowledgement({ id: f.card.id, choice: "allow" });
+        f.resolve(); await decision;
+      });
+      let release!: (response: Response) => void;
+      const pending = new Promise<Response>((resolve) => { release = resolve; });
+      const mock = globalThis.__nyxidAssistantHttpMock!;
+      let reads = 0;
+      globalThis.__nyxidAssistantHttpMock = (r) => {
+        if (r.endpoint.includes(`/conversations/${id}`) && r.init.method === "GET") { reads++; return pending; }
+        return mock(r);
+      };
+      let read!: Promise<unknown>;
+      act(() => {
+        read = (entryPoint === "transport" ? nyxAgentTransport.history(id) : f.result.current[entryPoint]()).catch(() => undefined);
+      });
+      await waitFor(() => expect(reads).toBe(1));
+      if (leave === "unmount") f.unmount();
+      else f.rerender({ selected: f.second, enabled: true });
+      await act(async () => { release(new Response(null, { status })); await read; });
+      globalThis.__nyxidAssistantHttpMock = mock;
+      page.conversation.active_turn = null;
+      await act(() => nyxAgentTransport.history(id));
+      expect(send.mock.calls.length, `${entryPoint} ${leave}`).toBe(status === 500 ? 1 : 0);
+      f.unmount();
+      nyxAgentTransport.clear();
+      send.mockRestore();
+    }
+  }
+});
+
+it.each(["actor", "authority"])("a late prior %s refusal cannot poison new queued work on the same source", async (transition) => {
+  const f = decisionNavigationFixture(true);
+  await waitFor(() => expect(f.result.current.acknowledgements).toHaveLength(1));
+  const send = vi.spyOn(nyxAgentTransport, "send").mockResolvedValue(undefined);
+  const complete = vi.spyOn(nyxAgentDecisions, "complete");
+  let release!: (response: Response) => void;
+  const pending = new Promise<Response>((resolve) => { release = resolve; });
+  const mock = globalThis.__nyxidAssistantHttpMock!;
+  let first = true;
+  const secondCard: NyxAgentAcknowledgement = { ...f.card, id: "12345678-1234-4123-8123-123456789013", status: "allowed", decided_by: "user" };
+  globalThis.__nyxidAssistantHttpMock = (r) => {
+    if (r.endpoint.endsWith(`/acknowledgements/${secondCard.id}`)) return json(secondCard);
+    if (r.endpoint.includes(`/conversations/${id}`) && r.init.method === "GET" && first) {
+      first = false; return pending;
+    }
+    return mock(r);
+  };
+  let read!: Promise<unknown>;
+  act(() => { read = f.result.current.refreshHistory(); });
+  await waitFor(() => expect(first).toBe(false));
+  if (transition === "actor") {
+    const owner = useAuthStore.getState().user!;
+    act(() => {
+      useAuthStore.getState().setUser({ ...owner, id: "another-owner" });
+      useAuthStore.getState().setUser(owner);
+    });
+  } else {
+    f.rerender({ selected: id, enabled: false });
+    f.rerender({ selected: id, enabled: true });
+  }
+  page.acknowledgements = [secondCard];
+  await act(() => nyxAgentTransport.history(id));
+  let decision!: Promise<unknown>;
+  act(() => { decision = f.result.current.decideAcknowledgement({ id: secondCard.id, choice: "allow" }); });
+  // The new decision is queued before its invalidation waits for the old read.
+  await waitFor(() => expect(complete).toHaveBeenCalledWith(expect.anything(), "allow", secondCard));
+  await act(async () => { release(new Response(null, { status: 403 })); await read; await decision; });
+  expect(send).not.toHaveBeenCalled();
+  page.conversation.active_turn = null;
+  await act(() => nyxAgentTransport.history(id));
+  expect(send).toHaveBeenCalledOnce();
+  expect(send.mock.calls[0]?.[4]).toEqual(expect.objectContaining({ acknowledgementId: secondCard.id }));
   f.unmount();
 });
 
