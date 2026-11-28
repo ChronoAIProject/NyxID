@@ -516,8 +516,8 @@ only through
 New threads inherit the agent's configured profile; existing threads keep their
 configured profile, even when the agent default changes. Neither the request's
 model nor its service selector chooses this mapping. These mirror NyxAgent's checked-in default `config/policy*.json` at
-`0f990f21aa5ac8411f1bec0b6ea55d4ec9c2e894`: chat and research use
-`chrono-llm-public` (`gpt-5.6-sol` / `gpt-6-astra`), and channel uses
+`50cb4dc2247876978c6efdeddb243f612f3842df`: chat and research use
+`chrono-llm-public` (`gpt-6.2-sol` / `gpt-6.2-astra`), and channel uses
 `llm-deepseek` (`deepseek-flash`), all at `responses` (the catalog base URL owns any version prefix). Deployments that customize
 NyxAgent's policy must align this NyxID configuration too. Whenever NyxAgent's
 profile → model/service/path mapping changes, update `model-routes.json` with it.
