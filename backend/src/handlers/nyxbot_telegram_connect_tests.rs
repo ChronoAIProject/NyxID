@@ -8,6 +8,11 @@ use std::sync::atomic::AtomicBool;
 type CreateRefusal = (u16, Value, Option<i64>);
 
 const CLIENT_SECRET: &str = "local-telegram-gateway-client";
+const BOT_TOKEN: &str = "123:local-telegram-connect";
+const WEBHOOK_SECRET: &str = "local-telegram-connect-webhook";
+
+#[path = "nyxbot_telegram_photo_tests.rs"]
+mod photo;
 
 #[derive(Clone)]
 pub(super) struct CreatorAuth {
@@ -19,6 +24,7 @@ pub(super) struct CreatorAuth {
     delete_refusal: Arc<Mutex<Option<(u16, Value)>>>,
     record_absence: Arc<Mutex<Option<(u16, Value)>>>,
     create_cancellation: Arc<Mutex<Option<(u16, Value)>>>,
+    relay_recovery: Arc<AtomicBool>,
 }
 
 pub(super) async fn authorize(
@@ -66,6 +72,14 @@ pub(super) async fn authorize(
     }
     if !allowed {
         return StatusCode::FORBIDDEN.into_response();
+    }
+    if request_path == "/channel-capabilities"
+        && auth
+            .relay_recovery
+            .load(std::sync::atomic::Ordering::SeqCst)
+    {
+        return Json(json!({"relay_authoring":{"response_recovery_providers":["nyxbot"]}}))
+            .into_response();
     }
     if cancellation && let Some((status, receipt)) = auth.create_cancellation.lock().await.clone() {
         if method == "GET" {
@@ -216,6 +230,7 @@ async fn fixture(platform: &str) -> Fixture {
         delete_refusal: Default::default(),
         record_absence: Default::default(),
         create_cancellation: Default::default(),
+        relay_recovery: Default::default(),
     };
     let (gateway_calls, gateway) = mock_gateway_with_creator_auth(
         &mut state,
@@ -237,7 +252,22 @@ async fn fixture(platform: &str) -> Fixture {
     if platform == "telegram-new" {
         bot.insert("credential_source", "platform");
     }
-    let bot: ChannelBot = bson::from_document(bot).unwrap();
+    bot.insert("webhook_secret_hash", sha256_hex(WEBHOOK_SECRET));
+    let mut bot: ChannelBot = bson::from_document(bot).unwrap();
+    bot.bot_token_encrypted = crate::crypto::record_field::encrypt(
+        &state.encryption_keys,
+        crate::models::channel_bot::COLLECTION_NAME,
+        &bot.id,
+        OWNER,
+        "bot_token_encrypted",
+        BOT_TOKEN.as_bytes(),
+    )
+    .await
+    .unwrap();
+    if state.encryption_keys.contextual_record_writes() {
+        bot.secret_context_versions
+            .insert("bot_token_encrypted".into(), 3);
+    }
     state
         .db
         .collection::<ChannelBot>(crate::models::channel_bot::COLLECTION_NAME)
@@ -298,6 +328,22 @@ async fn provider_message(
     sender: i64,
     number: i64,
 ) -> String {
+    let (body, id) = provider_event(
+        f,
+        row,
+        json!({
+            "update_id":number,"message":{"message_id":number,"chat":{"id":sender,"type":"private"},
+            "from":{"id":sender,"is_bot":false},"text":text},
+        }),
+    )
+    .await;
+    let raw = decrypt_agent_key(&f.state, row).await.unwrap().unwrap();
+    let response = respond(&f.state, &raw, &body, &format!("evt_{id}")).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    body_text(response).await
+}
+
+async fn provider_event(f: &Fixture, row: &NyxbotChannel, update: Value) -> (Value, String) {
     let route = f
         .state
         .db
@@ -313,10 +359,18 @@ async fn provider_message(
         &f.state.token_exchange_cache,
     )
     .unwrap();
-    let inbound = adapter.parse_inbound(&serde_json::to_vec(&json!({
-        "update_id":number,"message":{"message_id":number,"chat":{"id":sender,"type":"private"},
-        "from":{"id":sender,"is_bot":false},"text":text},
-    })).unwrap()).await.unwrap().remove(0);
+    let raw = serde_json::to_vec(&update).unwrap();
+    let headers = HeaderMap::from_iter([(
+        "x-telegram-bot-api-secret-token".parse().unwrap(),
+        WEBHOOK_SECRET.parse().unwrap(),
+    )]);
+    adapter
+        .verify_webhook(&f.bot, None, &headers, &raw)
+        .await
+        .unwrap();
+    let mut inbound = adapter.parse_inbound(&raw).await.unwrap();
+    assert_eq!(inbound.len(), 1);
+    let inbound = inbound.remove(0);
     let id = Uuid::new_v4().to_string();
     let source = crate::services::channel_relay_service::store_inbound_message_with_id(
         &f.state.db,
@@ -331,16 +385,129 @@ async fn provider_message(
     .await
     .unwrap();
     assert_eq!(source.platform, f.bot.platform);
-    let raw = decrypt_agent_key(&f.state, row).await.unwrap().unwrap();
-    let mut body = event(text, &sender.to_string(), &id);
+    assert_eq!(source.original_message, Some(true));
+    let payload = crate::services::channel_relay_service::build_callback_payload(
+        &source,
+        &route,
+        &row.route_api_key_id,
+        "gateway",
+        &inbound,
+        None,
+        &f.state.config.base_url,
+    );
+    assert_eq!(payload.raw_platform_data.as_ref(), Some(&update));
+    assert_eq!(payload.message_id, source.id);
+    assert_eq!(payload.platform, f.bot.platform);
+    assert_eq!(canonical_platform(&payload.platform), row.platform);
+    assert_eq!(payload.agent.api_key_id, row.route_api_key_id);
+    assert_eq!(
+        Some(payload.conversation.id.as_str()),
+        row.route_id.as_deref()
+    );
+    assert_eq!(payload.conversation.id, route.id);
+    assert_eq!(payload.conversation.conversation_type, "private");
+    assert_eq!(
+        payload.conversation.platform_id,
+        update["message"]["chat"]["id"]
+            .as_i64()
+            .unwrap()
+            .to_string()
+    );
+    assert_eq!(
+        payload.sender.platform_id,
+        update["message"]["from"]["id"]
+            .as_i64()
+            .unwrap()
+            .to_string()
+    );
+    let expected_text = update["message"]["text"]
+        .as_str()
+        .or_else(|| update["message"]["caption"].as_str());
+    assert_eq!(payload.content.text.as_deref(), expected_text);
+    let mut body = event(
+        payload.content.text.as_deref().unwrap(),
+        &payload.sender.platform_id,
+        &payload.message_id,
+    );
     body["event_context"]["channel_id"] = json!(row.gateway_channel_id);
     let activity = &mut body["event_context"]["activity"];
     activity.as_object_mut().unwrap().remove("telegram_input");
-    activity["source"]["route_id"] = json!(route.id);
-    activity["conversation"]["id"] = json!(sender.to_string());
-    let response = respond(&f.state, &raw, &body, &id).await;
-    assert_eq!(response.status(), StatusCode::OK);
-    body_text(response).await
+    activity["source"]["platform"] = json!(canonical_platform(&payload.platform));
+    activity["source"]["route_id"] = json!(payload.conversation.id);
+    activity["conversation"]["id"] = json!(payload.conversation.platform_id);
+    activity["conversation"]["kind"] = json!(payload.conversation.conversation_type);
+    activity["actor"]["display_name"] = json!(payload.sender.display_name);
+    activity["occurred_at"] = json!(payload.timestamp);
+    if update["message"].get("photo").is_some() {
+        assert_eq!(payload.content.content_type, "image");
+        assert_eq!(payload.content.attachments.len(), 1);
+        let own = update["message"]["photo"]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap();
+        assert_eq!(source.attachments.len(), 1);
+        assert_eq!(
+            source.attachments[0].provider_ref,
+            own["file_id"].as_str().unwrap()
+        );
+        assert_eq!(
+            payload.content.attachments[0].url,
+            source.attachments[0].provider_ref
+        );
+        assert_eq!(payload.content.attachments[0].content_type, "image");
+        assert_eq!(
+            payload.content.attachments[0].size_bytes,
+            own["file_size"].as_u64()
+        );
+        assert_eq!(
+            payload.content.attachments[0].download_url,
+            format!(
+                "{}/api/v1/channel-relay/messages/{id}/attachments/0",
+                f.state.config.base_url.trim_end_matches('/')
+            )
+        );
+        // CMAEG 217d66fa36c0: a relayed Telegram PhotoSize remains an image/photo,
+        // with a canonical activity platform and a relay attachment index.
+        activity["kind"]["attachments"] = json!([{
+            "kind":"image", "variant":"photo", "mime_type":"image/jpeg",
+            "reference":format!("telegram:{}", own["file_unique_id"].as_str().unwrap()),
+            "source":{"type":"nyxid_relay","index":0},
+            "width":own["width"], "height":own["height"], "size_bytes":payload.content.attachments[0].size_bytes,
+        }]);
+    } else {
+        assert_eq!(payload.content.content_type, "text");
+        assert!(payload.content.attachments.is_empty());
+    }
+    // CMA 217d66fa36c0: turns/{preparation,render_input,render_media,metadata}.
+    // The created channel uses conversation_and_sender, whose serialized key
+    // joins the real chat and actor with U+001F (cmaeg-core activity.rs).
+    assert!(
+        f.gateway_calls
+            .lock()
+            .await
+            .iter()
+            .any(|(method, _, request)| {
+                method == "POST"
+                    && request["partition"] == json!({"version":1,"key":"conversation_and_sender"})
+            })
+    );
+    let partition_key = format!(
+        "{}\u{1f}{}",
+        payload.conversation.platform_id, payload.sender.platform_id
+    );
+    body["metadata"] = json!({
+        "cmaeg.channel": &sha256_hex(row.gateway_channel_id.as_deref().unwrap())[..16],
+        "cmaeg.event": payload.message_id,
+        "cmaeg.partition": &sha256_hex(partition_key)[..16],
+        "cmaeg.actor": payload.sender.platform_id,
+    });
+    // Real sealed event references exceed the metadata renderer's 512-byte cap;
+    // the opaque local reference stays in event_context, never command metadata.
+    body["event_context"]["event_ref"] = json!(format!("cmaeg1.ev.{}", sha256_hex(&id).repeat(10)));
+    body["input"][0]["content"][0]["text"] =
+        json!(photo::rendered_input(&body["event_context"]["activity"],));
+    (body, id)
 }
 
 #[test]
@@ -349,7 +516,7 @@ fn telegram_personal_specialist_connect_introspection_owner_link_and_turn() {
         "telegram_personal_specialist_connect_introspection_owner_link_and_turn",
         || async {
             for platform in ["telegram-new", "telegram"] {
-                let f = fixture(platform).await;
+                let mut f = fixture(platform).await;
                 let (row, link) = connect(&f.state, OWNER, None, &f.bot.id, &f.specialist)
                     .await
                     .unwrap();
@@ -436,10 +603,7 @@ fn telegram_personal_specialist_connect_introspection_owner_link_and_turn() {
                 let row = load_channel(&f.state, OWNER, &row.id).await.unwrap();
                 assert_eq!(row.owner_sender_ids, ["77"]);
                 assert!(row.link_code_hash.is_none());
-                let answer =
-                    provider_message(&f, &row, "who are you, local specialist check", 77, 3).await;
-                assert!(answer.contains("Here is your answer"), "{answer}");
-                assert_eq!(f.model_calls.lock().await.len(), 1);
+                photo::text_and_own_photo(&mut f, &row).await;
                 let saved = engine::get(&f.state.db, OWNER, &f.home.id).await.unwrap();
                 assert_eq!(saved.agent_id.as_deref(), Some(f.specialist.id.as_str()));
                 assert!(!saved.guest_turn);
