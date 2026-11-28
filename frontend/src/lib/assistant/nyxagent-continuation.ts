@@ -87,4 +87,3 @@ function continuationInstruction(acknowledgement: NyxAgentAcknowledgement): stri
 export function continuationForAll(acknowledgements: readonly NyxAgentAcknowledgement[]): string {
   return acknowledgements.map(continuationText).join("\n");
 }
-
