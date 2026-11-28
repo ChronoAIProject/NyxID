@@ -3,7 +3,7 @@ import re
 import unittest
 from pathlib import Path
 
-import yaml
+from workflow_test_helpers import USES_WITH_TAG, load_workflow_with_action_tags
 
 
 def evaluate(expression, context):
@@ -82,9 +82,9 @@ class CrashArtifactSecretsTests(unittest.TestCase):
             evaluate("${{ arbitrary() }}", context)
 
     def test_upload_secret_mapping_is_empty_except_configured_frontend_amd64(self):
-        workflow = yaml.safe_load(Path('.github/workflows/publish-images.yml').read_text())
+        workflow = load_workflow_with_action_tags('.github/workflows/publish-images.yml')
         step = next(s for s in workflow['jobs']['build']['steps'] if s.get('id') == 'build')
-        self.assertEqual(step['uses'], 'docker/build-push-action@v7')
+        self.assertEqual(step.get(USES_WITH_TAG), 'docker/build-push-action@v7')
         self.assertNotIn('secrets', step['with'])
         mapping = step['with']['secret-envs']
         self.assertEqual(mapping, "${{ matrix.component == 'frontend' && matrix.platform == 'linux/amd64' && secrets.CRASH_ARTIFACTS_SENTRY != '' && 'crash_artifacts_sentry=CRASH_ARTIFACTS_SENTRY' || '' }}")
