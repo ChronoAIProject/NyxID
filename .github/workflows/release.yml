@@ -59,7 +59,7 @@ jobs:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       # Bumped from @v4 by hand to match repo convention; reapply if dist init regenerates.
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -142,7 +142,7 @@ jobs:
         run: |
           git config --global core.longpaths true
       # Bumped from @v4 by hand to match repo convention; reapply if dist init regenerates.
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           submodules: recursive
@@ -243,7 +243,7 @@ jobs:
       BUILD_MANIFEST_NAME: target/distrib/global-dist-manifest.json
     steps:
       # Bumped from @v4 by hand to match repo convention; reapply if dist init regenerates.
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           submodules: recursive
@@ -293,7 +293,7 @@ jobs:
       RELEASE_INTEGRITY_SIGNING_KEY: ${{ secrets.RELEASE_INTEGRITY_SIGNING_KEY }}
       RELEASE_INTEGRITY_PUBLISH_TOKEN: ${{ secrets.RELEASE_INTEGRITY_PUBLISH_TOKEN }}
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -354,7 +354,7 @@ jobs:
       val: ${{ steps.host.outputs.manifest }}
     steps:
       # Bumped from @v4 by hand to match repo convention; reapply if dist init regenerates.
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -462,7 +462,7 @@ jobs:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       # Bumped from @v4 by hand to match repo convention; reapply if dist init regenerates.
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           submodules: recursive
