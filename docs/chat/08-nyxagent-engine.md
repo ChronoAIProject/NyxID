@@ -801,8 +801,55 @@ still running (cards appear as soon as the tool call is refused, usually before
 the reply finishes), the running turn cannot observe the decision: NyxAgent ends
 a turn on a card and answers same-turn repeats locally. The browser therefore
 queues the continuation and sends one marked continuation turn covering every card allowed
-during that turn as soon as it settles; nothing is sent if the user pressed Stop.
+during that turn as soon as it settles. A newly settled Stop for the decision's
+turn suppresses that decision's continuation; a cancellation already settled
+before the owner's new explicit Allow does not suppress an otherwise valid card.
+The browser captures the active turn and latest transcript sequence at the click
+and checks for a later failed assistant reply with `cancelled` on that exact turn.
+If an idle source becomes busy while the decision is pending, its queue binds the
+turn active at queueing. Other turns' cancellations do not suppress the decision,
+and cards sharing a queue retain their individual turn fences. Backend card
+validity and task-cancellation checks remain authoritative.
 **Deny** sends nothing.
+
+The browser captures the source conversation and acting account, including its
+identity revision, when the owner submits the decision, before asynchronous
+mutation middleware. The request, continuation and history invalidation retain
+that source across navigation. An idle source resumes immediately; an active
+source keeps its own queue until settlement, even while another thread is open.
+The transport owns this in-memory queue and pending decision completion across
+chat-view unmounts, including navigation into a crew or a restricted specialist.
+A view's disabled state fences only that view's source; it cannot discard another
+thread's work. For queued sources without an active history observer, the browser
+refreshes history every two seconds, with at most one such read in flight per
+source and identity revision. A selected, enabled source uses its existing
+history observer. This also observes server-started turns that have no local
+stream subscription. The additional timer and reads stop when every queued
+source has an observer or no queued work remains. Every transport history read
+captures its source, acting identity and source authority revision before I/O,
+including selected refreshes, older-page reads and internal stream/recovery/final
+refreshes. A read's 403/404 discards all surviving entries for that same identity
+and source authority revision, including cards queued while the read was pending,
+even after navigation or unmount. A refusal from an earlier identity or authority
+revision, a transient error or a refusal for another source cannot erase valid work.
+Before sending, the browser requires a positive user decision and filters
+non-allowed decisions and malformed deadlines against the latest loaded source
+history. An allowed action must also be before its exact expiry; allowed
+non-action grants and used receipts retain the server's post-deadline semantics.
+If history has changed since the decision response, an absent card is also
+unavailable. The continuation text
+and `acknowledgement_id` use only the surviving cards, with the first survivor as
+the marker; an empty queue sends nothing. Idle-source decisions apply the same
+eligibility rules to the returned card and start before mutation-refresh
+completion. These checks do not grant authority; server card and turn admission
+remain decisive.
+Automatic continuations never change the selected thread, and a late decision
+does not restore composer focus in another thread or account. Account transitions
+(including switching away and back) discard queued continuations. Queue state is
+not restored on a browser reload. Server-owned continuations remain server-owned.
+Each allowed-card instruction includes the shared task-continuation wording in
+`shared/allowed-card-continuation.json`, which instructs the assistant to continue
+the original task until it finishes or needs user input.
 
 Independently, every turn's input context includes a note listing the cards the
 user allowed or denied since the previous user message, oldest first and at most
@@ -1004,6 +1051,10 @@ deleted with its threads. Deleting a thread deletes only that thread.
 
 Group chats (`assistant_groups`, `assistant_group_messages`, routes
 `/assistant/nyxagent/groups[/{id}[/messages]]`) hold the owner plus 1–8 agents.
+Server-issued `/assistant?c=<group>` links select the same crew as `?g=<group>`.
+The shared browser search parser recognizes group IDs with the `nyxg-` prefix
+and 32 hexadecimal characters before choosing a chat engine; an explicit `g`
+selector takes precedence and draft selection keeps its ordinary behavior.
 A user message goes to the members it `@mentions`, else to the lead (NyxBot when
 it is a member); members hand work on with `@name`, bounded by the owner's
 `max_group_handoffs` (per request, default 6) and `max_group_handoffs_per_hour`

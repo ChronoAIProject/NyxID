@@ -1177,7 +1177,10 @@ function NyxAgentThreadPage() {
         onRequestAgain={!chat.isStreaming && !destroyed ? () => requestConfirmationAgain(acknowledgement.id, "confirmation") : undefined}
         onDecision={async (choice, acceptReducedScope) => {
           await chat.decideAcknowledgement({ id: acknowledgement.id, choice, acceptReducedScope });
-          if (!pinned) setFocusRequest((value) => value + 1);
+          if (!pinned && selection.current === selectedId &&
+            setupIdentityRevision === getAssistantIdentityRevision()) {
+            setFocusRequest((value) => value + 1);
+          }
         }}
       />
     </ReviewCardTarget>;

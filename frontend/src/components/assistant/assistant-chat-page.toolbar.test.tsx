@@ -35,6 +35,7 @@ const state = vi.hoisted(() => ({
   shared: false,
   consentPending: false,
   send: vi.fn(async () => undefined),
+  decideAcknowledgement: vi.fn(async (): Promise<void> => undefined),
   agentLoaded: true,
   desktop: true,
   voice: false,
@@ -109,7 +110,7 @@ vi.mock("@/hooks/use-assistant-nyxagent", () => ({ useNyxAgentAssistantChat: () 
     id: "append", status: state.approvalStatus, summary: approvalMessage.content, service_name: "Sheets",
     approval_mode: "per_request", expires_at: state.approvalDeadline,
   }] : [], conversations: [], threadsLoaded: false,
-  send: state.send, stop: vi.fn(), refreshHistory: state.refreshHistory, deleteConversation: vi.fn(),
+  send: state.send, decideAcknowledgement: state.decideAcknowledgement, stop: vi.fn(), refreshHistory: state.refreshHistory, deleteConversation: vi.fn(),
 }) }));
 vi.mock("@/lib/assistant/nyxagent-transport", () => ({ nyxAgentTransport: {
   getConversation: (id?: string) => id && state.agentLoaded ? currentConversation() : undefined,
@@ -166,6 +167,7 @@ beforeEach(() => {
   state.shared = false;
   state.consentPending = false;
   state.send.mockReset();
+  state.decideAcknowledgement.mockReset();
   state.interruption = undefined;
   state.agentLoaded = true;
   state.desktop = true;
@@ -174,6 +176,30 @@ beforeEach(() => {
 function mount() {
   return render(<QueryClientProvider client={new QueryClient()}><NyxAgentAssistantChatPage /></QueryClientProvider>);
 }
+
+it("a late transcript decision cannot take focus after navigation", async () => {
+  state.search = { c: conversation.id };
+  state.liveCards = [{ ...staleCard, decider: "orchestrator" }];
+  let resolve!: () => void;
+  state.decideAcknowledgement.mockImplementation(() => new Promise<void>((done) => { resolve = done; }));
+  const client = new QueryClient();
+  const thread = () => <QueryClientProvider client={client}><NyxAgentAssistantChatPage /></QueryClientProvider>;
+  const view = render(thread());
+  fireEvent.click(screen.getByRole("button", { name: "Allow" }));
+  expect(state.decideAcknowledgement).toHaveBeenCalledOnce();
+  state.search = { c: `nyxa-${"2".repeat(32)}` };
+  state.liveCards = [];
+  view.rerender(thread());
+  const reading = document.createElement("button");
+  document.body.append(reading);
+  reading.focus();
+  try {
+    await act(async () => { resolve(); });
+    expect(reading).toHaveFocus();
+  } finally {
+    reading.remove();
+  }
+});
 
 it("reflects a connection-consent decision in the avatar without an acknowledgement or proxy approval", () => {
   state.search = { c: conversation.id };
