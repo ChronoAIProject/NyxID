@@ -23,7 +23,7 @@ User-side subcommands accept the common flags `--base-url`, `--access-token` / `
 - **`node register --token nyx_nreg_... --url <ws-url>`** — redeem a token and store the node's secrets locally. `--keychain` uses the OS keychain instead of an encrypted file; `--config <dir>`.
 - **`node start`** — connect and serve in the foreground. `--log-level <level>`.
 - **`node agent-status`** — show local config and connection state.
-- **`node rekey --auth-token nyx_nauth_... --signing-secret <hex>`** — apply new secrets after a server-side `rotate-token`.
+- **`node rekey`** — enter both replacement secrets at hidden prompts after a server-side `rotate-token`. For automation, use `--auth-token-file PATH` or `--auth-token-env NAME`, and `--signing-secret-file PATH` or `--signing-secret-env NAME`. Each credential accepts one source.
 - **`node migrate --to keychain|file`** — move secret storage between the encrypted file and the OS keychain.
 - **`node agent-version`** — print the node agent version.
 
