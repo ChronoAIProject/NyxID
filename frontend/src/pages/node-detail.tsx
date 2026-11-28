@@ -826,9 +826,7 @@ export function NodeDetailPage() {
                 <div className="rounded-lg bg-muted p-3">
                   <p className="mb-1 type-secondary-emphasis text-text-tertiary">{translateUi("Run on your node")}</p>
                   <code className="text-14 text-foreground break-all">
-                    nyxid node rekey --auth-token{" "}
-                    {rotatedCredentials.auth_token} --signing-secret{" "}
-                    {rotatedCredentials.signing_secret}
+                    nyxid node rekey
                   </code>
                 </div>
                 <p className="text-13 text-muted-foreground">
