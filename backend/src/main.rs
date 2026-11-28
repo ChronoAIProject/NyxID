@@ -664,7 +664,7 @@ async fn server_run(cli: Cli) {
     {
         return;
     }
-    services::key_lifecycle::admit_startup(&db, &config)
+    let admission = services::key_lifecycle::admit_startup(&db, &config)
         .await
         .expect("Key lifecycle startup admission failed");
     if let Some(signals) = &startup_signals
@@ -672,6 +672,10 @@ async fn server_run(cli: Cli) {
     {
         return;
     }
+    let initialization =
+        services::key_lifecycle::retirement::Initialization::begin(&db, admission.as_ref())
+            .await
+            .expect("Key lifecycle initialization fence unavailable");
     db::initialize(&db)
         .await
         .expect("Failed to initialize database");
@@ -683,6 +687,10 @@ async fn server_run(cli: Cli) {
         keys.export_new(path)
             .expect("Failed to export existing HMAC keyset");
         tracing::info!("Existing HMAC domain keys exported to a restricted file");
+        initialization
+            .finish(&db)
+            .await
+            .expect("Key lifecycle initialization fence changed");
         return;
     }
     services::platform_help_service::ensure(&db)
@@ -729,6 +737,10 @@ async fn server_run(cli: Cli) {
             .await
             .expect("Failed to backfill platform role memberships");
         run_promote_admin(&db, &email).await;
+        initialization
+            .finish(&db)
+            .await
+            .expect("Key lifecycle initialization fence changed");
         return;
     }
     if let Some(Commands::TelemetryErasure(args)) = post_db_command {
@@ -736,6 +748,10 @@ async fn server_run(cli: Cli) {
             eprintln!("Erasure reconciliation failed: {error}");
             std::process::exit(1);
         }
+        initialization
+            .finish(&db)
+            .await
+            .expect("Key lifecycle initialization fence changed");
         return;
     }
     if let Some(Commands::CleanupOrphans(args)) = post_db_command {
@@ -743,6 +759,10 @@ async fn server_run(cli: Cli) {
             eprintln!("Cleanup failed: {error}");
             std::process::exit(1);
         }
+        initialization
+            .finish(&db)
+            .await
+            .expect("Key lifecycle initialization fence changed");
         return;
     }
 
@@ -1052,11 +1072,12 @@ async fn server_run(cli: Cli) {
     services::personal_erasure_service::ensure_startup_indexes(&db)
         .await
         .expect("late startup indexes failed");
-    let readiness_runtime = services::security_readiness_service::Runtime::new(
+    let mut readiness_runtime = services::security_readiness_service::Runtime::new(
         (*replica_identity).clone(),
         config.security_rollout.clone(),
         services::proxy_service::actor_addressed_policy_required(),
     );
+    readiness_runtime.retirement_cohort = admission.and_then(|a| a.cohort);
     services::security_readiness_service::initialize(readiness_runtime.clone());
     services::security_readiness_service::observe_with_automation(
         &db,
@@ -1065,6 +1086,10 @@ async fn server_run(cli: Cli) {
     )
     .await
     .expect("security replica observation failed");
+    initialization
+        .finish(&db)
+        .await
+        .expect("Key lifecycle initialization fence changed");
     let readiness_db = db.clone();
     let automation_enabled = config.automation_continuation_v2_enabled;
     services::shutdown::process().spawn_worker(async move {

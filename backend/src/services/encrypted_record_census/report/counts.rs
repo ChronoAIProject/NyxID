@@ -47,6 +47,12 @@ pub(crate) struct Bucket {
     pub empty_envelopes: i64,
 }
 
+impl Bucket {
+    pub(super) fn references(&self, key: &str) -> bool {
+        self.material_instances > 0 && self.dimension.key_ref.as_deref() == Some(key)
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct Finding {
     pub field: String,
@@ -64,7 +70,7 @@ pub(super) struct Receipt {
 }
 
 impl CensusRing {
-    fn attribution(&self, route: Route) -> (&'static str, Option<String>) {
+    pub(super) fn attribution(&self, route: Route) -> (&'static str, Option<String>) {
         let (path, slot, provider, resource) = match &route {
             Route::Unknown => return ("unknown", None),
             Route::Direct(slot) => ("direct", slot, "local", None),

@@ -8,7 +8,7 @@ fn name(value: impl Serialize) -> AppResult<String> {
         .ok_or_else(corrupt)
 }
 
-fn unresolved(scope: &Scope, scope_revision: i64) -> Document {
+pub(super) fn unresolved(scope: &Scope, scope_revision: i64) -> Document {
     doc! {"$or":[{"resolution":bson::Bson::Null},{"last_record.revision":{"$lt":scope_revision}},{"last_record.scope.restore_epoch":{"$ne":&scope.restore_epoch}},
     {"last_record.scope.deployment_revision":{"$ne":&scope.deployment_revision}}]}
 }
@@ -285,7 +285,10 @@ pub(super) async fn apply(
                     }
                     receipt.scope.deployment_revision = deployment_revision.clone();
                 }
-                _ => receipt.scope.restore_epoch = fresh(),
+                _ => {
+                    receipt.scope.restore_epoch = fresh();
+                    update.insert("$unset", doc! {"initializing":""});
+                }
             }
             update.insert("$set",doc!{"scope":encode(&receipt.scope)?,"scope_revision":receipt.revision,"current":doc!{}});
         }
