@@ -1625,220 +1625,388 @@ async fn owner_permission_resume_release_lease_limits_use_database_time() {
 
 #[tokio::test]
 async fn owner_permission_resume_release_preserves_lease_stop_and_worker_fences() {
-    use crate::models::assistant_conversation::{EngineWorkerInstance, ExecutionAttempt};
-    for lease in ["missing", "null", "explicit"] {
-        let (f, row) = assistant("owner_resume_release_fences").await;
-        set_task(&f, &row).await;
-        let _ = sheet(&f, 200).await;
-        let model = model(&f, false).await;
-        run(&f, &row).await;
-        let request = pending(&f, None).await;
-        proposals::decide(
-            &f.state,
-            &f.owner,
-            &request.id,
-            &decision(&request, "persistent"),
-        )
-        .await
-        .unwrap();
-        let mut resumed = event_turn(&f, &row).await;
-        let credential = load_credential(&f, &resumed).await;
-        let egress = crate::handlers::assistant_nyxagent::http_egress(
-            f.state.clone(),
-            test_utils::test_auth_user(&f.owner),
-        );
-        let outcome = proposals::resume_turn(&f.state, egress.as_ref(), &resumed, &credential)
+    async fn restore(
+        db: &mongodb::Database,
+        id: &str,
+        key: &str,
+        baseline: &Document,
+        key_baseline: &Document,
+    ) {
+        db.collection::<Document>("assistant_conversations")
+            .update_one(
+                doc! {"_id":id},
+                doc! {"$set":{
+                    "active_turn":baseline.get("active_turn").unwrap().clone(),
+                    "model":baseline.get("model").unwrap().clone(),
+                    "credential_api_key_id":baseline.get("credential_api_key_id").unwrap().clone(),
+                }},
+            )
             .await
-            .unwrap()
             .unwrap();
-        let proposals::ResumeOutcome::Continue(continuation) = outcome else {
-            panic!("known success");
-        };
-        let conversations = f.state.db.collection::<Document>("assistant_conversations");
-        for refusal in [
-            "expired",
-            "stop",
-            "turn",
-            "worker",
-            "epoch",
-            "claim",
-            "model",
-            "task",
-            "task_root",
-            "task_actor",
-            "task_parent",
-            "task_missing_actor",
-            "task_null_root",
-            "key_binding",
-            "key_expired",
-            "key_revoked",
-        ] {
-            let turn = resumed.active_turn.as_mut().unwrap();
-            // Capture one exact admitted worker, then change only the live DB
-            // fence. The runner's stale in-memory row cannot authorize release.
-            turn.worker_instance = Some(EngineWorkerInstance {
-                id: "admitted-worker".into(),
-                hostname: None,
-            });
-            turn.execution_attempt = Some(ExecutionAttempt {
-                epoch: 1,
-                claim_id: "admitted-claim".into(),
-                foreground_delivery: None,
-            });
-            // A valid explicit lease overrides an old start. An expired
-            // explicit lease must refuse even with a fresh fallback.
-            let fallback_ms = if (refusal == "expired" && lease != "explicit")
-                || (lease == "explicit" && refusal != "expired")
-            {
-                -(engine::ACTIVE_TURN_TTL_SECS + 60) * 1000
-            } else {
-                0
-            };
-            let lease_expires_at = match lease {
+        db.collection::<Document>("api_keys").update_one(doc! {"_id":key}, doc! {"$set":{
+            "is_active":key_baseline.get("is_active").unwrap().clone(),
+            "expires_at":key_baseline.get("expires_at").cloned().unwrap_or(bson::Bson::Null),
+        }}).await.unwrap();
+    }
+    for lease in ["missing", "null", "explicit"] {
+        // A direct matched success precedes the DB-only matrix. The matrix also
+        // releases its identical, unchanged capability after every refusal; the
+        // runner case preserves the original model-I/O and BSON compatibility path.
+        for scenario in ["matched_release", "matrix", "runner"] {
+            let (f, row) = assistant("owner_resume_release_fences").await;
+            set_task(&f, &row).await;
+            let _ = sheet(&f, 200).await;
+            let model = model(&f, false).await;
+            run(&f, &row).await;
+            let request = pending(&f, None).await;
+            proposals::decide(
+                &f.state,
+                &f.owner,
+                &request.id,
+                &decision(&request, "persistent"),
+            )
+            .await
+            .unwrap();
+            let admitted = event_turn(&f, &row).await;
+            let conversations = f.state.db.collection::<Document>("assistant_conversations");
+            let lease_value = match lease {
                 "missing" => bson::Bson::String("$$REMOVE".into()),
                 "null" => bson::Bson::Null,
-                _ => bson::Bson::Document(
-                    doc! {"$add": ["$$NOW", if refusal == "expired" { -60_000_i64 } else { 60_000_i64 }]},
-                ),
+                _ => bson::Bson::Document(doc! {"$add":["$$NOW",300_000_i64]}),
             };
-            let mut current_task = turn.execution_task.as_ref().unwrap().clone();
-            match refusal {
-                "task" => current_task.epoch += 1,
-                "task_root" => current_task.task.root_id = "different-root".into(),
-                "task_actor" => current_task.actor_user_id = "different-actor".into(),
-                "task_parent" => current_task.parent_turn_id = Some("different-parent".into()),
-                _ => {}
-            }
-            let mut stored_task = bson::to_document(&current_task).unwrap();
-            if refusal == "task_missing_actor" {
-                stored_task.remove("actor_user_id");
-            }
-            if refusal == "task_null_root" {
-                stored_task
-                    .get_document_mut("task")
-                    .unwrap()
-                    .insert("root_id", bson::Bson::Null);
-            }
-            conversations.update_one(doc! {"_id": &row.id}, vec![doc! {"$set": {
-                "model": if refusal == "model" { "different-model" } else { &row.model },
-                "credential_api_key_id": if refusal == "key_binding" { "different-key" } else { &row.credential_api_key_id },
-                "active_turn.execution_task": {"$literal": stored_task},
-                "active_turn.turn_id": if refusal == "turn" { "different-turn" } else { &turn.turn_id },
-                "active_turn.started_at": {"$add": ["$$NOW", fallback_ms]},
-                "active_turn.lease_expires_at": lease_expires_at,
-                "active_turn.stop_requested": refusal == "stop",
-                "active_turn.worker_instance": {"id": if refusal == "worker" { "different-worker" } else { "admitted-worker" }},
-                "active_turn.execution_attempt": {"epoch": if refusal == "epoch" { 2_i64 } else { 1_i64 }, "claim_id": if refusal == "claim" { "different-claim" } else { "admitted-claim" }},
-            }}]).await.unwrap();
-            f.state.db.collection::<Document>("api_keys").update_one(doc! {"_id": &f.key}, vec![doc! {"$set": {
-                "is_active": refusal != "key_revoked",
-                "expires_at": if refusal == "key_expired" { bson::Bson::String("$$NOW".into()) } else { bson::Bson::Null },
-            }}]).await.unwrap();
-            assert!(
-                continuation
-                    .release(&f.state, &resumed, &credential)
-                    .await
-                    .unwrap_err()
-                    .is_forbidden(),
-                "{lease}, {refusal}"
+            // Establish the final worker/epoch/claim and lease before preparation.
+            // This baseline and the caller are never rewritten inside a refusal.
+            conversations.update_one(doc! {"_id":&row.id},vec![doc! {"$set":{
+            "active_turn.worker_instance":{"id":"admitted-worker"},
+            "active_turn.execution_attempt":{"epoch":1_i64,"claim_id":"admitted-claim"},
+            "active_turn.started_at":{"$add":["$$NOW",if lease=="explicit" && scenario=="runner" {-(engine::ACTIVE_TURN_TTL_SECS+60)*1000} else {0}]},
+            "active_turn.lease_expires_at":lease_value,
+        }}]).await.unwrap();
+            let resumed = engine::get(&f.state.db, &f.owner, &admitted.id)
+                .await
+                .unwrap();
+            let frozen_caller = bson::to_document(&resumed).unwrap();
+            let credential = load_credential(&f, &resumed).await;
+            let egress = crate::handlers::assistant_nyxagent::http_egress(
+                f.state.clone(),
+                test_utils::test_auth_user(&f.owner),
             );
+            let outcome = proposals::resume_turn(&f.state, egress.as_ref(), &resumed, &credential)
+                .await
+                .unwrap()
+                .unwrap();
+            let proposals::ResumeOutcome::Continue(continuation) = outcome else {
+                panic!("known success");
+            };
+            let baseline = conversations
+                .find_one(doc! {"_id":&row.id})
+                .await
+                .unwrap()
+                .unwrap();
+            let key_baseline = f
+                .state
+                .db
+                .collection::<Document>("api_keys")
+                .find_one(doc! {"_id":&f.key})
+                .await
+                .unwrap()
+                .unwrap();
+            if scenario == "matrix" {
+                for refusal in [
+                    "expired",
+                    "stop",
+                    "turn",
+                    "worker",
+                    "epoch",
+                    "claim",
+                    "model",
+                    "task",
+                    "task_root",
+                    "task_actor",
+                    "task_parent",
+                    "task_missing_actor",
+                    "task_null_root",
+                    "key_binding",
+                    "key_expired",
+                    "key_revoked",
+                ] {
+                    restore(&f.state.db, &row.id, &f.key, &baseline, &key_baseline).await;
+                    let (collection, id, field, value) = match refusal {
+                        "expired" if lease == "explicit" => (
+                            "assistant_conversations",
+                            row.id.as_str(),
+                            "active_turn.lease_expires_at",
+                            bson::bson!({"$subtract":["$$NOW",60_000_i64]}),
+                        ),
+                        "expired" => (
+                            "assistant_conversations",
+                            row.id.as_str(),
+                            "active_turn.started_at",
+                            bson::bson!({"$subtract":["$$NOW",(engine::ACTIVE_TURN_TTL_SECS+60)*1000]}),
+                        ),
+                        "stop" => (
+                            "assistant_conversations",
+                            row.id.as_str(),
+                            "active_turn.stop_requested",
+                            bson::bson!(true),
+                        ),
+                        "turn" => (
+                            "assistant_conversations",
+                            row.id.as_str(),
+                            "active_turn.turn_id",
+                            bson::bson!("different-turn"),
+                        ),
+                        "worker" => (
+                            "assistant_conversations",
+                            row.id.as_str(),
+                            "active_turn.worker_instance.id",
+                            bson::bson!("different-worker"),
+                        ),
+                        "epoch" => (
+                            "assistant_conversations",
+                            row.id.as_str(),
+                            "active_turn.execution_attempt.epoch",
+                            bson::bson!(2_i64),
+                        ),
+                        "claim" => (
+                            "assistant_conversations",
+                            row.id.as_str(),
+                            "active_turn.execution_attempt.claim_id",
+                            bson::bson!("different-claim"),
+                        ),
+                        "model" => (
+                            "assistant_conversations",
+                            row.id.as_str(),
+                            "model",
+                            bson::bson!("different-model"),
+                        ),
+                        "task" => (
+                            "assistant_conversations",
+                            row.id.as_str(),
+                            "active_turn.execution_task.epoch",
+                            bson::bson!(
+                                resumed
+                                    .active_turn
+                                    .as_ref()
+                                    .unwrap()
+                                    .execution_task
+                                    .as_ref()
+                                    .unwrap()
+                                    .epoch
+                                    + 1
+                            ),
+                        ),
+                        "task_root" => (
+                            "assistant_conversations",
+                            row.id.as_str(),
+                            "active_turn.execution_task.task.root_id",
+                            bson::bson!("different-root"),
+                        ),
+                        "task_actor" => (
+                            "assistant_conversations",
+                            row.id.as_str(),
+                            "active_turn.execution_task.actor_user_id",
+                            bson::bson!("different-actor"),
+                        ),
+                        "task_parent" => (
+                            "assistant_conversations",
+                            row.id.as_str(),
+                            "active_turn.execution_task.parent_turn_id",
+                            bson::bson!("different-parent"),
+                        ),
+                        "task_missing_actor" => (
+                            "assistant_conversations",
+                            row.id.as_str(),
+                            "active_turn.execution_task.actor_user_id",
+                            bson::bson!("$$REMOVE"),
+                        ),
+                        "task_null_root" => (
+                            "assistant_conversations",
+                            row.id.as_str(),
+                            "active_turn.execution_task.task.root_id",
+                            bson::Bson::Null,
+                        ),
+                        "key_binding" => (
+                            "assistant_conversations",
+                            row.id.as_str(),
+                            "credential_api_key_id",
+                            bson::bson!("different-key"),
+                        ),
+                        "key_expired" => (
+                            "api_keys",
+                            f.key.as_str(),
+                            "expires_at",
+                            bson::bson!("$$NOW"),
+                        ),
+                        "key_revoked" => {
+                            ("api_keys", f.key.as_str(), "is_active", bson::bson!(false))
+                        }
+                        _ => unreachable!(),
+                    };
+                    f.state
+                        .db
+                        .collection::<Document>(collection)
+                        .update_one(doc! {"_id":id}, vec![doc! {"$set":{field:value}}])
+                        .await
+                        .unwrap();
+                    assert!(
+                        bson::to_document(&resumed).unwrap() == frozen_caller,
+                        "caller changed after preparation"
+                    );
+                    assert!(
+                        continuation
+                            .release(&f.state, &resumed, &credential)
+                            .await
+                            .unwrap_err()
+                            .is_forbidden(),
+                        "{lease}, {refusal}"
+                    );
+                    let receipt = f
+                        .state
+                        .db
+                        .collection::<ApprovalRequest>("approval_requests")
+                        .find_one(doc! {"_id":&request.id})
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    assert!(
+                        proposals::proposal(&receipt)
+                            .unwrap()
+                            .owner_continuation
+                            .as_ref()
+                            .unwrap()
+                            .released_turn_id
+                            .is_none()
+                    );
+                    assert_eq!(f.server.received_requests().await.unwrap().len(), 1);
+                    assert_eq!(model.calls.lock().unwrap().len(), 1);
+                }
+                restore(&f.state.db, &row.id, &f.key, &baseline, &key_baseline).await;
+            }
+            if scenario == "runner" {
+                // Older readable task rows can order fields differently and omit the
+                // optional private parent/source. Preserve their typed authority while
+                // proving the actual runner releases them and sends the model once.
+                let task = resumed
+                    .active_turn
+                    .as_ref()
+                    .unwrap()
+                    .execution_task
+                    .as_ref()
+                    .unwrap();
+                assert!(task.parent_turn_id.is_none());
+                assert!(task.channel_source.is_none());
+                let mut stored_task = bson::to_document(task).unwrap();
+                stored_task.remove("parent_turn_id");
+                if lease == "null" {
+                    stored_task.insert("channel_source", bson::Bson::Null);
+                } else {
+                    stored_task.remove("channel_source");
+                }
+                for field in ["task", "audience"] {
+                    let nested = stored_task.remove(field).unwrap();
+                    let mut pairs: Vec<_> =
+                        nested.as_document().unwrap().clone().into_iter().collect();
+                    pairs.reverse();
+                    stored_task.insert(field, pairs.into_iter().collect::<Document>());
+                }
+                let mut pairs: Vec<_> = stored_task.into_iter().collect();
+                pairs.reverse();
+                let reordered: Document = pairs.into_iter().collect();
+                conversations
+                    .update_one(
+                        doc! {"_id": &row.id},
+                        doc! {"$set": {
+                            "active_turn.execution_task": reordered,
+                        }},
+                    )
+                    .await
+                    .unwrap();
+                let compatible = engine::get(&f.state.db, &f.owner, &row.id).await.unwrap();
+                assert_eq!(
+                    compatible
+                        .active_turn
+                        .as_ref()
+                        .unwrap()
+                        .execution_task
+                        .as_ref(),
+                    Some(task)
+                );
+            }
+
+            assert!(bson::to_document(&resumed).unwrap() == frozen_caller);
+            if scenario == "runner" {
+                let result = execute_with_credential(&f, &resumed, credential)
+                    .await
+                    .unwrap();
+                assert_eq!(result.text, "Remaining task continued.");
+                assert_eq!(model.calls.lock().unwrap().len(), 2);
+            } else {
+                // Direct success uses this very capability and caller after the
+                // DB-only negatives, so a caller-identity shortcut cannot pass them.
+                assert!(
+                    continuation
+                        .release(&f.state, &resumed, &credential)
+                        .await
+                        .unwrap()
+                );
+                assert!(
+                    !continuation
+                        .release(&f.state, &resumed, &credential)
+                        .await
+                        .unwrap()
+                );
+                run(&f, &resumed).await;
+                assert_eq!(model.calls.lock().unwrap().len(), 1);
+                let messages = engine::messages(&f.state.db, &f.owner, &row.id, 30, None)
+                    .await
+                    .unwrap();
+                let reply = messages
+                    .iter()
+                    .find(|message| {
+                        message.role == "assistant"
+                            && message.turn_id == resumed.active_turn.as_ref().unwrap().turn_id
+                    })
+                    .unwrap();
+                assert_eq!(reply.status, "completed");
+                assert!(reply.text.contains("HTTP 200"));
+            }
             let receipt = f
                 .state
                 .db
                 .collection::<ApprovalRequest>("approval_requests")
-                .find_one(doc! {"_id": &request.id})
+                .find_one(doc! {"_id":&request.id})
                 .await
                 .unwrap()
                 .unwrap();
-            assert!(
-                proposals::proposal(&receipt)
-                    .unwrap()
-                    .owner_continuation
+            let p = proposals::proposal(&receipt).unwrap();
+            let turn_id = resumed.active_turn.as_ref().unwrap().turn_id.as_str();
+            assert_eq!(
+                p.owner_continuation
                     .as_ref()
                     .unwrap()
                     .released_turn_id
-                    .is_none()
+                    .as_deref(),
+                Some(turn_id)
+            );
+            if scenario != "runner" {
+                assert_eq!(p.delivered_turn_id.as_deref(), Some(turn_id));
+            }
+            assert!(
+                execute(&f, &resumed)
+                    .await
+                    .unwrap()
+                    .text
+                    .contains("HTTP 200")
             );
             assert_eq!(f.server.received_requests().await.unwrap().len(), 1);
-            assert_eq!(model.calls.lock().unwrap().len(), 1);
+            assert_eq!(
+                model.calls.lock().unwrap().len(),
+                if scenario == "runner" { 2 } else { 1 }
+            );
+            drop(model);
+            f.cleanup().await;
         }
-        // Restore the exact worker and let the real runner perform the release
-        // and model I/O with each supported lease representation.
-        conversations
-            .update_one(
-                doc! {"_id": &row.id},
-                doc! {"$set": {
-                    "active_turn.execution_attempt.claim_id": "admitted-claim",
-                }},
-            )
-            .await
-            .unwrap();
-        f.state
-            .db
-            .collection::<Document>("api_keys")
-            .update_one(
-                doc! {"_id": &f.key},
-                doc! {"$set": {
-                    "is_active": true, "expires_at": bson::Bson::Null,
-                }},
-            )
-            .await
-            .unwrap();
-        // Older readable task rows can order fields differently and omit the
-        // optional private parent/source. Preserve their typed authority while
-        // proving the actual runner releases them and sends the model once.
-        let task = resumed
-            .active_turn
-            .as_ref()
-            .unwrap()
-            .execution_task
-            .as_ref()
-            .unwrap();
-        assert!(task.parent_turn_id.is_none());
-        assert!(task.channel_source.is_none());
-        let mut stored_task = bson::to_document(task).unwrap();
-        stored_task.remove("parent_turn_id");
-        if lease == "null" {
-            stored_task.insert("channel_source", bson::Bson::Null);
-        } else {
-            stored_task.remove("channel_source");
-        }
-        for field in ["task", "audience"] {
-            let nested = stored_task.remove(field).unwrap();
-            let mut pairs: Vec<_> = nested.as_document().unwrap().clone().into_iter().collect();
-            pairs.reverse();
-            stored_task.insert(field, pairs.into_iter().collect::<Document>());
-        }
-        let mut pairs: Vec<_> = stored_task.into_iter().collect();
-        pairs.reverse();
-        let reordered: Document = pairs.into_iter().collect();
-        conversations
-            .update_one(
-                doc! {"_id": &row.id},
-                doc! {"$set": {
-                    "active_turn.execution_task": reordered,
-                }},
-            )
-            .await
-            .unwrap();
-        let compatible = engine::get(&f.state.db, &f.owner, &row.id).await.unwrap();
-        assert_eq!(
-            compatible
-                .active_turn
-                .as_ref()
-                .unwrap()
-                .execution_task
-                .as_ref(),
-            Some(task)
-        );
-        let result = execute_with_credential(&f, &resumed, credential)
-            .await
-            .unwrap();
-        assert_eq!(result.text, "Remaining task continued.");
-        assert_eq!(f.server.received_requests().await.unwrap().len(), 1);
-        assert_eq!(model.calls.lock().unwrap().len(), 2);
-        drop(model);
-        f.cleanup().await;
     }
 }
 

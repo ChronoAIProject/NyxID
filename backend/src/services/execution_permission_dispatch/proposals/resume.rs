@@ -191,7 +191,14 @@ pub(crate) async fn resume_turn(
         }) {
             return Err(refused());
         }
-        if p.task.channel_source.is_some() {
+        // A still-owned admitted turn may settle this exact expired operation
+        // locally. Its expired channel remains unusable for execution/delivery.
+        let local_expired = eligible
+            && request.status == "approved"
+            && matches!(p.state.as_str(), "queued" | "preparing")
+            && turn.execution_task.as_ref() == Some(&p.task)
+            && p.task.hard_deadline <= Utc::now();
+        if p.task.channel_source.is_some() && !local_expired {
             super::super::super::execution_permission_channel::check(&state.db, &p.task).await?;
         }
         if request.status != "approved" {

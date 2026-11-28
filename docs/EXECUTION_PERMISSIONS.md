@@ -528,6 +528,10 @@ model readiness cannot prevent this receipt settlement. Cancellation rechecks
 the original root and exact still-unsent proposal state/claim before atomically
 retiring its eligible one-use grant; it grants no execution or model release.
 A concurrent state change requires a fresh status check without another send.
+An exact admitted owner-channel task that reaches its source/task deadline can
+settle this unsent cancellation locally under the same worker/root/proposal
+fences. That local receipt grants no expired channel egress, result delivery or
+model release; the ordinary channel expiry checks continue to refuse those uses.
 The provider capability carries the same
 captured authority through the actual send barrier. A pre-send refusal result
 also requires that authority and the exact preparing claim before retiring a grant.
@@ -565,8 +569,10 @@ not enter fresh membership; maintenance does not enqueue delivered rows. Its
 immutable earlier release cannot be joined or launched
 again, while independently approved new members can promote and complete their
 own proof even when admitted beside that observation. Their final settlement can
-publish the old receipt alongside the new result: each release ID is preserved,
-and delivery records the turn that actually publishes it. Denied, unknown,
+publish the old receipt alongside the new result: each release ID and first
+delivery ID are preserved. Only an undelivered receipt records the publishing
+turn; replay cannot overwrite it. A released but undelivered observation records
+its first delivery beside the fresh result. Denied, unknown,
 blocked or invalid-authority observations do not receive this exclusion. Historical
 proofs without the original admitted turn ID remain receipt-only. Successful
 final settlement marks every receipt in the atomically released handoff delivered,

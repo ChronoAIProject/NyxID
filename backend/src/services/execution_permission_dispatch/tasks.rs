@@ -455,6 +455,7 @@ pub(crate) fn settle<'a>(
         if !receipts.is_empty() && message.status == "completed" {
             for version in proposals::v3::AssistantVersion::ALL {
                 db.collection::<Document>("approval_requests").update_many(version.selector(doc!{"_id":{"$in":&receipts},"user_id":&row.user_id,
+                    "execution_proposal.v1.delivered_turn_id":null,
                     "$or":[{"execution_proposal.v1.owner_continuation":null},
                         {"execution_proposal.v1.owner_continuation.blocked":true},
                         {"execution_proposal.v1.owner_continuation.released_turn_id":{"$ne":null}}],

@@ -25,6 +25,14 @@ async fn channel_turn_transport(
     name: &str,
     transport: &str,
 ) -> (Fixture, AssistantConversation, String) {
+    channel_turn_transport_with_expiry(name, transport, None).await
+}
+
+async fn channel_turn_transport_with_expiry(
+    name: &str,
+    transport: &str,
+    lifetime: Option<chrono::Duration>,
+) -> (Fixture, AssistantConversation, String) {
     let whatsapp = transport == "native-whatsapp";
     let native = transport == "native" || whatsapp;
     let platform = if whatsapp {
@@ -134,7 +142,7 @@ async fn channel_turn_transport(
         target_ciphertext: None,
         target_expires_at: None,
     };
-    db.collection::<Document>("nyxbot_events").insert_one(doc!{"_id":&event,"channel_id":&id,"user_id":&f.owner,"partition":&partition,"event_id":"original-provider-event","delivery":bson::to_bson(&delivery).unwrap(),"status":"running","created_at":now,"expires_at":bson::DateTime::from_chrono(Utc::now()+chrono::Duration::hours(24))}).await.unwrap();
+    db.collection::<Document>("nyxbot_events").insert_one(doc!{"_id":&event,"channel_id":&id,"user_id":&f.owner,"partition":&partition,"event_id":"original-provider-event","delivery":bson::to_bson(&delivery).unwrap(),"status":"running","created_at":now,"expires_at":bson::DateTime::from_chrono(Utc::now()+lifetime.unwrap_or(chrono::Duration::hours(24)))}).await.unwrap();
     if sealed {
         let target = event_record::seal(
             keys,
