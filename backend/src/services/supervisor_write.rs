@@ -716,21 +716,6 @@ pub(crate) async fn capture_marked(
     if resuming && retained.is_none() {
         return Err(refused());
     }
-    if db
-        .collection::<Document>("user_services")
-        .find_one(doc! {
-            "_id":connection,"user_id":owner,"node_id":null
-        })
-        .projection(doc! {"_id":1})
-        .await?
-        .is_none()
-    {
-        return if retained.is_some() {
-            Err(refused())
-        } else {
-            Ok(None)
-        };
-    }
     let row = db.collection::<AssistantConversation>("assistant_conversations")
         .find_one(doc! {"_id":&chat.conversation_id,"user_id":owner,"credential_api_key_id":&chat.api_key_id,
             "active_turn.turn_id":&chat.turn_id,"active_turn.stop_requested":false}).await?;
@@ -743,6 +728,17 @@ pub(crate) async fn capture_marked(
         }
         return Ok(None);
     };
+    // Identify the genuine assignment before transport eligibility. A node
+    // route cannot become an unrelated operation or an unresumable v4 proposal.
+    let connection_row = db
+        .collection::<Document>("user_services")
+        .find_one(doc! {"_id":connection,"user_id":owner})
+        .projection(doc! {"_id":1,"node_id":1})
+        .await?
+        .ok_or_else(refused)?;
+    if !matches!(connection_row.get("node_id"), None | Some(bson::Bson::Null)) {
+        return Err(refused());
+    }
     if !required && retained.is_none() {
         return Ok(Some(MarkedWrite::Optional));
     }

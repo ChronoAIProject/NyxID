@@ -21,6 +21,37 @@ fn supervisor_write_retained_readback_missing_or_mismatched_target_cannot_verify
 async fn marked_journey(proxy: bool) -> Journey {
     marked_transport(proxy, "relay").await
 }
+
+async fn full_access(j: &Journey) {
+    let agent = j
+        .state
+        .db
+        .collection::<Document>("assistant_agents")
+        .find_one(doc! {"user_id":OWNER,"name":"accountant"})
+        .await
+        .unwrap()
+        .unwrap();
+    team::set_agent_policy(
+        &j.state.db,
+        &crate::services::audit_service::AuditActor {
+            user_id: OWNER.into(),
+            ip_address: None,
+            user_agent: None,
+            api_key_id: None,
+            api_key_name: None,
+        },
+        agent.get_str("_id").unwrap(),
+        team::AgentPolicy {
+            model: None,
+            access_mode_override: Some(Some(
+                crate::models::assistant_settings::AccessMode::Autopilot,
+            )),
+        },
+    )
+    .await
+    .unwrap();
+}
+
 async fn marked_transport(proxy: bool, transport: &str) -> Journey {
     let mut j = setup_transport_journey("api-feishu", proxy, transport).await;
     j.script.marked.store(true, Ordering::SeqCst);
@@ -1860,9 +1891,15 @@ async fn supervisor_write_marked_http_and_mcp_grant_resume_and_covered_calls_kee
 
 #[tokio::test]
 async fn supervisor_write_marked_autoallow_gap_and_policy_race_refuse_before_proposal_or_send() {
-    use crate::models::service_approval_config::{ApprovalEffect, ApprovalMode};
+    use crate::models::service_approval_config::{ApprovalEffect, ApprovalMode, ApprovalRule};
     for proxy in [false, true] {
-        for control in ["gap", "policy_race", "ordinary"] {
+        for control in [
+            "gap",
+            "policy_race",
+            "ordinary",
+            "node_required",
+            "node_optional",
+        ] {
             let j = Box::pin(marked_journey(proxy)).await;
             let connection = j
                 .state
@@ -1872,46 +1909,32 @@ async fn supervisor_write_marked_autoallow_gap_and_policy_race_refuse_before_pro
                 .await
                 .unwrap()
                 .unwrap();
+            let rules = if control == "node_required" {
+                vec![ApprovalRule {
+                    mandatory_review: false,
+                    methods: vec!["PUT".into()],
+                    resource_pattern: "*".into(),
+                    verbs: vec![],
+                    effect: ApprovalEffect::RequireApproval,
+                    mode: ApprovalMode::PerRequest,
+                }]
+            } else {
+                Vec::new()
+            };
             crate::services::approval_service::set_service_approval_config(
                 &j.state.db,
                 OWNER,
                 connection.get_str("catalog_service_id").unwrap(),
                 "Ledger",
-                Some(false),
+                Some(control == "node_required"),
                 Some(&ApprovalMode::PerRequest),
-                Some(&[]),
+                Some(&rules),
                 Some(&ApprovalEffect::AutoAllow),
             )
             .await
             .unwrap();
-            if control == "ordinary" {
-                let agent = j
-                    .state
-                    .db
-                    .collection::<Document>("assistant_agents")
-                    .find_one(doc! {"user_id":OWNER,"name":"accountant"})
-                    .await
-                    .unwrap()
-                    .unwrap();
-                team::set_agent_policy(
-                    &j.state.db,
-                    &crate::services::audit_service::AuditActor {
-                        user_id: OWNER.into(),
-                        ip_address: None,
-                        user_agent: None,
-                        api_key_id: None,
-                        api_key_name: None,
-                    },
-                    agent.get_str("_id").unwrap(),
-                    team::AgentPolicy {
-                        model: None,
-                        access_mode_override: Some(Some(
-                            crate::models::assistant_settings::AccessMode::Autopilot,
-                        )),
-                    },
-                )
-                .await
-                .unwrap();
+            if control == "ordinary" || control.starts_with("node_") {
+                full_access(&j).await;
             }
             let listing = marked_assign(
                 &j,
@@ -1929,6 +1952,8 @@ async fn supervisor_write_marked_autoallow_gap_and_policy_race_refuse_before_pro
             j.stage.store(1, Ordering::SeqCst);
             if control == "policy_race" {
                 *j.script.review_fault.lock().unwrap() = Some(ReviewFault::PolicyRace);
+            } else if control.starts_with("node_") {
+                *j.script.review_fault.lock().unwrap() = Some(ReviewFault::NodeRoute);
             }
             let result = marked_assign(&j, &j.script.selection(), "ws7-autoallow-write").await;
             let report = owner_text(
@@ -1974,6 +1999,30 @@ async fn supervisor_write_marked_autoallow_gap_and_policy_race_refuse_before_pro
                 } else {
                     tool_value(write).is_none()
                 });
+                if control.starts_with("node_") {
+                    assert!(
+                        write
+                            .to_string()
+                            .contains("exact ledger-write review is unavailable"),
+                        "the genuine assignment must refuse its unsupported node route: {write}"
+                    );
+                    assert!(
+                        observed
+                            .iter()
+                            .any(|event| event["stage"] == "assigned_node_refused"
+                                && event["node_frames"] == 0)
+                    );
+                    assert_eq!(j.ledger.lock().unwrap().reads.len(), 2);
+                    assert_eq!(
+                        j.state
+                            .db
+                            .collection::<Document>("approval_grants")
+                            .count_documents(doc! {})
+                            .await
+                            .unwrap(),
+                        0
+                    );
+                }
             }
             remove_adapter(&j);
         }
@@ -1983,8 +2032,38 @@ async fn supervisor_write_marked_autoallow_gap_and_policy_race_refuse_before_pro
 #[tokio::test]
 async fn supervisor_write_marked_http_early_legacy_transport_refuses_before_any_authoring_or_send()
 {
-    for unsafe_body in [false, true] {
+    use crate::models::service_approval_config::{ApprovalEffect, ApprovalMode};
+    for (policy, unsafe_body) in [
+        ("required", false),
+        ("required", true),
+        ("optional", false),
+        ("optional_tightens", false),
+    ] {
         let j = Box::pin(marked_journey(true)).await;
+        let optional = policy.starts_with("optional");
+        if optional {
+            full_access(&j).await;
+            let connection = j
+                .state
+                .db
+                .collection::<Document>("user_services")
+                .find_one(doc! {"user_id":OWNER,"slug":"ledger"})
+                .await
+                .unwrap()
+                .unwrap();
+            crate::services::approval_service::set_service_approval_config(
+                &j.state.db,
+                OWNER,
+                connection.get_str("catalog_service_id").unwrap(),
+                "Ledger",
+                Some(false),
+                Some(&ApprovalMode::PerRequest),
+                Some(&[]),
+                Some(&ApprovalEffect::AutoAllow),
+            )
+            .await
+            .unwrap();
+        }
         let listing = marked_assign(
             &j,
             "Ask accountant for today's pending ledger rows",
@@ -1999,7 +2078,9 @@ async fn supervisor_write_marked_http_early_legacy_transport_refuses_before_any_
         );
         assert_row_report(&list, &j, "Pending", 1);
         j.stage.store(1, Ordering::SeqCst);
-        *j.script.review_fault.lock().unwrap() = Some(if unsafe_body {
+        *j.script.review_fault.lock().unwrap() = Some(if policy == "optional_tightens" {
+            ReviewFault::LegacyTransportPolicyRace
+        } else if unsafe_body {
             ReviewFault::LegacyTransportUnsafeBody
         } else {
             ReviewFault::LegacyTransport
@@ -2021,9 +2102,21 @@ async fn supervisor_write_marked_http_early_legacy_transport_refuses_before_any_
             .expect("actual HTTP admission classifier observation");
         assert_eq!(
             classification["captured_at_legacy"],
-            if unsafe_body { 0 } else { 2 },
-            "a reviewable effect retains its mandatory DM origin before the legacy return; an unsupported body refuses before reaching that return"
+            if unsafe_body {
+                0
+            } else if optional {
+                3
+            } else {
+                2
+            },
+            "a classified required or optional policy cannot escape through legacy; an unsupported body refuses before reaching that return"
         );
+        if policy == "optional_tightens" {
+            assert_eq!(j.state.db.collection::<Document>("service_approval_configs")
+                .count_documents(doc! {"user_id":OWNER,"default_effect":"require_approval","approval_required":true})
+                .await.unwrap(), 1,
+                "the fixture must tighten the live policy after classification, immediately before fallback");
+        }
         let write = &observed
             .iter()
             .find(|event| event["stage"] == "write")

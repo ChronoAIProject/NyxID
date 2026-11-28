@@ -209,6 +209,8 @@ enum ReviewFault {
     PolicyRace,
     LegacyTransport,
     LegacyTransportUnsafeBody,
+    LegacyTransportPolicyRace,
+    NodeRoute,
 }
 
 struct Script {
@@ -259,6 +261,98 @@ fn owner_text(stream: &str) -> String {
         })
         .unwrap_or_else(|| panic!("no completed owner message: {stream}"))
 }
+async fn assigned_node_update(
+    state: &AppState,
+    raw: &str,
+    script: &Script,
+    observed: &Arc<Mutex<Vec<Value>>>,
+) -> Value {
+    use crate::services::{node_owner_service, node_routing_service, node_service};
+    let (_, token, _) =
+        node_service::create_registration_token(&state.db, OWNER, "ws7-inert-ledger", 10, 3600)
+            .await
+            .unwrap();
+    let (node, _, _) = node_service::register_node(&state.db, &state.encryption_keys, &token, None)
+        .await
+        .unwrap();
+    node_service::set_node_status(&state.db, &node.id, crate::models::node::NodeStatus::Online)
+        .await
+        .unwrap();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+    let connection = crate::test_utils::register_test_node_connection(state, &node.id, tx).await;
+    state.node_ws_manager.record_capabilities(
+        &node.id,
+        &crate::services::node_ws_manager::NodeCapabilitiesMsg {
+            http_signature_v2: true,
+            ..Default::default()
+        },
+    );
+    assert!(
+        node_routing_service::is_node_id_dispatchable(&state.db, &node.id, &state.node_ws_manager)
+            .await
+            .unwrap()
+    );
+    // The actual independent pre-write search already completed. Pin only the
+    // ensuing assigned write to this locally owned, inert fixture connection.
+    let changed = state
+        .db
+        .collection::<Document>("user_services")
+        .update_one(
+            doc! {"user_id":OWNER,"slug":"ledger","node_id":null},
+            doc! {"$set":{"node_id":&node.id}},
+        )
+        .await
+        .unwrap();
+    assert_eq!(changed.modified_count, 1);
+    let result = if script.proxy {
+        raw_update(
+            state,
+            raw,
+            &script.selected,
+            r#"{"fields":{"Status":"Approved"}}"#,
+        )
+        .await
+    } else {
+        mcp(
+            state,
+            raw,
+            "ledger__bitable_record_update",
+            update_arguments(&script.selected, json!({"Status":"Approved"})),
+        )
+        .await
+    };
+    assert!(
+        matches!(
+            rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ),
+        "a refused assigned node write must emit no node frame"
+    );
+    observed
+        .lock()
+        .await
+        .push(json!({"stage":"assigned_node_refused","node_id":node.id,"node_frames":0}));
+    assert!(
+        state
+            .node_ws_manager
+            .unregister_connection_if(&node.id, &connection)
+    );
+    assert!(
+        node_owner_service::release(
+            &state.db,
+            &node_owner_service::NodeOwnerFence {
+                node_id: node.id,
+                instance_name: state.replica_identity.instance_name.clone(),
+                generation_id: state.replica_identity.generation_id.clone(),
+                connection_id: connection,
+            }
+        )
+        .await
+        .unwrap()
+    );
+    result
+}
+
 async fn model(
     state: &AppState,
     raw: &str,
@@ -429,7 +523,11 @@ async fn model(
                 .await
         } else if matches!(
             fault,
-            Some(ReviewFault::LegacyTransport | ReviewFault::LegacyTransportUnsafeBody)
+            Some(
+                ReviewFault::LegacyTransport
+                    | ReviewFault::LegacyTransportUnsafeBody
+                    | ReviewFault::LegacyTransportPolicyRace
+            )
         ) {
             assert!(script.proxy);
             let body = if matches!(fault, Some(ReviewFault::LegacyTransportUnsafeBody)) {
@@ -438,12 +536,40 @@ async fn model(
                 r#"{"fields":{"Status":"Approved"}}"#
             };
             let reached = Arc::new(AtomicUsize::new(0));
+            let captured = reached.clone();
+            let tighten = matches!(fault, Some(ReviewFault::LegacyTransportPolicyRace));
+            let hook: Arc<
+                dyn Fn(mongodb::Database, bool, bool) -> futures::future::BoxFuture<'static, ()>
+                    + Send
+                    + Sync,
+            > = Arc::new(move |db, required, optional| {
+                let captured = captured.clone();
+                Box::pin(async move {
+                    captured.store(
+                        if required {
+                            2
+                        } else if optional {
+                            3
+                        } else {
+                            1
+                        },
+                        Ordering::SeqCst,
+                    );
+                    if tighten {
+                        assert!(optional && !required);
+                        // This point follows the final classification comparison
+                        // and immediately precedes the real early-legacy return.
+                        let changed = db.collection::<Document>("service_approval_configs").update_one(
+                            doc! {"user_id":OWNER,"default_effect":"auto_allow"},
+                            doc! {"$set":{"default_effect":"require_approval","approval_required":true,"approval_mode":"per_request"}},
+                        ).await.unwrap();
+                        assert_eq!(changed.modified_count, 1);
+                    }
+                })
+            });
             let result =
                 crate::services::execution_permission_dispatch::SUPERVISOR_LEGACY_TRANSPORT
-                    .scope(
-                        reached.clone(),
-                        raw_update(state, raw, &script.selected, body),
-                    )
+                    .scope(hook, raw_update(state, raw, &script.selected, body))
                     .await;
             observed
                 .lock()
@@ -451,6 +577,8 @@ async fn model(
                 .push(json!({"stage":"legacy_transport",
                 "captured_at_legacy":reached.load(Ordering::SeqCst)}));
             result
+        } else if matches!(fault, Some(ReviewFault::NodeRoute)) {
+            assigned_node_update(state, raw, script, observed).await
         } else if let Some(fault) = fault {
             let body = match fault {
                 ReviewFault::UnsafeValue => {

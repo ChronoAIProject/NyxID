@@ -36,7 +36,7 @@ tokio::task_local! {
     pub(crate) static SUPERVISOR_POLICY_CLASSIFIED: Arc<dyn Fn(Database) -> futures::future::BoxFuture<'static, ()> + Send + Sync>;
     // Defensive branch coverage on corrected code, without crafting a request
     // that selects an unsupported production transport.
-    pub(crate) static SUPERVISOR_LEGACY_TRANSPORT: Arc<std::sync::atomic::AtomicUsize>;
+    pub(crate) static SUPERVISOR_LEGACY_TRANSPORT: Arc<dyn Fn(Database, bool, bool) -> futures::future::BoxFuture<'static, ()> + Send + Sync>;
 }
 
 /// One authenticated HTTP/MCP call. Clones share its snapshot and decision;
@@ -97,7 +97,9 @@ struct Drain {
 
 impl RequestContext {
     fn legacy_without_supervisor(&self) -> AppResult<()> {
-        if self.supervisor().is_some() {
+        // Optional classified policy also needs the real final-send binding.
+        // A legacy return before drain cannot preserve that authority snapshot.
+        if self.supervisor().is_some() || self.supervisor_policy.get().is_some() {
             Err(refused())
         } else {
             Ok(())
@@ -1940,12 +1942,16 @@ pub(crate) fn admit_http<'a>(
             unsupported_transport || SUPERVISOR_LEGACY_TRANSPORT.try_with(|_| ()).is_ok();
         if unsupported_transport {
             #[cfg(test)]
-            let _ = SUPERVISOR_LEGACY_TRANSPORT.try_with(|observed| {
-                observed.store(
-                    if context.supervisor().is_some() { 2 } else { 1 },
-                    std::sync::atomic::Ordering::SeqCst,
-                );
-            });
+            if let Ok(hook) = SUPERVISOR_LEGACY_TRANSPORT.try_with(Clone::clone) {
+                hook(
+                    state.db.clone(),
+                    context.supervisor().is_some(),
+                    context
+                        .optional_supervisor_write
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                )
+                .await;
+            }
             context.observation.decide(diagnostics::Decision::new(
                 "legacy",
                 "legacy_unsupported_transport",
