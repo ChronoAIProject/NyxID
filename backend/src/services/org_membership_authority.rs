@@ -106,6 +106,15 @@ pub(crate) async fn fence_person_authority_loss(
         )
         .session(&mut *tx)
         .await?;
+    if target.is_active || departure_actor.is_some() {
+        db.collection::<OrgMembership>(MEMBERSHIPS)
+            .update_many(
+                doc! {"member_user_id":person, "revoked_at":null},
+                doc! {"$inc":{"eligibility_revision":1_i64}},
+            )
+            .session(&mut *tx)
+            .await?;
+    }
     // Issuer-attributed capabilities can be invalidated directly via indexes.
     // Registration mint/redemption write this same person row, so a held
     // operation cannot install or consume a capability after disable commits.

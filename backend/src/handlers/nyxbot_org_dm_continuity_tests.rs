@@ -290,10 +290,18 @@ struct Source {
     reply_token: String,
 }
 
+struct Original {
+    source: Source,
+    turn_id: String,
+    response_id: String,
+    thread_reply: bool,
+}
+
 async fn continuity(first_fails: bool) {
     let f = Box::pin(fixture(first_fails)).await;
-    let mut originals: Vec<(Source, String, String)> = Vec::new();
+    let mut originals: Vec<Original> = Vec::new();
     let mut expected_sends = Vec::new();
+    let mut delivered_first: Option<(String, String)> = None;
     for (index, text) in [
         FIRST,
         if first_fails {
@@ -306,7 +314,22 @@ async fn continuity(first_fails: bool) {
     .enumerate()
     {
         let source = relay_source(&f, index, text).await;
+        let user_input = source.request["input"][0]["content"][0]["text"]
+            .as_str()
+            .expect("gateway request carries user input text");
+        assert_eq!(user_input, source.text);
+        if index == 1 && !first_fails {
+            let (_, receipt) = delivered_first
+                .as_ref()
+                .expect("base primary POST precedes C2");
+            assert!(!source.text.contains(receipt));
+            assert!(
+                !user_input.contains(receipt),
+                "C2 does not supply the receipt"
+            );
+        }
         let frames = provider_frames(&f.state, &f.key, &source.request, &source.id).await;
+        let thread_reply = private_reply_route(&frames);
         let terminal = frames.last().unwrap();
         let response_id = frames[0]["response"]["id"].as_str().unwrap().to_owned();
         assert_eq!(terminal["response"]["id"], response_id);
@@ -328,11 +351,7 @@ async fn continuity(first_fails: bool) {
             usize::from(!failed)
         );
         let (turn, answer) = settled_answer(&f, &source, index, failed).await;
-        assert!(
-            originals
-                .iter()
-                .all(|(_, previous_turn, _)| *previous_turn != turn)
-        );
+        assert!(originals.iter().all(|previous| previous.turn_id != turn));
         if failed {
             // With no partial text, final_reply returns the public error and
             // late delivery emits response.failed. Simulated CMA sends no final;
@@ -356,33 +375,57 @@ async fn continuity(first_fails: bool) {
             assert_eq!(output.len(), 1, "one provider final per successful source");
             let text = output[0]["content"][0]["text"].as_str().unwrap();
             assert_eq!(text, answer);
-            if index == 1 {
-                if first_fails {
-                    assert_eq!(text, "Recovered amber471");
-                } else {
-                    let memory = f.memory.lock().await;
-                    let (session, previous) = memory.as_ref().unwrap();
-                    let (tag, receipt) = previous.split_once(" receipt ").unwrap();
-                    let calls = f.calls.lock().await;
-                    assert_eq!(calls[1]["conversation"], *session);
-                    assert!(!calls[1]["input"].as_str().unwrap().contains(receipt));
-                    assert_eq!(text, format!("Receipt {receipt} belongs to {tag}."));
-                }
-            }
-            let receipt = relay_final(&f, &source, text).await.unwrap().0;
+            let expected = if index == 0 {
+                // Compare the base provider output and HTTP POST with the exact
+                // first engine answer, before allowing the independent C2 in.
+                f.memory.lock().await.as_ref().unwrap().1.clone()
+            } else if first_fails {
+                "Recovered amber471".into()
+            } else {
+                let (tag, receipt) = delivered_first.as_ref().unwrap();
+                let memory = f.memory.lock().await;
+                let (session, _) = memory.as_ref().unwrap();
+                let calls = f.calls.lock().await;
+                assert_eq!(calls[1]["conversation"], *session);
+                assert!(!calls[1]["input"].as_str().unwrap().contains(receipt));
+                format!("Receipt {receipt} belongs to {tag}.")
+            };
+            assert_eq!(text, expected);
+            let receipt = relay_final(&f, &source, text, thread_reply)
+                .await
+                .unwrap()
+                .0;
             assert_eq!(
                 receipt.platform_message_id.as_deref(),
                 Some((1000 + source.native_id).to_string().as_str())
             );
-            expected_sends.push((source.native_id, text.to_owned()));
+            expected_sends.push((source.native_id, expected));
         }
-        originals.push((source, turn, response_id));
+        originals.push(Original {
+            source,
+            turn_id: turn,
+            response_id,
+            thread_reply,
+        });
+        // Inspect the actual mock transport before the next source is admitted.
+        // This rejects a missing/pending-only base as well as extra or wrong sends.
+        let delivered = verify_receipts(&f, &originals, &expected_sends).await;
+        if index == 0 && !first_fails {
+            let (tag, receipt) = delivered.primary_posts[0]
+                .1
+                .split_once(" receipt ")
+                .unwrap();
+            delivered_first = Some((tag.into(), receipt.into()));
+        }
     }
     let delivered = verify_receipts(&f, &originals, &expected_sends).await;
     // C2 follows the original base answer. All replays, including consumed
     // delivery tokens, run only after these two independent messages settle.
-    for (source, turn, response_id) in &originals {
+    for original in &originals {
+        let source = &original.source;
         let replay = provider_frames(&f.state, &f.key, &source.request, &source.id).await;
+        let replay_thread_reply = private_reply_route(&replay);
+        assert_eq!(replay_thread_reply, original.thread_reply);
         assert_eq!(f.calls.lock().await.len(), 2);
         assert_eq!(
             f.state
@@ -404,18 +447,25 @@ async fn continuity(first_fails: bool) {
         let mapping = crate::services::nyxbot_response_read::mapping(&replayed)
             .unwrap()
             .unwrap();
-        assert_empty_replay(&replay, response_id, &mapping, &source.request["metadata"]);
+        assert_eq!(mapping.thread_reply, Some(original.thread_reply));
+        assert_empty_replay(
+            &replay,
+            &original.response_id,
+            &mapping,
+            &source.request["metadata"],
+        );
         let replayed: NyxbotEvent = bson::from_document(replayed).unwrap();
         assert_eq!(
             replayed.conversation_id.as_deref(),
             Some(f.home.id.as_str())
         );
-        assert_eq!(replayed.turn_id.as_deref(), Some(turn.as_str()));
+        assert_eq!(replayed.turn_id.as_deref(), Some(original.turn_id.as_str()));
         if expected_sends
             .iter()
             .any(|(native, _)| *native == source.native_id)
         {
-            let duplicate = relay_final(&f, source, "duplicate must not send").await;
+            let duplicate =
+                relay_final(&f, source, "duplicate must not send", replay_thread_reply).await;
             assert!(
                 matches!(duplicate, Err(AppError::Unauthorized(message)) if message == "Reply token already used")
             );
@@ -451,6 +501,27 @@ async fn continuity(first_fails: bool) {
     let db = f.state.db.clone();
     drop(f);
     db.drop().await.unwrap();
+}
+
+/// Legacy/private created frames omit the marker; any explicit marker must be
+/// boolean and consistent. A true marker on any response would route to a thread.
+fn private_reply_route(frames: &[Value]) -> bool {
+    assert_eq!(frames[0]["type"], "response.created");
+    let thread_reply = frames[0]["response"]
+        .get("thread_reply")
+        .map(|value| value.as_bool().expect("thread_reply is a boolean"))
+        .unwrap_or(false);
+    assert!(!thread_reply, "private DM must not select a thread route");
+    for frame in frames {
+        if let Some(value) = frame["response"].get("thread_reply") {
+            assert_eq!(
+                value.as_bool(),
+                Some(thread_reply),
+                "response route marker cannot change"
+            );
+        }
+    }
+    thread_reply
 }
 
 fn assert_empty_replay(
@@ -500,13 +571,14 @@ async fn relay_final(
     f: &Fixture,
     source: &Source,
     text: &str,
+    thread_reply: bool,
 ) -> AppResult<Json<crate::handlers::channel_relay::AsyncReplyResponse>> {
     crate::handlers::channel_relay::async_reply(
         State(f.state.clone()),
         bearer(&source.reply_token),
         crate::mw::auth::OptionalAuthUser(None),
         Json(crate::handlers::channel_relay::AsyncReplyRequest {
-            thread_reply: false,
+            thread_reply,
             message_id: source.id.clone(),
             reply: crate::handlers::channel_relay::AsyncReplyBody {
                 text: Some(text.into()),
@@ -524,15 +596,21 @@ struct DeliveryCounts {
     primary: usize,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct DeliveryEvidence {
+    counts: Vec<DeliveryCounts>,
+    primary_posts: Vec<(i64, String)>,
+}
+
 async fn verify_receipts(
     f: &Fixture,
-    originals: &[(Source, String, String)],
+    originals: &[Original],
     expected: &[(i64, String)],
-) -> Vec<DeliveryCounts> {
+) -> DeliveryEvidence {
     let db = &f.state.db;
     let requests = f.platform.received_requests().await.unwrap();
     let mut counts = vec![DeliveryCounts::default(); originals.len()];
-    let mut primary_order = Vec::new();
+    let mut primary_posts = Vec::new();
     for request in &requests {
         assert_eq!(request.method.as_str(), "POST");
         assert!(request.url.path() == "/bot123:org-dm-2641-test/sendMessage");
@@ -541,10 +619,14 @@ async fn verify_receipts(
             body["chat_id"], "7",
             "every send stays in the original private DM"
         );
+        assert!(
+            body.get("message_thread_id").is_none(),
+            "private Telegram payload has no thread target"
+        );
         let native_id = body["reply_to_message_id"].as_i64().unwrap();
         let index = originals
             .iter()
-            .position(|(source, _, _)| source.native_id == native_id)
+            .position(|original| original.source.native_id == native_id)
             .expect("send must reply to an original source");
         if body["text"] == Notice::Pending.text(None) {
             assert_eq!(
@@ -563,18 +645,22 @@ async fn verify_receipts(
                 .expect("failed source has no primary reply");
             assert_eq!(body["text"], *text, "unexpected primary content");
             counts[index].primary += 1;
-            primary_order.push(native_id);
+            primary_posts.push((native_id, body["text"].as_str().unwrap().to_owned()));
         }
     }
     assert_eq!(
-        primary_order,
+        primary_posts
+            .iter()
+            .map(|(native, _)| *native)
+            .collect::<Vec<_>>(),
         expected
             .iter()
             .map(|(native, _)| *native)
             .collect::<Vec<_>>(),
         "primary replies retain the original source order"
     );
-    for ((source, _, _), count) in originals.iter().zip(&counts) {
+    for (original, count) in originals.iter().zip(&counts) {
+        let source = &original.source;
         let primary = expected
             .iter()
             .any(|(native, _)| *native == source.native_id);
@@ -618,7 +704,10 @@ async fn verify_receipts(
             assert_eq!(outbound.user_id, f.org_id);
         }
     }
-    counts
+    DeliveryEvidence {
+        counts,
+        primary_posts,
+    }
 }
 
 async fn relay_source(f: &Fixture, index: usize, text: &str) -> Source {

@@ -397,7 +397,7 @@ async fn run_job_once(state: &AppState, job: &Document) -> AppResult<()> {
         return deliver_existing(state, job, &run, &trigger).await;
     };
     let agent = match team::agent(&state.db, &run.user_id, agent_id).await {
-        Ok(agent) if agent.org_use_revision != run.org_use_revision => {
+        Ok(agent) if agent.org_use_revision != run.member_use.org_use_revision => {
             return schedules::finish_claimed(
                 &state.db,
                 job,
@@ -798,7 +798,7 @@ async fn deliver_existing(
                     &claim,
                     "",
                     &admission_run.id,
-                    0,
+                    Default::default(),
                     session,
                 )
                 .await,
@@ -908,13 +908,14 @@ pub(super) async fn settle_result(
         .await
         {
             Ok(agent) => {
+                let acl = crate::services::org_agent_service::access(&state.db, &row.user_id, org)
+                    .await?;
                 agent.user_id == org
-                    && agent.org_use_revision == run.org_use_revision
+                    && agent.member_use(acl.eligibility_revision()) == run.member_use
                     && crate::services::org_agent_service::specialist_rights(
                         &row.user_id,
                         &agent,
-                        &crate::services::org_agent_service::access(&state.db, &row.user_id, org)
-                            .await?,
+                        &acl,
                     )
                     .can_use
             }

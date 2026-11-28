@@ -174,7 +174,7 @@ pub(crate) async fn discord_fixture(base: &str) -> (AppState, ChannelBot, Native
     discord_fixture_with_keys(base, crate::test_utils::test_encryption_keys()).await
 }
 
-async fn discord_fixture_with_keys(
+pub(crate) async fn discord_fixture_with_keys(
     base: &str,
     keys: crate::crypto::aes::EncryptionKeys,
 ) -> (AppState, ChannelBot, NativeEntryReceipt) {

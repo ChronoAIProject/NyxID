@@ -19,7 +19,7 @@ use zeroize::Zeroizing;
 
 pub(crate) const RECEIPT_MISSING: &str = "native_reply_parent_receipt_missing";
 
-struct Binding<'a> {
+pub(in crate::services) struct Binding<'a> {
     receipt: &'a NativeEntryReceipt,
     digest: String,
     created: String,
@@ -31,6 +31,14 @@ impl<'a> Binding<'a> {
         receipt: &'a NativeEntryReceipt,
         created: DateTime<Utc>,
         expires: DateTime<Utc>,
+    ) -> AppResult<Self> {
+        Self::new_at(receipt, created, expires, Utc::now())
+    }
+    fn new_at(
+        receipt: &'a NativeEntryReceipt,
+        created: DateTime<Utc>,
+        expires: DateTime<Utc>,
+        as_of: DateTime<Utc>,
     ) -> AppResult<Self> {
         let digest = binding_digest(receipt)?;
         let interaction = discord_interaction_time(&receipt.event_id)?;
@@ -44,7 +52,7 @@ impl<'a> Binding<'a> {
                 .bytes()
                 .all(|b| b.is_ascii_hexdigit())
             || created < receipt.received_at
-            || created > Utc::now()
+            || created > as_of
             || expires < created
             || expires > receipt.expires_at
             || expires > interaction + Duration::minutes(14)
@@ -60,7 +68,14 @@ impl<'a> Binding<'a> {
     }
 
     fn stored(handle: &NativeReplyHandle, receipt: &'a NativeEntryReceipt) -> AppResult<Self> {
-        let binding = Self::new(receipt, handle.created_at, handle.expires_at)?;
+        Self::stored_at(handle, receipt, Utc::now())
+    }
+    pub(in crate::services) fn stored_at(
+        handle: &NativeReplyHandle,
+        receipt: &'a NativeEntryReceipt,
+        as_of: DateTime<Utc>,
+    ) -> AppResult<Self> {
+        let binding = Self::new_at(receipt, handle.created_at, handle.expires_at, as_of)?;
         if !uuid::Uuid::parse_str(&handle.id).is_ok_and(|id| id.get_version_num() == 4)
             || handle.receipt_id != receipt.id
             || handle.binding_digest != binding.digest
@@ -72,11 +87,11 @@ impl<'a> Binding<'a> {
         Ok(binding)
     }
 
-    fn historical(&self) -> AppResult<HistoricalAad<'_>> {
+    pub(in crate::services) fn historical(&self) -> AppResult<HistoricalAad<'_>> {
         HistoricalAad::native_reply(&self.digest).ok_or_else(refused)
     }
 
-    fn path(&self) -> [&str; 6] {
+    pub(in crate::services) fn path(&self) -> [&str; 6] {
         [
             "ciphertext",
             &self.receipt.profile_id,
@@ -129,6 +144,9 @@ impl<'a> Binding<'a> {
             .await
     }
 
+    pub(in crate::services) fn validate_plain(&self, plain: &[u8]) -> AppResult<()> {
+        self.material(plain).map(drop)
+    }
     fn material(&self, plain: &[u8]) -> AppResult<DiscordReplySecret> {
         let NativeControlSurface::DiscordCommand { application_id, .. } =
             &self.receipt.configuration.control_surface

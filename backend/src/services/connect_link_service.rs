@@ -2075,10 +2075,13 @@ mod tests {
             let server = MockServer::start().await;
             let mut provider = test_oauth_provider();
             provider.default_scopes = Some(vec!["read:user".to_string(), "read:org".to_string()]);
-            provider.client_id_encrypted =
-                Some(state.encryption_keys.encrypt(b"test-client").await.unwrap());
-            provider.client_secret_encrypted =
-                Some(state.encryption_keys.encrypt(b"test-secret").await.unwrap());
+            crate::services::credential_test_fixtures::provider_client(
+                &state.encryption_keys,
+                &mut provider,
+                "test-client",
+                Some("test-secret"),
+            )
+            .await;
             if device {
                 provider.provider_type = "device_code".to_string();
                 provider.device_code_url = Some(format!("{}/device", server.uri()));
@@ -2438,24 +2441,18 @@ mod tests {
                 .await
                 .expect("serve terminal webhook receiver")
         });
-        let client = insert_oauth_client(&db, "Webhook App", Vec::new()).await;
+        let mut client = insert_oauth_client(&db, "Webhook App", Vec::new()).await;
         let keys = std::sync::Arc::new(crate::test_utils::test_encryption_keys());
-        let encrypted_secret = keys
-            .encrypt(b"terminal-webhook-secret")
-            .await
-            .expect("encrypt terminal webhook secret");
+        crate::services::credential_test_fixtures::connection_webhook_secret(
+            &keys,
+            &mut client,
+            "terminal-webhook-secret",
+        )
+        .await;
+        client.connection_webhook_url = Some(format!("http://{address}/events"));
+        client.connection_webhook_enabled = true;
         db.collection::<OauthClient>(OAUTH_CLIENTS)
-            .update_one(
-                doc! { "_id": &client.id },
-                doc! { "$set": {
-                    "connection_webhook_url": format!("http://{address}/events"),
-                    "connection_webhook_secret_encrypted": bson::Binary {
-                        subtype: bson::spec::BinarySubtype::Generic,
-                        bytes: encrypted_secret,
-                    },
-                    "connection_webhook_enabled": true,
-                }},
-            )
+            .replace_one(doc! {"_id": &client.id}, &client)
             .await
             .expect("configure terminal webhook");
         db.collection::<ConnectLink>(CONNECT_LINKS)
@@ -2535,22 +2532,19 @@ mod tests {
         let _delivery_origin =
             crate::services::resource_adapter::register_test_origin(&format!("http://{address}"));
         tokio::spawn(async move { axum::serve(listener, receiver).await.unwrap() });
-        let client = insert_oauth_client(&db, "Outbox App", Vec::new()).await;
+        let mut client = insert_oauth_client(&db, "Outbox App", Vec::new()).await;
         let keys = std::sync::Arc::new(crate::test_utils::test_encryption_keys());
-        let encrypted = keys.encrypt(b"outbox-secret").await.unwrap();
+        crate::services::credential_test_fixtures::connection_webhook_secret(
+            &keys,
+            &mut client,
+            "outbox-secret",
+        )
+        .await;
+        client.connection_webhook_url = Some(format!("http://{address}/events"));
+        client.connection_webhook_enabled = true;
+        client.connection_webhook_key_id = Some("key_outbox".into());
         db.collection::<OauthClient>(OAUTH_CLIENTS)
-            .update_one(
-                doc! { "_id": &client.id },
-                doc! { "$set": {
-                    "connection_webhook_url": format!("http://{address}/events"),
-                    "connection_webhook_secret_encrypted": bson::Binary {
-                        subtype: bson::spec::BinarySubtype::Generic,
-                        bytes: encrypted,
-                    },
-                    "connection_webhook_key_id": "key_outbox",
-                    "connection_webhook_enabled": true,
-                }},
-            )
+            .replace_one(doc! {"_id": &client.id}, &client)
             .await
             .unwrap();
         let event_id = Uuid::new_v4().to_string();
@@ -2702,24 +2696,18 @@ mod tests {
                 .expect("serve expiry webhook receiver")
         });
 
-        let client = insert_oauth_client(&db, "Expiry Webhook App", Vec::new()).await;
+        let mut client = insert_oauth_client(&db, "Expiry Webhook App", Vec::new()).await;
         let keys = std::sync::Arc::new(crate::test_utils::test_encryption_keys());
-        let encrypted_secret = keys
-            .encrypt(b"expiry-webhook-secret")
-            .await
-            .expect("encrypt expiry webhook secret");
+        crate::services::credential_test_fixtures::connection_webhook_secret(
+            &keys,
+            &mut client,
+            "expiry-webhook-secret",
+        )
+        .await;
+        client.connection_webhook_url = Some(format!("http://{address}/events"));
+        client.connection_webhook_enabled = true;
         db.collection::<OauthClient>(OAUTH_CLIENTS)
-            .update_one(
-                doc! { "_id": &client.id },
-                doc! { "$set": {
-                    "connection_webhook_url": format!("http://{address}/events"),
-                    "connection_webhook_secret_encrypted": bson::Binary {
-                        subtype: bson::spec::BinarySubtype::Generic,
-                        bytes: encrypted_secret,
-                    },
-                    "connection_webhook_enabled": true,
-                }},
-            )
+            .replace_one(doc! {"_id": &client.id}, &client)
             .await
             .expect("configure expiry webhook");
         db.collection::<ConnectLink>(CONNECT_LINKS)

@@ -1,7 +1,7 @@
 //! The mixed-binary driver exchanges raw BSON from the serving writers and the
 //! one-day cleanup. The writer switch controls the actual stored envelopes.
 use super::*;
-use crate::crypto::{aes::EncryptionKeys, record_field::RecordContext};
+use crate::crypto::aes::EncryptionKeys;
 use crate::services::security_readiness_service as readiness;
 use proposals::record::{self, Field};
 use sha2::{Digest, Sha256};
@@ -28,25 +28,25 @@ async fn capture(
     f: &Fixture,
     id: &str,
     slot: &str,
-    field: &str,
+    field: Field,
     contextual: bool,
 ) -> (Document, String) {
     let row = snapshot(f, id).await;
-    let binary = arm(&row, slot).get_binary_generic(field).unwrap();
-    let marker = format!("{field}_context_version");
-    let keys = &f.state.encryption_keys;
-    let plain = if contextual {
-        assert_eq!(arm(&row, slot).get_i32(&marker), Ok(3));
-        let path = ["execution_proposal", slot, field];
-        let context = RecordContext::new("approval_requests", id, &f.owner, &path).unwrap();
-        keys.decrypt_record(binary, &context).await.unwrap()
-    } else {
-        assert!(!arm(&row, slot).contains_key(&marker));
-        let version = if slot == "v2" { "v2" } else { "v1" };
-        let suffix = if field == "result" { ":result" } else { "" };
-        let aad = format!("execution-proposal:{version}:{id}{suffix}");
-        keys.decrypt_with_aad(binary, aad.as_bytes()).await.unwrap()
+    let marker = match field {
+        Field::Payload => "payload_context_version",
+        Field::Result => "result_context_version",
     };
+    if contextual {
+        assert_eq!(arm(&row, slot).get_i32(marker), Ok(3));
+    } else {
+        assert!(!arm(&row, slot).contains_key(marker));
+    }
+    let request: ApprovalRequest = bson::from_document(row.clone()).unwrap();
+    let plain = field
+        .open(&f.state.encryption_keys, &request)
+        .await
+        .unwrap()
+        .unwrap();
     (row, hex::encode(Sha256::digest(&plain[..])))
 }
 
@@ -99,7 +99,7 @@ async fn lifecycle(version: u32, writes: bool) -> Document {
         .unwrap();
     let id = &row.id;
     let slot = format!("v{version}");
-    let (pending, payload_hash) = capture(&f, id, &slot, "payload", writes).await;
+    let (pending, payload_hash) = capture(&f, id, &slot, Field::Payload, writes).await;
     let decision = if version == 2 {
         external::choice(&row, "operation")
     } else {
@@ -116,7 +116,7 @@ async fn lifecycle(version: u32, writes: bool) -> Document {
         Box::pin(external::run(&f, &approved)).await;
     }
     assert_eq!(f.server.received_requests().await.unwrap().len(), 1);
-    let (completed, _) = capture(&f, id, &slot, "result", writes).await;
+    let (completed, _) = capture(&f, id, &slot, Field::Result, writes).await;
     assert!(!arm(&completed, &slot).contains_key("payload_context_version"));
     for key in [
         "gap_key",

@@ -723,31 +723,7 @@ mod tests {
         db.collection::<bson::Document>(crate::models::api_key::COLLECTION_NAME)
             .insert_one(doc! {"_id": "fixture-key", "expires_at": bson::DateTime::parse_rfc3339_str("2099-01-01T00:00:00Z").unwrap()})
             .await.unwrap();
-        let api_key_encrypted = encrypt_for_test("nyx_secret").await;
-        let refresh_token_encrypted = encrypt_for_test("refresh_secret").await;
-        db.collection::<DeviceCode>(DEVICE_CODES)
-            .update_one(
-                doc! { "device_code_hash": hash_token(&response.device_code) },
-                doc! {
-                    "$set": {
-                        "status": "approved",
-                        "approved_by_user_id": "fixture-person",
-                        "issued_node_id": "node-1",
-                        "issued_api_key_id": "fixture-key",
-                        "delivery_api_key_encrypted": bson::Binary {
-                            subtype: bson::spec::BinarySubtype::Generic,
-                            bytes: api_key_encrypted,
-                        },
-                        "delivery_refresh_token_encrypted": bson::Binary {
-                            subtype: bson::spec::BinarySubtype::Generic,
-                            bytes: refresh_token_encrypted,
-                        },
-                        "refresh_token_hash": hash_token("refresh_secret"),
-                    }
-                },
-            )
-            .await
-            .expect("approve row");
+        approve_for_test(&db, &response.device_code).await;
         let timestamp = Utc::now().timestamp();
 
         let poll_response = poll_for_test(
@@ -806,31 +782,7 @@ mod tests {
         db.collection::<bson::Document>(crate::models::api_key::COLLECTION_NAME)
             .insert_one(doc! {"_id": "fixture-key", "expires_at": bson::DateTime::parse_rfc3339_str("2099-01-01T00:00:00Z").unwrap()})
             .await.unwrap();
-        let api_key_encrypted = encrypt_for_test("nyx_secret").await;
-        let refresh_token_encrypted = encrypt_for_test("refresh_secret").await;
-        db.collection::<DeviceCode>(DEVICE_CODES)
-            .update_one(
-                doc! { "device_code_hash": hash_token(&response.device_code) },
-                doc! {
-                    "$set": {
-                        "status": "approved",
-                        "approved_by_user_id": "fixture-person",
-                        "issued_node_id": "node-1",
-                        "issued_api_key_id": "fixture-key",
-                        "delivery_api_key_encrypted": bson::Binary {
-                            subtype: bson::spec::BinarySubtype::Generic,
-                            bytes: api_key_encrypted,
-                        },
-                        "delivery_refresh_token_encrypted": bson::Binary {
-                            subtype: bson::spec::BinarySubtype::Generic,
-                            bytes: refresh_token_encrypted,
-                        },
-                        "refresh_token_hash": hash_token("refresh_secret"),
-                    }
-                },
-            )
-            .await
-            .expect("approve row");
+        approve_for_test(&db, &response.device_code).await;
         let timestamp = Utc::now().timestamp();
         let first = DeviceCodePollInput {
             device_code: response.device_code.clone(),
@@ -875,10 +827,30 @@ mod tests {
         poll(db, &encryption_keys, input).await
     }
 
-    async fn encrypt_for_test(secret: &str) -> Vec<u8> {
-        test_encryption_keys()
-            .encrypt(secret.as_bytes())
+    async fn approve_for_test(db: &Database, code: &str) {
+        let rows = db.collection::<DeviceCode>(DEVICE_CODES);
+        let row = rows
+            .find_one(doc! {"device_code_hash": hash_token(code)})
             .await
-            .expect("encrypt test delivery secret")
+            .unwrap()
+            .unwrap();
+        let refresh_hash = hash_token("refresh_secret");
+        let binding = super::super::record::Binding::new(
+            &row,
+            "fixture-person",
+            None,
+            "fixture-key",
+            "node-1",
+            &refresh_hash,
+        )
+        .unwrap();
+        let mut set = binding
+            .seal_pair(&test_encryption_keys(), "nyx_secret", "refresh_secret")
+            .await
+            .unwrap();
+        set.extend(doc! {"status": "approved", "approved_by_user_id":"fixture-person", "issued_api_key_id":"fixture-key", "issued_node_id":"node-1", "refresh_token_hash":refresh_hash});
+        rows.update_one(doc! {"_id":row.id}, doc! {"$set":set})
+            .await
+            .expect("approve row");
     }
 }

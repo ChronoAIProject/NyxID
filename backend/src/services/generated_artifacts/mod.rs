@@ -233,7 +233,7 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
     Ok(())
 }
 pub const PREPARE_BUDGET: &str = "generated_artifact_budget_required";
-fn context_path(row: &PendingArtifact) -> [&str; 11] {
+pub(crate) fn context_path(row: &PendingArtifact) -> [&str; 11] {
     [
         "data_encrypted",
         "conversation",

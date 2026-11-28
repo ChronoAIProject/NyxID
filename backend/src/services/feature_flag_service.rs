@@ -4075,6 +4075,7 @@ mod tests {
             .expect("insert org user");
         db.collection::<OrgMembership>(MEMBERSHIPS)
             .insert_one(OrgMembership {
+                eligibility_revision: 0,
                 id: Uuid::new_v4().to_string(),
                 org_user_id: org_id.clone(),
                 member_user_id: member_id.clone(),
@@ -4382,6 +4383,7 @@ mod tests {
             .expect("insert org user");
         db.collection::<OrgMembership>(MEMBERSHIPS)
             .insert_one(OrgMembership {
+                eligibility_revision: 0,
                 id: Uuid::new_v4().to_string(),
                 org_user_id: org_id.clone(),
                 member_user_id: member_id.clone(),
@@ -4549,6 +4551,7 @@ mod tests {
             .unwrap();
         db.collection::<OrgMembership>(MEMBERSHIPS)
             .insert_one(OrgMembership {
+                eligibility_revision: 0,
                 id: Uuid::new_v4().to_string(),
                 org_user_id: org.clone(),
                 member_user_id: person.clone(),
@@ -4564,6 +4567,7 @@ mod tests {
         // for role-targeted overrides in an otherwise matching organization.
         db.collection::<OrgMembership>(MEMBERSHIPS)
             .insert_one(OrgMembership {
+                eligibility_revision: 0,
                 id: Uuid::new_v4().to_string(),
                 org_user_id: org.clone(),
                 member_user_id: outsider.clone(),

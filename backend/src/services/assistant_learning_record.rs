@@ -20,7 +20,7 @@ pub(super) enum Field<'a> {
 }
 
 impl<'a> Field<'a> {
-    fn path(self, agent: &'a str) -> Vec<&'a str> {
+    pub(super) fn path(self, agent: &'a str) -> Vec<&'a str> {
         match self {
             Self::Body => vec!["body_encrypted", agent],
             Self::Scope => vec!["scope_encrypted", agent],

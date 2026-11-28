@@ -1375,6 +1375,9 @@ pub async fn events(
 }
 
 #[cfg(test)]
+mod historical;
+
+#[cfg(test)]
 mod tests {
     use super::super::assistant_cma_gateway::*;
     use super::*;
@@ -2339,7 +2342,7 @@ mod tests {
         let mut before = fixture_row();
         let body = br#"{"name":"unchanged observation"}"#;
         before.request_hash = Some(prepare_creation_request(body).unwrap().hash);
-        before.request_ciphertext = Some(keys.encrypt(body).await.unwrap());
+        before.request_ciphertext = Some(hex::decode(historical::CMA_REQUEST).unwrap());
         before.request_context_version = None;
         let mut after = before.clone();
         apply_observation(

@@ -13,8 +13,9 @@ use std::fmt;
 use crate::AppState;
 use crate::crypto::device_code::decode_device_code;
 use crate::errors::{AppError, AppResult};
-use crate::handlers::auth::{extract_ip, extract_user_agent};
+use crate::handlers::auth::extract_user_agent;
 use crate::mw::auth::AuthUser;
+use crate::mw::rate_limit::AuditIp;
 use crate::redaction::RedactedLen;
 #[cfg(not(test))]
 use crate::services::audit_service;
@@ -165,7 +166,7 @@ pub async fn poll_device_code(
 ) -> AppResult<Json<DeviceCodePoll>> {
     let device_code = normalize_device_code(&req.device_code)?;
     let signature = decode_poll_signature(&req.signature)?;
-    let ip_address = extract_ip(&headers, Some(peer));
+    let ip_address = AuditIp::resolve(&headers, Some(peer), &state.config.trusted_proxy_ips).0;
     let user_agent = extract_user_agent(&headers);
     let response = match poll(
         &state.db,

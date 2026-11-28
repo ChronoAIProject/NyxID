@@ -83,6 +83,19 @@ creates fresh authority and activation state. A client returning to a replaced
 session receives HTTP 404 and initializes again with its live credential.
 Sessions below capacity retain the existing 30-day idle lifetime.
 
+MCP session identifiers remain on the wire for client continuity while durable
+session rows use the domain-separated `mcp:session-id-hash-v1` storage key after
+that capability is durably activated by the security-readiness rollout. Readers
+try the hash and legacy raw key during the transition. Activation starts a
+bounded transaction-per-session migration that moves the session, slot and
+notification references together. Sessions created before activation expire at
+most seven days after activation, so clients reinitialize after that boundary.
+New session audit events carry the domain-separated hash. Historical chained audit rows retain their original values. The seven-day deadline bounds the lifetime of session IDs in those rows.
+The release that activates this capability is the rollback floor. Older
+binaries must not rejoin after activation because they cannot read hash-only
+rows. Clients reinitialize when an older server cannot find the session. Before activation, writes retain the legacy raw key and rollback remains
+compatible.
+
 Initialization echoes the supported client version (`2025-06-18` or
 `2025-11-25`); an unsupported version receives the server's latest supported
 version, as required by MCP version negotiation.

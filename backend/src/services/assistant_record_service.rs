@@ -16,7 +16,7 @@ fn invalid() -> AppError {
     AppError::Internal("Assistant encrypted field authentication is invalid".into())
 }
 
-fn credential_path(row: &AssistantAgentCredential) -> [&str; 6] {
+pub(super) fn credential_path(row: &AssistantAgentCredential) -> [&str; 6] {
     [
         "key_ciphertext",
         "conversation",
@@ -301,13 +301,13 @@ pub(crate) async fn decrypt_chunk(
 
 /// The collection has three distinct storage variants. Resolve the relationship
 /// before authenticating a chunk; its own mutable parent/index are not authority.
-struct AttachmentIdentity {
+pub(super) struct AttachmentIdentity {
     id: String,
     owner: String,
-    field: &'static str,
-    path: Vec<String>,
-    version: Option<u8>,
-    ciphertext: Vec<u8>,
+    pub(super) field: &'static str,
+    pub(super) path: Vec<String>,
+    pub(super) version: Option<u8>,
+    pub(super) ciphertext: Vec<u8>,
     expected_size: Option<usize>,
     text_content_type: Option<String>,
     preview: bool,
@@ -317,6 +317,45 @@ async fn attachment_identity(
     db: &mongodb::Database,
     source: &bson::Document,
 ) -> AppResult<AttachmentIdentity> {
+    let root = match source.get("parent_attachment_id") {
+        None => None,
+        Some(value) => {
+            let id = value.as_str().ok_or_else(invalid)?;
+            db.collection::<bson::Document>(crate::models::assistant_attachment::COLLECTION_NAME)
+                .find_one(bson::doc! {"_id": id})
+                .await?
+        }
+    };
+    attachment_at(source, root)
+}
+
+pub(super) fn attachment_child_path(source: &bson::Document) -> AppResult<Vec<String>> {
+    if source.get_str("origin") == Ok(super::assistant_upload_service::pdf_vision::ORIGIN) {
+        let page = bson::from_document(source.clone()).map_err(|_| invalid())?;
+        Ok(super::assistant_upload_service::pdf_vision::path(&page))
+    } else {
+        let parent = source
+            .get_str("parent_attachment_id")
+            .map_err(|_| invalid())?;
+        let index = source.get_i64("chunk_index").map_err(|_| invalid())?;
+        Ok(chunk_path(parent, index))
+    }
+}
+
+fn chunk_path(root: &str, index: i64) -> Vec<String> {
+    vec![
+        "data_encrypted".into(),
+        "parent_attachment_id".into(),
+        root.into(),
+        "chunk_index".into(),
+        index.to_string(),
+    ]
+}
+
+pub(super) fn attachment_at(
+    source: &bson::Document,
+    root: Option<bson::Document>,
+) -> AppResult<AttachmentIdentity> {
     let id = source.get_str("_id").map_err(|_| invalid())?.to_owned();
     let owner = source.get_str("user_id").map_err(|_| invalid())?.to_owned();
     let (field, path, expected_size, text_content_type, preview) = if source.get_str("origin").ok()
@@ -324,7 +363,8 @@ async fn attachment_identity(
     {
         let page: crate::models::assistant_upload::PdfPage =
             bson::from_document(source.clone()).map_err(|_| invalid())?;
-        super::assistant_upload_service::pdf_vision::validate_parent(db, &page).await?;
+        let parent = bson::from_document(root.ok_or_else(invalid)?).map_err(|_| invalid())?;
+        super::assistant_upload_service::pdf_vision::check_parent(&page, &parent)?;
         (
             "data_encrypted",
             super::assistant_upload_service::pdf_vision::path(&page),
@@ -337,13 +377,13 @@ async fn attachment_identity(
             .get_str("parent_attachment_id")
             .map_err(|_| invalid())?;
         let index = source.get_i64("chunk_index").map_err(|_| invalid())?;
-        let root = db
-            .collection::<bson::Document>(crate::models::assistant_attachment::COLLECTION_NAME)
-            .find_one(
-                bson::doc! {"_id":root_id,"user_id":&owner,"origin":{"$in":["user_upload","tool"]}},
-            )
-            .await?
-            .ok_or_else(invalid)?;
+        let root = root.ok_or_else(invalid)?;
+        if root.get_str("_id") != Ok(root_id)
+            || root.get_str("user_id") != Ok(owner.as_str())
+            || !matches!(root.get_str("origin"), Ok("tool" | "user_upload"))
+        {
+            return Err(invalid());
+        }
         let (root_id, conversation, group, size, chunks) =
             if root.get_str("origin").ok() == Some("tool") {
                 let root: AssistantAttachment = bson::from_document(root).map_err(|_| invalid())?;
@@ -386,13 +426,7 @@ async fn attachment_identity(
         let expected_size = (size - (index as usize) * CHUNK).min(CHUNK);
         (
             "data_encrypted",
-            vec![
-                "data_encrypted".into(),
-                "parent_attachment_id".into(),
-                root_id,
-                "chunk_index".into(),
-                index.to_string(),
-            ],
+            chunk_path(&root_id, index),
             Some(expected_size),
             None,
             false,
@@ -466,7 +500,10 @@ async fn attachment_identity(
     })
 }
 
-fn validate_attachment_plain(identity: &AttachmentIdentity, plain: &[u8]) -> AppResult<()> {
+pub(super) fn validate_attachment_plain(
+    identity: &AttachmentIdentity,
+    plain: &[u8],
+) -> AppResult<()> {
     if identity
         .expected_size
         .is_some_and(|size| size != plain.len())
@@ -574,6 +611,23 @@ pub(crate) async fn migrate_attachment_snapshot(
 }
 
 #[cfg(test)]
+pub(crate) async fn set_fixture_image_data(
+    keys: &EncryptionKeys,
+    row: &mut AssistantAttachment,
+    bytes: &[u8],
+) {
+    row.data_encrypted = encrypt_image(keys, row, bytes).await.unwrap();
+    super::credential_record_service::mark_version(
+        &mut row.secret_context_versions,
+        keys,
+        "data_encrypted",
+    );
+}
+
+#[cfg(test)]
+mod historical;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use bson::{Binary, doc, spec::BinarySubtype};
@@ -621,26 +675,26 @@ mod tests {
         let root_id = uuid::Uuid::new_v4().to_string();
         let collection = crate::models::assistant_attachment::COLLECTION_NAME;
         let rows = db.collection::<bson::Document>(collection);
-        let text = crate::crypto::secret_json::SecretJson(serde_json::json!({
-            "content_type":"text/plain","text":"hello","sections":[{"offset":0,"label":"Page 1"}]}));
-        let encoded = crate::crypto::secret_json::to_secret_string(&text.0).unwrap();
         // The legacy storage is deliberately an integer array, not Binary.
         let root = doc! {"_id":&root_id,"user_id":&owner,"origin":"user_upload",
         "conversation_id":"nyxa-fixture","group_id":bson::Bson::Null,
         "message_id":bson::Bson::Null,"label":"fixture.txt","content_type":"text/plain",
         "size":5_i64,"pages":1_i64,"chunks":1_i64,
-        "text_encrypted":keys.encrypt(encoded.as_bytes()).await.unwrap().iter().map(|b|bson::Bson::Int32(*b as i32)).collect::<Vec<_>>(),
+        "text_encrypted":hex::decode(historical::EXTRACTED_TEXT).unwrap().iter().map(|b|bson::Bson::Int32(*b as i32)).collect::<Vec<_>>(),
         "created_at":bson::DateTime::now()};
         let chunk = doc! {"_id":uuid::Uuid::new_v4().to_string(),"user_id":&owner,
         "conversation_id":"nyxa-fixture","group_id":bson::Bson::Null,
         "parent_attachment_id":&root_id,"chunk_index":0_i64,
-        "data_encrypted":Binary{subtype:BinarySubtype::Generic,bytes:keys.encrypt(b"hello").await.unwrap()}};
+        "data_encrypted":Binary{subtype:BinarySubtype::Generic,bytes:hex::decode(historical::CHUNK).unwrap()}};
         let mut sources = vec![root.clone(), chunk];
-        for origin in ["tool", "machine_preview"] {
+        for (origin, ciphertext) in [
+            ("tool", historical::TOOL_IMAGE),
+            ("machine_preview", historical::MACHINE_PREVIEW),
+        ] {
             sources.push(doc! {"_id":uuid::Uuid::new_v4().to_string(),"user_id":&owner,
                 "origin":origin,"conversation_id":"nyxa-fixture","turn_id":"turn-fixture",
                 "content_type":if origin=="tool" {"image/png"} else {"text/plain"},"size":5_i64,
-                "data_encrypted":Binary{subtype:BinarySubtype::Generic,bytes:keys.encrypt(b"hello").await.unwrap()},
+                "data_encrypted":Binary{subtype:BinarySubtype::Generic,bytes:hex::decode(ciphertext).unwrap()},
                 "created_at":bson::DateTime::now()});
         }
         rows.insert_many(&sources).await.unwrap();
@@ -741,7 +795,7 @@ mod tests {
             .unwrap();
         let source = doc! {"_id":&id,"user_id":&owner,"api_key_id":&key_id,
         "key_ciphertext":Binary{subtype:BinarySubtype::Generic,
-            bytes:keys.encrypt(raw.as_bytes()).await.unwrap()},
+            bytes:hex::decode(historical::AGENT_KEY).unwrap()},
         "created_at":bson::DateTime::now(),"last_used_at":bson::DateTime::now()};
         assert!(!source.contains_key("conversation_id"));
         assert!(!source.contains_key("secret_context_versions"));

@@ -400,6 +400,36 @@ mod tests {
         test_utils::{connect_test_database, test_membership, test_user},
     };
 
+    pub(super) async fn token_row(
+        keys: &crate::crypto::aes::EncryptionKeys,
+        mut row: Document,
+        field: &str,
+        value: &[u8],
+    ) -> Document {
+        use crate::services::credential_record_service as record;
+        let bytes = record::encrypt(
+            keys,
+            crate::models::user_provider_token::COLLECTION_NAME,
+            row.get_str("_id").unwrap(),
+            row.get_str("user_id").unwrap(),
+            field,
+            value,
+        )
+        .await
+        .unwrap();
+        row.insert(
+            field,
+            bson::Binary {
+                subtype: bson::spec::BinarySubtype::Generic,
+                bytes,
+            },
+        );
+        if keys.contextual_record_writes() {
+            row.insert(record::VERSIONS, doc! {field: 3});
+        }
+        row
+    }
+
     pub(super) async fn fixture() -> (Database, String) {
         let db = connect_test_database("durable_personal_erasure_acceptance")
             .await
@@ -634,11 +664,20 @@ mod byo_dependency_tests {
         let (db, person) = super::tests::fixture().await;
         let org = uuid::Uuid::new_v4().to_string();
         let tokens = db.collection::<Document>(crate::models::user_provider_token::COLLECTION_NAME);
-        let encrypted = crate::test_utils::test_encryption_keys()
-            .encrypt(b"personal-refresh")
-            .await
-            .unwrap();
-        tokens.insert_one(doc! {"_id":"personal-token","user_id":&person,"credential_user_id":&person,"provider_config_id":"provider","status":"active","refresh_token_encrypted":bson::Binary {subtype:bson::spec::BinarySubtype::Generic,bytes:encrypted}}).await.unwrap();
+        let personal = super::tests::token_row(
+            &crate::test_utils::test_encryption_keys(),
+            doc! {
+                "_id": "personal-token",
+                "user_id": &person,
+                "credential_user_id": &person,
+                "provider_config_id": "provider",
+                "status": "active",
+            },
+            "refresh_token_encrypted",
+            b"personal-refresh",
+        )
+        .await;
+        tokens.insert_one(personal).await.unwrap();
         tokens.insert_one(doc! {"_id":"shared-token","user_id":&org,"credential_user_id":&person,"provider_config_id":"provider","status":"active","refresh_token_encrypted":vec![8_i32]}).await.unwrap();
         super::tests::finish_preparation(&db, &person).await;
         let source = db
@@ -687,21 +726,59 @@ mod shared_copy_tests {
             let (db, person) = super::tests::fixture().await;
             let org = uuid::Uuid::new_v4().to_string();
             let key = db.collection::<Document>(crate::models::user_api_key::COLLECTION_NAME);
-            let keys = crate::test_utils::test_encryption_keys();
-            let personal = keys.encrypt(b"personal-access").await.unwrap();
-            let unrelated = keys.encrypt(b"unrelated-access").await.unwrap();
-            let encrypted = |byte| {
-                bson::Bson::Binary(bson::Binary {
-                    subtype: bson::spec::BinarySubtype::Generic,
-                    bytes: if byte == 7 {
-                        personal.clone()
-                    } else {
-                        unrelated.clone()
-                    },
-                })
+            use crate::services::credential_record_service as record;
+            let mut legacy = crate::test_utils::test_encryption_keys();
+            legacy.set_contextual_record_writes(false);
+            let field = "access_token_encrypted";
+            let collection = crate::models::user_api_key::COLLECTION_NAME;
+            let personal = record::encrypt(
+                &legacy,
+                collection,
+                "personal-key",
+                &person,
+                field,
+                b"personal-access",
+            )
+            .await
+            .unwrap();
+            let shared = if same_ciphertext {
+                personal.clone()
+            } else {
+                record::encrypt(
+                    &legacy,
+                    collection,
+                    "org-key",
+                    &org,
+                    field,
+                    b"unrelated-access",
+                )
+                .await
+                .unwrap()
             };
-            key.insert_one(doc! {"_id":"personal-key","user_id":&person,"connection_id":"connection-a","provider_config_id":"provider","status":"active","access_token_encrypted":encrypted(7)}).await.unwrap();
-            key.insert_one(doc! {"_id":"org-key","user_id":&org,"connection_id":if same_connection {"connection-a"} else {"connection-b"},"provider_config_id":"provider","status":"active","access_token_encrypted":encrypted(if same_ciphertext {7} else {8})}).await.unwrap();
+            for (id, owner, connection, bytes) in [
+                ("personal-key", &person, "connection-a", personal),
+                (
+                    "org-key",
+                    &org,
+                    if same_connection {
+                        "connection-a"
+                    } else {
+                        "connection-b"
+                    },
+                    shared,
+                ),
+            ] {
+                key.insert_one(doc! {
+                    "_id": id,
+                    "user_id": owner,
+                    "connection_id": connection,
+                    "provider_config_id": "provider",
+                    "status": "active",
+                    field: bson::Binary {subtype: bson::spec::BinarySubtype::Generic, bytes},
+                })
+                .await
+                .unwrap();
+            }
             super::tests::finish_preparation(&db, &person).await;
             let org_source = key.find_one(doc! {"_id":"org-key"}).await.unwrap().unwrap();
             let accepted = accept(
@@ -734,15 +811,26 @@ mod independent_credential_tests {
     #[tokio::test]
     async fn distinct_legacy_credentials_at_same_provider_do_not_block_deletion() {
         let (db, user) = super::tests::fixture().await;
-        let keys = crate::test_utils::test_encryption_keys();
+        let mut legacy = crate::test_utils::test_encryption_keys();
+        legacy.set_contextual_record_writes(false);
         let tokens = db.collection::<Document>(crate::models::user_provider_token::COLLECTION_NAME);
         for (owner, secret) in [
             (user.as_str(), "personal-refresh"),
             ("independent-owner", "unrelated-refresh"),
         ] {
-            tokens.insert_one(doc! {"_id":uuid::Uuid::new_v4().to_string(),"user_id":owner,
-                "provider_config_id":"same-provider","status":"active",
-                "refresh_token_encrypted":bson::Binary {subtype:bson::spec::BinarySubtype::Generic,bytes:keys.encrypt(secret.as_bytes()).await.unwrap()}}).await.unwrap();
+            let token = super::tests::token_row(
+                &legacy,
+                doc! {
+                    "_id": uuid::Uuid::new_v4().to_string(),
+                    "user_id": owner,
+                    "provider_config_id": "same-provider",
+                    "status": "active",
+                },
+                "refresh_token_encrypted",
+                secret.as_bytes(),
+            )
+            .await;
+            tokens.insert_one(token).await.unwrap();
         }
         assert!(
             !super::preparation::ready_or_enqueue(&db, &user)

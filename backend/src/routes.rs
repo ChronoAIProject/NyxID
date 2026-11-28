@@ -1533,6 +1533,26 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             "/usage/workspace",
             get(handlers::admin_usage::get_workspace).put(handlers::admin_usage::save_workspace),
         )
+        .route(
+            "/encrypted-records/censuses",
+            post(handlers::admin_encrypted_census::start),
+        )
+        .route(
+            "/encrypted-records/censuses/{id}/advance",
+            post(handlers::admin_encrypted_census::advance),
+        )
+        .route(
+            "/encrypted-records/censuses/{id}",
+            get(handlers::admin_encrypted_census::status),
+        )
+        .route(
+            "/encrypted-records/censuses/{id}/families",
+            get(handlers::admin_encrypted_census::families),
+        )
+        .route(
+            "/encrypted-records/censuses/{id}/findings",
+            get(handlers::admin_encrypted_census::findings),
+        )
         .route("/key-lifecycle", get(handlers::admin_key_lifecycle::status))
         .route(
             "/key-lifecycle/enroll",

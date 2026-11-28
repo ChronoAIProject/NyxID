@@ -11,6 +11,11 @@ use crate::{
     errors::{AppError, AppResult},
 };
 
+#[allow(
+    dead_code,
+    reason = "The census runner consumes these snapshot-only adapters"
+)]
+pub(crate) mod observation;
 mod previous_labels;
 
 type FieldLabels = (&'static str, &'static [&'static str]);

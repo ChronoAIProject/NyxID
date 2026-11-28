@@ -39,6 +39,8 @@ pub(crate) async fn with_test_webhook_target<F: std::future::Future>(
 pub enum SignatureContract {
     /// Sign `timestamp + "." + body` and send the timestamp in its own header.
     Timestamped,
+    /// Send the timestamped signature and the trigger delivery-ID signature.
+    TriggerDelivery,
     /// Compatibility contract used by the existing revocation webhook.
     BodyOnly,
 }
@@ -117,9 +119,23 @@ async fn deliver_with_policy(
         })?;
     let timestamp = chrono::Utc::now().timestamp().to_string();
     let signature = match signature_contract {
-        SignatureContract::Timestamped => compute_timestamped_signature(secret, &timestamp, body),
+        SignatureContract::Timestamped | SignatureContract::TriggerDelivery => {
+            compute_timestamped_signature(secret, &timestamp, body)
+        }
         SignatureContract::BodyOnly => compute_body_signature(secret, body),
     };
+    let delivery_signature =
+        (signature_contract == SignatureContract::TriggerDelivery).then(|| {
+            let mut mac =
+                Hmac::<Sha256>::new_from_slice(secret).expect("HMAC accepts any key length");
+            mac.update(b"nyxid-trigger-v2\0");
+            mac.update(timestamp.as_bytes());
+            mac.update(b"\0");
+            mac.update(event_id.as_bytes());
+            mac.update(b"\0");
+            mac.update(body);
+            format!("sha256={}", hex::encode(mac.finalize().into_bytes()))
+        });
     let mut last_status = None;
     let mut reason = "send_failed";
 
@@ -132,8 +148,11 @@ async fn deliver_with_policy(
             .header("X-NyxID-Delivery-Id", event_id)
             .header("X-NyxID-Signature", format!("sha256={signature}"))
             .body(body.to_vec());
-        if signature_contract == SignatureContract::Timestamped {
+        if signature_contract != SignatureContract::BodyOnly {
             request = request.header("X-NyxID-Timestamp", &timestamp);
+        }
+        if let Some(signature) = &delivery_signature {
+            request = request.header("X-NyxID-Signature-V2", signature);
         }
         if let Some(key_id) = key_id {
             request = request.header("X-NyxID-Key-Id", key_id);

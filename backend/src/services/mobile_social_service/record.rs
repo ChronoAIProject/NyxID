@@ -12,14 +12,19 @@ use zeroize::Zeroizing;
 
 const COLLECTION: &str = MobileSocialDelivery::COLLECTION_NAME;
 
-pub(super) struct Binding<'a> {
+pub(in crate::services) struct Binding<'a> {
     id: &'a str,
     user: &'a str,
     path: [&'a str; 3],
 }
 
 impl<'a> Binding<'a> {
-    pub(super) fn new(id: &'a str, user: &'a str, hash: &'a str, challenge: &'a str) -> Self {
+    pub(in crate::services) fn new(
+        id: &'a str,
+        user: &'a str,
+        hash: &'a str,
+        challenge: &'a str,
+    ) -> Self {
         Self {
             id,
             user,
@@ -27,11 +32,11 @@ impl<'a> Binding<'a> {
         }
     }
 
-    fn context(&self) -> AppResult<RecordContext<'_>> {
+    pub(in crate::services) fn context(&self) -> AppResult<RecordContext<'_>> {
         RecordContext::new(COLLECTION, self.id, self.user, &self.path)
     }
 
-    fn legacy_aad(&self) -> HistoricalAad<'_> {
+    pub(in crate::services) fn legacy_aad(&self) -> HistoricalAad<'_> {
         let [_, hash, challenge] = self.path;
         HistoricalAad::mobile_delivery(hash, challenge, self.user)
     }
@@ -66,11 +71,7 @@ impl<'a> Binding<'a> {
     }
 }
 
-async fn inspect(
-    keys: &EncryptionKeys,
-    source: &Document,
-    rewrap: bool,
-) -> AppResult<Option<Binary>> {
+pub(in crate::services) fn row(source: &Document) -> AppResult<MobileSocialDelivery> {
     let row: MobileSocialDelivery =
         bson::from_document(source.clone()).map_err(|_| invalid_code())?;
     if !uuid::Uuid::parse_str(&row.id).is_ok_and(|id| id.get_version_num() == 4)
@@ -82,6 +83,19 @@ async fn inspect(
     {
         return Err(invalid_code());
     }
+    Ok(row)
+}
+
+pub(in crate::services) fn validate_plain(plain: &[u8], owner: &str) -> AppResult<()> {
+    PendingDelivery::decode(plain, owner).map(drop)
+}
+
+async fn inspect(
+    keys: &EncryptionKeys,
+    source: &Document,
+    rewrap: bool,
+) -> AppResult<Option<Binary>> {
+    let row = row(source)?;
     let binding = Binding::new(&row.id, &row.user_id, &row.code_hash, &row.code_challenge);
     let context = binding.context()?;
     let primary = row.ciphertext_context_version == Some(3)
@@ -93,7 +107,7 @@ async fn inspect(
         return Err(invalid_code());
     }
     let plain = binding.open(keys, &row).await?;
-    PendingDelivery::decode(&plain, &row.user_id)?;
+    validate_plain(&plain, &row.user_id)?;
     if primary {
         return Ok(None);
     }

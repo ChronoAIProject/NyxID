@@ -152,7 +152,7 @@ async fn inspect(
         return Err(invalid());
     }
     let plain = identity.open(keys, &window).await?;
-    serde_json::from_slice::<super::Input>(&plain).map_err(|_| invalid())?;
+    validate_plain(&plain)?;
     if primary {
         return Ok(None);
     }
@@ -160,6 +160,12 @@ async fn inspect(
     keys.authenticate_current_record(&replacement.ciphertext.bytes, &ctx)
         .await?;
     Ok(Some(replacement))
+}
+
+pub(crate) fn validate_plain(plain: &[u8]) -> AppResult<()> {
+    serde_json::from_slice::<super::Input>(plain)
+        .map(drop)
+        .map_err(|_| invalid())
 }
 
 pub(crate) async fn verify(keys: &EncryptionKeys, source: &Document) -> AppResult<()> {

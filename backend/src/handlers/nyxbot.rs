@@ -8412,7 +8412,7 @@ mod custom_event_contract_tests {
 
     fn binding() -> NyxbotEventBinding {
         NyxbotEventBinding {
-            org_use_revision: 0,
+            member_use: Default::default(),
             id: "binding-a".into(),
             user_id: "owner".into(),
             agent_id: "agent".into(),

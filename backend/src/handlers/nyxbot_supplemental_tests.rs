@@ -596,7 +596,7 @@ async fn supplemental_reference_pairing_clears_nonrelay_and_debug_is_redacted() 
     f.state.db.drop().await.unwrap();
 }
 
-async fn stored_recovery(f: &mut Fixture) -> String {
+async fn stored_recovery(f: &mut Fixture, answer: Option<&str>) -> String {
     use crate::{
         models::nyxbot_gateway_response::{COLLECTION_NAME, GatewayResponse},
         services::nyxbot_response_recovery as recovery,
@@ -609,8 +609,8 @@ async fn stored_recovery(f: &mut Fixture) -> String {
         .await
         .unwrap();
     let mut payload = recovery::Payload::new("notice-response", "nyxbot-test", Default::default());
-    payload.finish(Some("Useful answer"), false);
-    let stored = GatewayResponse {
+    payload.finish(answer, answer.is_none());
+    let mut stored = GatewayResponse {
         id: Uuid::new_v4().to_string(),
         response_id: "notice-response".into(),
         user_id: OWNER.into(),
@@ -624,10 +624,13 @@ async fn stored_recovery(f: &mut Fixture) -> String {
         answer_delivery: None,
         revision: 1,
         payload_context_version: None,
-        payload_ciphertext: payload.seal_legacy(&f.state.encryption_keys).await.unwrap(),
+        payload_ciphertext: Vec::new(),
         created_at: Utc::now(),
         expires_at: Utc::now() + ChronoDuration::hours(1),
     };
+    recovery::storage::install(&f.state.encryption_keys, &mut stored, &payload)
+        .await
+        .unwrap();
     f.state
         .db
         .collection::<GatewayResponse>(COLLECTION_NAME)
@@ -664,9 +667,9 @@ async fn supplemental_recovery_snapshot_and_replay_are_byte_identical() {
             let (mut f, platform, row) = Box::pin(notice_fixture()).await;
             mock_platform(&platform, outcome).await;
             let gateway = GatewayContract::mount(&f, false).await;
-            let id = stored_recovery(&mut f).await;
+            let id = stored_recovery(&mut f, Some("Useful answer")).await;
             let (mut baseline_fixture, _, _) = Box::pin(notice_fixture()).await;
-            let baseline_id = stored_recovery(&mut baseline_fixture).await;
+            let baseline_id = stored_recovery(&mut baseline_fixture, Some("Useful answer")).await;
             let baseline = recovery_bytes(&baseline_fixture, &baseline_id).await;
             assert!(baseline.0.contains("Useful answer"));
             notice(&f, &row).await;
@@ -691,7 +694,7 @@ async fn supplemental_recovery_get_races_unchanged_late_sender() {
         let (mut f, platform, row) = Box::pin(notice_fixture()).await;
         mock_platform(&platform, "confirmed").await;
         let gateway = GatewayContract::mount(&f, false).await;
-        let id = stored_recovery(&mut f).await;
+        let id = stored_recovery(&mut f, Some("Useful answer")).await;
         notice(&f, &row).await;
         delivery::detach(&f.state.db, &f.event.id).await.unwrap();
         let (snapshot, ()) = tokio::join!(
@@ -939,7 +942,7 @@ async fn supplemental_no_notice_stream_and_recovery_have_no_supplemental_reads()
         counts.lock().unwrap().clear();
         assert_eq!(live(&f, false).await, before);
         assert_eq!(*counts.lock().unwrap(), before_reads);
-        let id = stored_recovery(&mut f).await;
+        let id = stored_recovery(&mut f, Some("Useful answer")).await;
         let first = recovery_bytes(&f, &id).await;
         counts.lock().unwrap().clear();
         assert_eq!(recovery_bytes(&f, &id).await, first);
@@ -1007,30 +1010,29 @@ async fn supplemental_two_notice_replicas_race_the_provider_stream_claim() {
 #[tokio::test]
 async fn supplemental_notice_preserves_recovered_failure_and_one_failure_delivery() {
     Box::pin(async {
-        let (mut f,platform,row)=Box::pin(notice_fixture()).await;
-        mock_platform(&platform,"confirmed").await;
-        let gateway=GatewayContract::mount(&f,false).await;
-        let id=stored_recovery(&mut f).await;
-        let mut payload=crate::services::nyxbot_response_recovery::Payload::new(&id,"nyxbot-test",Default::default());
-        payload.finish(None,true);
-        let cipher=payload.seal_legacy(&f.state.encryption_keys).await.unwrap();
-        f.state.db.collection::<bson::Document>(crate::models::nyxbot_gateway_response::COLLECTION_NAME).update_one(doc!{"response_id":&id},doc!{"$set":{"payload_ciphertext":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:cipher}}}).await.unwrap();
-        let (mut baseline_fixture,_,_)=Box::pin(notice_fixture()).await;
-        let baseline_id=stored_recovery(&mut baseline_fixture).await;
-        let cipher=payload.seal_legacy(&baseline_fixture.state.encryption_keys).await.unwrap();
-        baseline_fixture.state.db.collection::<bson::Document>(crate::models::nyxbot_gateway_response::COLLECTION_NAME).update_one(doc!{"response_id":&baseline_id},doc!{"$set":{"payload_ciphertext":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:cipher}}}).await.unwrap();
-        let baseline=recovery_bytes(&baseline_fixture,&baseline_id).await;
+        let (mut f, platform, row) = Box::pin(notice_fixture()).await;
+        mock_platform(&platform, "confirmed").await;
+        let gateway = GatewayContract::mount(&f, false).await;
+        let id = stored_recovery(&mut f, None).await;
+        let (mut baseline_fixture, _, _) = Box::pin(notice_fixture()).await;
+        let baseline_id = stored_recovery(&mut baseline_fixture, None).await;
+        let baseline = recovery_bytes(&baseline_fixture, &baseline_id).await;
         assert!(baseline.0.contains("failed"));
-        notice(&f,&row).await;
-        assert_eq!(recovery_bytes(&f,&id).await,baseline);
-        assert!(gateway.final_reply(&f,"NyxBot could not finish this turn.").await);
-        late_delivery::process(&f.state,&f.event.id).await;
+        notice(&f, &row).await;
+        assert_eq!(recovery_bytes(&f, &id).await, baseline);
+        assert!(
+            gateway
+                .final_reply(&f, "NyxBot could not finish this turn.")
+                .await
+        );
+        late_delivery::process(&f.state, &f.event.id).await;
         assert!(sends(&f).await.is_empty());
-        assert_eq!(platform.received_requests().await.unwrap().len(),2);
+        assert_eq!(platform.received_requests().await.unwrap().len(), 2);
         no_event_replies(&f).await;
         f.state.db.drop().await.unwrap();
         baseline_fixture.state.db.drop().await.unwrap();
-    }).await;
+    })
+    .await;
 }
 
 async fn result_fixture(age: ChronoDuration) -> (Fixture, MockServer, AssistantConversation) {
