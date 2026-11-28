@@ -871,6 +871,20 @@ const ALLOWLIST: &[(&str, &str, &str, usize, &str)] = &[
         "Status awaits a bounded local HMAC keyset read and commitment calculation. The blocking task owns no database writes or provider requests.",
     ),
     (
+        "services/key_lifecycle/load_gate.rs",
+        "executable",
+        "tokio::task::spawn_blocking",
+        1,
+        "Admission or evaluation awaits the hash of the running executable. The task reads one local file and returns its digest.",
+    ),
+    (
+        "services/key_lifecycle/load_gate.rs",
+        "verified",
+        "tokio::task::spawn_blocking",
+        1,
+        "Retirement evaluation and advancement await the bounded bootstrap calculation before they accept the recorded result.",
+    ),
+    (
         "services/machine_gateway_service.rs",
         "stream_upload",
         "body_stream",

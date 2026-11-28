@@ -711,6 +711,8 @@ export function useAssistant(
       accountEpoch.current !== getAuthEpoch()
     )
       throw localizedError("Reconnect to decide this request.");
+    if (row?.execution_proposal)
+      throw localizedError("Review this execution permission in the web app.");
     if (
       !row ||
       !Number.isFinite(Date.parse(row.expires_at)) ||

@@ -525,6 +525,7 @@ async fn voice_2083_progress_coalesces_latest_evidence_and_never_tool_errors_as_
             label: "internal__tool".into(),
             digest: None,
             retry_identity: None,
+            business_identity: None,
             status: "completed".into(),
             machine: None,
             failure: Some(crate::models::assistant_conversation::ToolFailure {

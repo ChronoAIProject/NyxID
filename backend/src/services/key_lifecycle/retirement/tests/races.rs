@@ -17,13 +17,13 @@ async fn at_each_transition(edit: Edit) {
             let db=connect_transaction_test_database("retire_race").await;
             let mut f=fixture(&db).await;
             for _ in 0..boundary {
-                let committed=step(&db,&f.config,&f.actor,&f.request,&CertifiedRelease).await.unwrap();
+                let committed=step(&db,&f.config,&f.actor,&f.request,&CertifiedRelease::Rehearsal).await.unwrap();
                 f.request.expected_step_revision=committed.revision;
             }
             let before=head(&db).await;
             let scope:Scope=field(&before,"scope").unwrap();
             let work=async {
-                let result=step(&db,&f.config,&f.actor,&f.request,&CertifiedRelease).await;
+                let result=step(&db,&f.config,&f.actor,&f.request,&CertifiedRelease::Rehearsal).await;
                 if matches!(edit,Edit::Admin){result.unwrap();}else{assert!(result.is_err());}
             };
             resume_after("retirement_claimed",work,async{
@@ -51,7 +51,7 @@ async fn at_each_transition(edit: Edit) {
                     Edit::Admin=>{
                         let other=AuditActor::from_auth_user(&test_auth_user(&fresh()));
                         let other_request=Request{recording:recording(f.request.expected_step_revision),target:f.request.target.clone(),report_revision:f.request.report_revision,expected_step_revision:f.request.expected_step_revision};
-                        assert!(step(&db,&f.config,&other,&other_request,&CertifiedRelease).await.is_err());
+                        assert!(step(&db,&f.config,&other,&other_request,&CertifiedRelease::Rehearsal).await.is_err());
                     }
                 }
             }).await;

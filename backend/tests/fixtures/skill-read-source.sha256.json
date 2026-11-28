@@ -1,0 +1,22 @@
+{
+  "SKILL.md": {
+    "total_bytes": 16001,
+    "sha256": "3ea60ff411f9903586bcd2d02eaf3ef5682e85a8dc0d511cb737c5b8ca5d004a"
+  },
+  "references/config.json": {
+    "total_bytes": 12001,
+    "sha256": "1e5b2b89945afcbb22a463923a760423e35ca47de399a1768b0d63fcd89d0c83"
+  },
+  "references/escaping.txt": {
+    "total_bytes": 8000,
+    "sha256": "9d1d6fc817c92c2e55ec2441aa9b06ae74033477688ca64f1ee5f4ae517bfd0d"
+  },
+  "references/final.md": {
+    "total_bytes": 4149,
+    "sha256": "aa6dd3fdd4b254be8fd48c7acb8403fcafd4f91f1a7be08787ee51efb2d04f8f"
+  },
+  "references/步骤.md": {
+    "total_bytes": 9001,
+    "sha256": "ecc975ca23c3949b887314b55377b20ad7d33836b80832efdcfdab12608cc766"
+  }
+}

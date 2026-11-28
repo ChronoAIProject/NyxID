@@ -292,9 +292,12 @@ pub struct TurnActivity {
     pub label: String,
     #[serde(default)]
     pub digest: Option<String>,
-    /// Additive semantic retry identity; `digest` retains the legacy exact call.
+    /// Legacy normalized native identity, consumed by older Retry readers.
     #[serde(default)]
     pub retry_identity: Option<String>,
+    /// Decoded business identity; v2 preserves literal provider types.
+    #[serde(default)]
+    pub business_identity: Option<String>,
     /// `running`, `completed`, or `error`.
     pub status: String,
     #[serde(default)]
@@ -390,6 +393,19 @@ pub struct ToolProgress {
     pub started: i64,
     pub calls: i64,
     pub digest: String,
+}
+
+/// Modern matching keeps literal provider types separate from historical hashes.
+/// The parallel retry_digests remains available to older readers during rollout.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct RetryMatch {
+    pub identities: Vec<String>,
+    pub historical_digests: Vec<String>,
+    pub historical_provider_tools: Vec<String>,
+    #[serde(default)]
+    pub historical_native_tools: Vec<String>,
+    /// Generic historical labels also require review for native writes.
+    pub provider_review_required: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -570,6 +586,8 @@ pub struct ActiveTurn {
     /// with the same tool and arguments is refused (`retry_duplicate_action`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub retry_digests: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_match: Option<RetryMatch>,
     /// The running response, not the previous committed response head.
     #[serde(default)]
     pub running_response: Option<Box<RunningResponse>>,

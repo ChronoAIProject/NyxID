@@ -5,7 +5,7 @@ import { withAccountPanelSearch, type AccountPanelSearch } from "./account-panel
  * it and the page reads with it, so the two cannot drift into disagreeing
  * about what a draft is.
  *
- * - `c`     addresses a conversation.
+ * - `c`     addresses a conversation, or a server-linked `nyxg-*` group (read as `g`).
  * - `draft` is the pre-provision "New chat" state. The button paints an
  *   empty thread under `?draft` immediately, then swaps in `?c=<id>` once
  *   the actor lands (see AssistantPage.createNewChat).
@@ -53,8 +53,11 @@ function agentDetailsTab(value: unknown): AgentDetailsTab | undefined {
 function parseChatSearch(
   search: Record<string, unknown>,
 ): Omit<AssistantSearch, keyof AccountPanelSearch> {
+  const linkedGroup = search.draft !== true && search.draft !== "true" &&
+    typeof search.c === "string" && /^nyxg-[a-fA-F0-9]{32}$/.test(search.c) ? search.c : undefined;
+  const group = typeof search.g === "string" && search.g ? search.g : linkedGroup;
   return {
-    ...(typeof search.c === "string" ? { c: search.c } : {}),
+    ...(typeof search.c === "string" && !linkedGroup ? { c: search.c } : {}),
     ...(typeof search.card === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(search.card)
       ? { card: search.card }
       : {}),
@@ -71,7 +74,7 @@ function parseChatSearch(
       : {}),
     ...(search.details === "channels" && typeof search.connection === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(search.connection)
       ? { connection: search.connection } : {}),
-    ...(typeof search.g === "string" && search.g ? { g: search.g } : {}),
+    ...(group ? { g: group } : {}),
     ...(search.mock === 1 || search.mock === "1"
       ? { mock: 1 as const }
       : {}),

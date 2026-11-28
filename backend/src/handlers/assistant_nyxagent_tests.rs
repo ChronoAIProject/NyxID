@@ -5021,6 +5021,7 @@ fn activity_response_failure_contract_omits_absent_http_status() {
             memory_recovery: None,
             decision: None,
             retry_identity: None,
+            business_identity: None,
             digest: None,
             machine: None,
             id: "activity".into(),

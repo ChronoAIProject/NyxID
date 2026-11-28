@@ -1,13 +1,12 @@
 import { ApiError } from "@/lib/api-client";
-import allowedCardContinuation from "../../../shared/allowed-card-continuation.json";
 import { historyErrorMessage, HISTORY_UNSUPPORTED } from "@/schemas/assistant-history-compat";
 import type { UploadedMessage } from "@/lib/assistant/uploads";
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { nyxAgentTransport } from "@/lib/assistant/nyxagent-transport";
+import { getAssistantIdentityRevision } from "@/lib/assistant/identity";
 import type {
   AssistantAgent,
-  NyxAgentAcknowledgement,
   NyxAgentConversation,
   NyxAgentConversationAgent,
   NyxAgentHistory,
@@ -18,96 +17,9 @@ import { useDecideApproval } from "@/hooks/use-approvals";
 import { nyxBotQueryKeys, useNyxBotAgents } from "@/hooks/use-nyxbot-agents";
 import { useNyxAgentLive } from "@/hooks/use-nyxagent-live";
 import { livePollInterval, useNyxAgentLiveConnected } from "@/hooks/use-nyxagent-live-status";
-import {
-  currentCreditsActor,
-  isInsufficientCreditsCode,
-  notifyCreditsDenied,
-} from "@/lib/credits-denial";
-
-function notifyTurnCredits(
-  conversationId: string,
-  turnId: string,
-  code: string | null,
-  actorId: string | null,
-): void {
-  if (!isInsufficientCreditsCode(code)) return;
-  // SSE and the history poll can both deliver one failure; the key dedupes.
-  notifyCreditsDenied(
-    { key: `assistant:nyxagent:${conversationId}:${turnId}`, payer: "self" },
-    actorId,
-  );
-}
-
-/**
- * A foreground send whose live failure may open the out-of-credits dialog.
- * `agent` is only used when the send starts a new thread.
- */
-function liveSend(
-  conversationId: string | undefined,
-  text: string,
-  onAdopt: (id: string) => void,
-  agent?: NyxAgentConversationAgent,
-  attachmentIds?: string[],
-  attachments?: readonly import("@/schemas/assistant-nyxagent").NyxAgentAttachment[],
-  adoptExisting?: boolean,
-  acknowledgementId?: string,
-  model?: string,
-) {
-  const actorId = currentCreditsActor();
-  const onFailed = (id: string, turnId: string, code: string) =>
-    notifyTurnCredits(id, turnId, code, actorId);
-  if (attachmentIds?.length || acknowledgementId) {
-    return nyxAgentTransport.send(conversationId, text, onAdopt, onFailed, {
-      ...(!conversationId && agent ? { agent } : {}),
-      attachmentIds,
-      attachments,
-      adoptExisting,
-      acknowledgementId,
-      model,
-    });
-  }
-  if (!model && (conversationId || !agent)) {
-    return nyxAgentTransport.send(conversationId, text, onAdopt, onFailed);
-  }
-  return nyxAgentTransport.send(conversationId, text, onAdopt, onFailed, {
-    ...(!conversationId && agent ? { agent } : {}),
-    ...(model ? { model } : {}),
-  });
-}
-
-/** The user-visible turn that resumes the assistant after an allowed card. */
-export function continuationText(acknowledgement: NyxAgentAcknowledgement): string {
-  return `${continuationInstruction(acknowledgement)} ${allowedCardContinuation}`;
-}
-
-function continuationInstruction(acknowledgement: NyxAgentAcknowledgement): string {
-  switch (acknowledgement.kind) {
-    case "service":
-      return `Approved: this chat may use ${
-        acknowledgement.service_name ?? acknowledgement.service_slug ?? "the service"
-      }. Continue.`;
-    case "skills":
-      // An unrouted skills card attaches nothing and wakes nobody.
-      return acknowledgement.decider === "orchestrator"
-        ? `Skill proposal reviewed: ${acknowledgement.summary} NyxBot will resolve the exact version and apply the governing mode to attach it (automatic in Full access, otherwise an owner card). Do not request the skill again.`
-        : `Skill proposal reviewed: ${acknowledgement.summary} Nothing was attached and nobody else was asked; the user adds the skill from this agent's Skills editor. Do not request the skill again.`;
-    case "operations":
-      return `Approved: ${acknowledgement.summary} Continue within the updated operation scope.`;
-    case "machine":
-    case "saved_login":
-      return `Approved: ${acknowledgement.summary} Continue within the updated machine and saved-login grants.`;
-    case "account":
-      return "Approved: account management for this chat. Continue.";
-    case "action":
-      if (acknowledgement.authored_skill) return `The skill publication was allowed: ${acknowledgement.summary}. Check the attached skills and tell the user which skill/version was attached to which agent. Do not publish it again.`;
-      return `Confirmed: ${acknowledgement.summary} (acknowledgement_id ${acknowledgement.id}). Retry it now.`;
-  }
-}
-
-/** One continuation for every card allowed while a turn was running. */
-export function continuationForAll(acknowledgements: readonly NyxAgentAcknowledgement[]): string {
-  return acknowledgements.map(continuationText).join("\n");
-}
+import { liveSend, notifyTurnCredits } from "@/lib/assistant/nyxagent-continuation";
+import { nyxAgentDecisions, type AcknowledgementDecision, type DecisionSource, isCurrentDecisionActor } from "@/lib/assistant/nyxagent-decisions";
+export { continuationText, continuationForAll } from "@/lib/assistant/nyxagent-continuation";
 
 /**
  * Every mounted view sees the same agents change; only the first to see it
@@ -194,8 +106,9 @@ export function useNyxAgentAssistantChat({
   readonly draftAgent?: NyxAgentConversationAgent;
 }) {
   const userId = useAuthStore((state) => state.user?.id);
+  const identityRevision = getAssistantIdentityRevision();
   const queryClient = useQueryClient();
-  useSyncExternalStore(
+  const transportRevision = useSyncExternalStore(
     nyxAgentTransport.subscribe,
     nyxAgentTransport.getRevision,
     nyxAgentTransport.getRevision,
@@ -322,74 +235,38 @@ export function useNyxAgentAssistantChat({
   }, [agentsSignature]);
 
   const lastDecision = useRef(Number.NEGATIVE_INFINITY);
-  // Cards allowed while their conversation's turn was still running. The
-  // running turn cannot observe the decision (NyxAgent ends a turn on a card and
-  // answers same-turn repeats locally), so the continuation waits for settlement.
-  const pendingContinuations = useRef(
-    new Map<string, { owner: string | undefined; acknowledgements: NyxAgentAcknowledgement[] }>(),
-  );
+  // Observation belongs to the view; accepted decisions belong to the transport.
+  useEffect(() => {
+    if (!enabled && selectedConversationId && userId === useAuthStore.getState().user?.id &&
+      identityRevision === getAssistantIdentityRevision()) nyxAgentDecisions.refuse(selectedConversationId);
+  }, [enabled, selectedConversationId, userId, identityRevision]);
+  useEffect(() => {
+    if (!enabled || !userId || !selectedConversationId) return;
+    return nyxAgentDecisions.observe(selectedConversationId);
+  }, [enabled, userId, selectedConversationId]);
+  useEffect(() => nyxAgentDecisions.refresh(), [streaming, transportRevision]);
   const decision = useMutation({
-    mutationFn: async ({ id, choice, acceptReducedScope }: { id: string; choice: "allow" | "deny"; acceptReducedScope?: boolean }) => {
-      if (!selectedConversationId) throw new Error("Choose a conversation first.");
+    mutationFn: async ({ id, choice, acceptReducedScope, source }: AcknowledgementDecision & { source: DecisionSource }) => {
+      if (!source.conversationId) throw new Error("Choose a conversation first.");
+      if (!nyxAgentDecisions.isCurrentSource(source)) throw new DOMException("Identity changed", "AbortError");
       const now = Date.now();
       if (now - lastDecision.current < 750) {
         throw new Error("Please wait a moment before deciding again.");
       }
       lastDecision.current = now;
-      return nyxAgentTransport.decide(selectedConversationId, id, choice, acceptReducedScope);
+      const acknowledgement = await nyxAgentTransport.decide(source.conversationId, id, choice, acceptReducedScope);
+      nyxAgentDecisions.complete(source, choice, acknowledgement);
+      return acknowledgement;
     },
-    onSuccess: (acknowledgement, { choice }) => {
-      // An allowed card resumes the assistant: the refusal told it to retry after
-      // approval, and it cannot wait for the decision inside its own turn. A
-      // specialist's request routed to NyxBot is resumed by the server itself.
-      if (
-        acknowledgement.continuation_owner === "server" ||
-        acknowledgement.decider === "orchestrator" ||
-        acknowledgement.trigger_run_id
-      )
-        return;
-      if (choice !== "allow" || !selectedConversationId) return;
-      if (nyxAgentTransport.isRunning(selectedConversationId)) {
-        const queued = pendingContinuations.current.get(selectedConversationId);
-        pendingContinuations.current.set(selectedConversationId, {
-          owner: userId,
-          acknowledgements: [...(queued?.acknowledgements ?? []), acknowledgement],
-        });
-        return;
-      }
-      void liveSend(selectedConversationId, continuationText(acknowledgement), onConversationAdopted,
-        undefined, undefined, undefined, undefined, acknowledgement.id).catch(() => undefined);
-    },
-    onSettled: async () => {
+    onSettled: async (_acknowledgement, _error, { source }) => {
+      if (!isCurrentDecisionActor(source)) return;
       await Promise.all([
-        queryClient.invalidateQueries({ queryKey: historyKey }, { cancelRefetch: false }),
-        queryClient.invalidateQueries({ queryKey: threadsKey }, { cancelRefetch: false }),
-        queryClient.invalidateQueries({ queryKey: agentsKey }, { cancelRefetch: false }),
-        queryClient.invalidateQueries({ queryKey: nyxBotQueryKeys.activity(userId) }, { cancelRefetch: false }),
+        queryClient.invalidateQueries({ queryKey: nyxBotQueryKeys.history(source.owner, source.conversationId) }, { cancelRefetch: false }),
+        queryClient.invalidateQueries({ queryKey: nyxBotQueryKeys.threads(source.owner) }, { cancelRefetch: false }),
+        queryClient.invalidateQueries({ queryKey: nyxBotQueryKeys.agents(source.owner) }, { cancelRefetch: false }),
+        queryClient.invalidateQueries({ queryKey: nyxBotQueryKeys.activity(source.owner) }, { cancelRefetch: false }),
       ]);
     },
-  });
-
-  // Runs after every render: transport changes re-render this hook, so a queued
-  // continuation is sent as soon as its turn has settled and history is fresh.
-  useEffect(() => {
-    for (const [conversationId, queued] of pendingContinuations.current) {
-      if (queued.owner !== userId || !enabled || historyDenied) {
-        pendingContinuations.current.delete(conversationId);
-        continue;
-      }
-      if (nyxAgentTransport.isRunning(conversationId)) continue;
-      pendingContinuations.current.delete(conversationId);
-      // Stop means the user wants the assistant to halt; do not resume it.
-      const tail = nyxAgentTransport.getHistory(conversationId)?.messages.at(-1);
-      if (tail?.error_code === "cancelled") continue;
-      void liveSend(
-        conversationId,
-        continuationForAll(queued.acknowledgements),
-        onConversationAdopted,
-        undefined, undefined, undefined, undefined, queued.acknowledgements[0]?.id,
-      ).catch(() => undefined);
-    }
   });
 
   // Turns seen running on this page. Only their later failures may prompt, so
@@ -461,7 +338,12 @@ export function useNyxAgentAssistantChat({
     },
     stop,
     acknowledgements: nyxAgentTransport.getHistory(selectedConversationId)?.acknowledgements ?? [],
-    decideAcknowledgement: decision.mutateAsync,
+    // Mutation options follow rerenders. Capture authority before async middleware
+    // so both the request and its callbacks retain the exact source of the click.
+    decideAcknowledgement: (input: AcknowledgementDecision) => decision.mutateAsync({
+      ...input,
+      source: nyxAgentDecisions.capture(selectedConversationId, userId, identityRevision),
+    }),
     decidingAcknowledgement: decision.isPending ? decision.variables?.id : undefined,
     deleteConversation: (id: string) => nyxAgentTransport.delete(id),
     renameConversation: (id: string, title: string) => nyxAgentTransport.rename(id, title),

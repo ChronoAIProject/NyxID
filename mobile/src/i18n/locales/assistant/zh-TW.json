@@ -212,6 +212,7 @@
   "Could not confirm the model change.": "無法確認模型變更。",
   "Could not load connections.": "無法載入連線。",
   "Could not open automation": "無法打開自動化",
+  "Could not open review. Try again.": "無法開啟審核頁面。請重試。",
   "Could not open the provider. Try again.": "無法開啟提供者。再試一次。",
   "Could not reach the assistant. Try again.": "無法聯繫到助理。再試一次。",
   "Could not save the image. Please try again.": "無法儲存圖片。請重試。",

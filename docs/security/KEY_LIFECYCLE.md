@@ -171,7 +171,7 @@ For `POST /evidence`, replace the enrollment's `deployment_revision` field with 
 
 1. **Inventory.** Submit `open_dependency` with `inventory`, `parents` (IDs of prerequisite dependencies) and `formats`. Its entry ID becomes the dependency ID. Record reader and writer cohorts, independent HMAC adoption, migration canaries, database credentials, full and incremental backups, PITR, clones, archives, restore drills, rollback images, cloud versions and unknown dependencies. Record the parents of each incremental or PITR chain and include their keys and formats. Register a copy before making it restorable. Include a newly discovered restorable copy even if a previous review already closed the inventory.
 2. **Closure.** Submit `close_dependency` with `dependency_id` and a typed `resolution`. Close restorable children before their parents. Backup and PITR evidence must establish verified disposal or a tested survivor restore. A rollback image requires withdrawal or a tested survivor rollback. Record revocation or rotation for credentials and provider-specific verification for a cloud version. An expiry date alone cannot close a dependency. Submit `reopen_dependency` with the same dependency ID to supersede a closure. Use `review_inventory` with `inventory` and disposition `reviewed`, `reviewed_empty` or `withdrawn`. Reader, HMAC and migration-canary dependencies accept the corresponding tested survivor-reader, verified independent-HMAC and tested survivor-canary evidence. A missing review leaves coverage unknown.
-3. **Evidence after the baseline.** Use `attest` with `assertion`, `affirmed` and optional `valid_until_ms` (Unix milliseconds). Record `old_writers_withdrawn`, `database_access_revoked`, `restore_continuity` and `recovery_dependencies_closed`. Include old images, deployments and jobs, obsolete credentials and live sessions, and all restorable backup, PITR and rollback dependencies. A changed dependency clears its prior inventory review and aggregate assertion for the affected keys. A withdrawal or replacement appends a new revision. The decision reader must check those exact entries, their expiry and the singleton at decision commit. To establish strict post-baseline ordering, read the singleton revision at snapshot S and require each relied-on evidence revision to be greater. Wall-clock ties are possible.
+3. **Evidence after the baseline.** Use `attest` with `assertion`, `affirmed` and optional `valid_until_ms` (Unix milliseconds). Record `old_writers_withdrawn`, `database_access_revoked`, `catalog_access_withdrawn`, `restore_continuity` and `recovery_dependencies_closed`. Include old images, deployments and jobs, obsolete credentials and live sessions, and all restorable backup, PITR and rollback dependencies. A changed dependency clears its prior inventory review and aggregate assertion for the affected keys. A withdrawal or replacement appends a new revision. The decision reader must check those exact entries, their expiry and the singleton at decision commit. To establish strict post-baseline ordering, read the singleton revision at snapshot S and require each relied-on evidence revision to be greater. Wall-clock ties are possible.
 4. **Restore or deployment change.** Submit `advance_restore_epoch` for the complete ring after an announced restore/import, or `change_deployment_revision` with the new release revision when that scope changes. Reread status, start a fresh census and record fresh scoped reviews and attestations. A detected database or lifecycle collection identity change opens a durable restore blocker. Only an explicit epoch advance clears it. NyxID cannot independently prove that an unannounced restore or import did not occur. A restore can roll back the database, journal and evidence together.
 5. **Verification and rollback.** Submit `verify_ring` for the complete scope to challenge the enrolled layout again. The previous release can continue serving under the enrolled configuration and ignores the new collections. Enrollment authorizes neither a key removal nor a second rotation. The census runner and release rehearsal must repeat the fixed-load throughput and tail-latency gate on an isolated rig before enabling certification.
 
@@ -201,9 +201,10 @@ operators can read its status, family counts and findings.
 Published status gives the cluster times `baseline` (S) and `as_of` (W),
 registry digest, lifecycle scope revision, restore epoch, deployment revision,
 reader and writer settings, opaque key references, row totals and blockers.
-Every status includes `certification_enabled: false` and the blocker
-`isolated_load_gate_unmet`. The isolated-rig load gate remains unmet. A
-published census provides dated observations and cannot authorize key retirement.
+A dated report always returns `certification_enabled: false`. An enrolled
+report directs callers to retirement evaluation with
+`retirement_evaluation_required`. Retirement evaluation verifies the load
+evidence for the current release and checks the live guards.
 
 The families list includes families with zero rows. Within a family, each
 examined row counts once as `absent` (no material), `homogeneous` (one
@@ -259,7 +260,7 @@ report and checks source rows and their companions using B alone. The
 established Oracle outer v2 contract remains readable. The lifecycle revision,
 report revision and blockers accompany the result. An unreadable partition,
 unresolved row, legacy-reader dependency or positive A bucket requires a fresh
-valid proof. The four current administrator assertions must follow the baseline
+valid proof. The five current administrator assertions must follow the baseline
 revision and cover the enrolled keys and restore epoch. Review open inventory,
 independent HMAC adoption, migration checkpoints, the native parent index and
 the readiness of every live writer generation. A plain stored header requires
@@ -267,11 +268,10 @@ the legacy reader. A missing parent or a bad authentication tag leaves the row
 unresolved. The release checks the deployed logical key. Provider-internal key
 versions require provider-specific evidence.
 
-`POST /api/v1/admin/key-lifecycle/retirement` requires a full admin. This
-release answers a valid request with HTTP 409 and `isolated_load_gate_unmet`
-before it creates a decision marker or grants authority. The GET response
-always includes that blocker and `certification_enabled: false`. Keep both keys
-configured. NyxID cannot independently prove an unannounced restore or import.
+`POST /api/v1/admin/key-lifecycle/retirement` requires a full admin. Without a qualifying
+isolated-rig result it answers HTTP 409 with `isolated_load_gate_unmet` before
+it claims a lease or writes a marker or grant. GET includes the blocker and
+`certification_enabled: false`. Keep both keys until witnessed publication. NyxID cannot independently prove an unannounced restore or import.
 
 The transition request binds `target`, `report_revision` and the usual
 `recording` fields, including the initial `expected_revision`. The first
@@ -305,10 +305,114 @@ taking a fresh baseline.
 An independent database principal can execute DDL after the last change-stream
 marker without writing the lifecycle revision. The stream proves catalog
 continuity only through its witnessed cut. The database-credential inventory
-must account for access to collection and index commands as well as data
-writes. An unknown principal or an open privileged maintenance operation leaves
+covers independently usable catalog-changing privileges and their live
+sessions. After the baseline, record their withdrawal with the
+`catalog_access_withdrawn` assertion. Open a `database_credential` dependency
+**before** restoring a privilege or session. Opening, reopening, closing or
+reviewing that inventory supersedes the assertion for the affected keys.
+Record fresh withdrawal evidence after the maintenance window closes. An unknown principal or an open privileged maintenance operation leaves
 the deployment ineligible. NyxID cannot independently establish that a database
 administrator has withdrawn an out-of-process privilege.
+
+## Rolling and closing an enrolled rotation
+
+A/B means A writes and both A and B can read. Use the opaque key references from
+lifecycle status. A full admin posts to `/api/v1/admin/key-lifecycle/rotation`
+with the complete current `scope`, the usual `recording` fields and a
+`transition` object. Each successful transition returns its committed receipt.
+Read status again after a restart or revision conflict. Replaying the same
+request as its original actor returns its dated receipt.
+
+| Current layout | Transition and evidence | Admitted layout after the commit |
+| --- | --- | --- |
+| A alone, or B after the preceding rotation closes | `{"kind":"prepare","proposal_id":"<uuid>"}`. Record the staged secret version or pinned provider resource. | A/B with A writing, or B/C with B writing. Existing single-key readers can finish while every writer still uses the original primary. |
+| A/B | `{"kind":"begin_roll"}`. Verify every live generation has the declared release and dual-readable layout. Record withdrawal of incompatible readers, jobs and restart rights. | A/B and B/A can join. Both orientations retain both keys. |
+| Both orientations admitted | Send `{"kind":"select_writer","primary":"<B ref>"}` to a replica already running B/A. Record the selected release and rollout. | New joins must use B/A. Drain A-writing processes, settle outstanding operations and revoke their access before recording withdrawal. |
+| Interrupted roll | Select A from an A/B replica. If B/A is already selected, first begin a new dual-readable roll from B/A. | New joins use A/B after selecting A. Every layout edit invalidates the earlier census scope and pending decision. Keep readers for B-written rows. |
+| B/A, with A withdrawn from all writers | Run a fresh census, record post-baseline evidence and advance retirement through witnessed publication. | B alone can join. Keep serving from B-writing capacity as B-only replicas come up. |
+| B alone after publication | Submit `{"kind":"close","generation":"<witnessed census UUID>"}`. Record that all restartable A-bearing images, processes, jobs, rollbacks and sessions have been withdrawn. | Status changes to `rotation_open: false`. Preparation of C now requires the same live B-only fleet. |
+
+Preparation reads a regular, owner-only JSON file named by
+`NYXID_ROTATION_PROPOSAL_FILE` on the replica handling the admin request. Mount
+it from the secret store with mode 0600 on Unix. Its fields are `proposal_id`
+(a fresh v4 UUID), `provider` (the current provider), and `previous` (the
+proposed secondary slot). Use the 64-hex key for local encryption, a pinned
+key ARN for AWS or the CryptoKey resource name for GCP. Only the UUID goes in
+the HTTP request. Keep the same material under that UUID on every replica
+that can receive the preparation. Each slot must authenticate its own
+challenge. A selector collision, an occupied slot or reuse of a closed
+retiring key refuses the preparation. Cross-provider migration rings retain
+their enrolled layout. The two-orientation roll requires interchangeable
+primary and previous slots of the same provider.
+
+Server and database-backed one-shot starts pass through the same admission.
+A process paused after reading the old layout must still acquire its
+initialization reservation under the admitted scope revision. A stale job
+cannot start a write after a layout edit. Continuously serving generations
+advertise their primary, key scope and executable in the readiness heartbeat.
+Wait for replaced generations to leave the observation horizon. Before
+selecting the new writer, keep enough dual-readable capacity to accept writes
+in either orientation. After publication, only a compatible survivor with the
+independent HMAC pin, strict contextual policy and bounded native cleanup can
+join. An announced restore requires a new epoch. Recovery requiring a removed
+key uses an isolated restore.
+
+The close receipt covers restart rights the heartbeat cannot see. An open
+reader, writer, credential or rollback dependency blocks closure. An evidence
+edit after closure requires a fresh close receipt before preparation. Two
+administrators preparing different keys from the same revision can commit at
+most one proposal. When renewing a dependency that covered A and B, submit
+its original dependency ID with the keys from its opening scope that are
+still enrolled. The inventory retains its original opening receipt.
+
+### Recording the isolated load result
+
+A full admin uses the existing evidence endpoint for both records. Use the
+complete enrolled scope, including the release label, keys and restore epoch.
+Record the protocol after selecting the writer. A layout edit invalidates the
+protocol. Keep the benchmark inputs, raw logs and SLO document under the
+immutable evidence references. The administrator attests to rig isolation and
+the provenance of the samples. NyxID verifies the scope, executable and
+measurements.
+
+1. Post `change.kind: declare_load_protocol` with a `protocol` object before
+   running any measured arm. Set `schema_version: 1`, `confidence_bps: 9500`
+   and `margin_bps: 100`. Supply the census `registry_digest`, different
+   `baseline_sha256` and `candidate_sha256` executable hashes, a
+   `workload_sha256` manifest hash, and v4 UUIDs for `rig_ref` and `slo_ref`.
+   The workload manifest identifies the dataset and family mix, quota, server
+   configuration, database topology, cache preparation and load schedule.
+   Declare `offered_rps`, `minimum_rps`, `max_p95_us`, `max_p99_us`,
+   `operations_per_arm` (at least 400) and `paired_rounds` (8 through 64).
+   Save the receipt's entry ID.
+2. On the isolated rig, warm both binaries and alternate arm order at fixed
+   offered load. Each round measures `base`, `base_repeat`, `candidate_idle`,
+   `candidate_capture` and `candidate_publication`. The publication arm runs
+   the real authenticated census while B writes. Include transfers, refresh,
+   native expiry and high fan-out in the frozen workload. Check the census
+   against an independent same-cut snapshot and retain the database and KMS
+   observations with the raw measurements.
+3. Post `change.kind: record_load_result` with a `result` object. Include
+   `schema_version: 1`, the declaration's `protocol_id`, `environment`
+   (`isolated` or `shared`), the same rig, workload, binary hashes and offered
+   rate, and `started_ms` and `finished_ms` in Unix milliseconds. The
+   `rounds` array has one object per paired round. Each arm contains
+   `posted`, `posting_span_us` (first request sent to last request sent),
+   `completed`, `errors`, `elapsed_us`, `p95_us`, `p99_us`,
+   `source_commands`, `foreground_census_commands` and `kms_calls`. Each
+   round also contains `authenticated_cuts` and `writes_during_publication`.
+4. Read retirement evaluation. NyxID checks every arm against the declared
+   request count, rate floor and latency SLOs. The offered rate measured from
+   the posting span must be within 1% of the declared rate. It requires zero errors, zero
+   foreground census commands, matching source-command and KMS counts, and
+   positive publication work in every round. For throughput, p95 and p99 it
+   computes 10,000 deterministic paired bootstrap resamples of mean log
+   ratios to the base. Both 95% interval endpoints must lie strictly within
+   ±1%, including for base against base. A shared-host run, a noisy control,
+   an absent record or a scope mismatch leaves `isolated_load_gate_unmet`
+   set. Replacing either record invalidates a pending decision through the
+   lifecycle revision. A passing load gate still requires every retirement
+   guard to pass.
 
 ## Process admission and survivor-preserving writers
 
@@ -357,7 +461,7 @@ NyxID has no independent signal for an unannounced database restore or import.
 An authorized administrator records the restore-continuity evidence and
 advances the restore epoch after an announced event. Retirement waits for
 current records covering withdrawn old writers, revoked or rotated database
-credentials, restore continuity and closed backup, PITR and rollback
+credentials and catalog-changing privileges and sessions, restore continuity and closed backup, PITR and rollback
 dependencies. Each record names the owner, evidence reference, key and restore
 scope, deployment revision and recorded time through the lifecycle revisioned
 API. Automated attestations can use the same immutable entry shape later.

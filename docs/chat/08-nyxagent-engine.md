@@ -172,18 +172,83 @@ same canonical tool and arguments is refused as `retry_duplicate_action` before
 execution. This is a fence for known completed calls, not an exactly-once
 guarantee for unknown outcomes. Ordinary turns are unaffected. Pending
 acknowledgement cards keep their own expiry and are not re-presented by Retry.
+The closed native `get_agent_skills` and `get_agent_operations` readers may run
+again to verify saved setup, through their live target ACLs. Bound skill downloads
+and retained result reads keep the existing exact-call fence; a retained reference
+also expires with its original turn. Source recovery never replays a completed
+write. If a source read remains fenced or unavailable, request review and report
+setup incomplete. Ordinary new turns can read the enabled pin again using the
+[source continuation contract](../AGENT_SKILLS.md#packages-and-disclosure).
 The web client displays `retry_warning` and requires confirmation before retrying
 when actions are recorded or their outcomes are uncertain. Schedule creation uses
 `nyxid__create_schedule`; its UUID is generated server-side, outside the canonical
 tool arguments, so identical create calls are fenced even if no reply arrived.
-An additive activity `retry_identity` also ignores the one-use acknowledgement
-handle and direct/universal wrapper for schedule creation; the original `digest`
-is retained and checked for old replies/readers. All other arguments still bind.
-Older replicas retain exact-call protection; normalization requires upgraded
-writers and readers and cannot be reconstructed from legacy hashes.
-This does not deduplicate intentionally changed arguments. Refused duplicates
-retain their completed digest for ancestry and additive `retry_duplicate_action`
-activity metadata, so the outcome does not claim a second creation.
+An additive v2 activity `business_identity` binds the decoded business tool and
+literal arguments, independent of direct, JSON-string, nested or flat universal
+wrappers. Dispatch and identity share JSON-string → nested → flat precedence;
+malformed preferred JSON refuses without falling back. A provider field named
+`arguments_json` retains its original type and string bytes. Outer `result_query`
+projection metadata binds separately from provider fields, using the validated
+nonempty string with leading/trailing whitespace trimmed; explicit null is
+refused. Schedule creation
+alone omits its one-use acknowledgement handle; memory recovery omits its
+presentation link. Other provider/native arguments, routes, input types and
+arrays remain significant. Existing exact-effect and action-card rules remain.
+
+The legacy exact `digest` and normalized native `retry_identity` remain in the
+fields base readers consume. Schedule and memory writers persist the unprefixed
+normalized native hash even for nested/flat wrappers, alongside the v2 business
+identity. Base admission gathers `digest` and `retry_identity` into
+`retry_digests`; its direct/JSON native matcher still fences a changed or omitted
+one-use schedule handle or memory presentation link. Base readers cannot
+normalize a changed nested/flat Retry request. The additive v2 field may also be
+discarded when an older replica finalizes an activity. Upgrade every serving
+reader/writer before relying on cross-wrapper normalization or literal provider
+input distinctions; native compatibility evidence does not extend old readers'
+matching algorithm. New readers also accept persisted v2 identities in
+`retry_identity` from the initial v2 layout.
+
+Additive `retry_match` separates v2 identities from historical hashes, so modern
+matching preserves input distinctions that legacy parsing erased. It is built
+from the bounded ancestry during Retry admission; the existing point lookup
+checks it without an additional database call. Ordinary turns do not expand
+historical wrapper hashes. Historical derivations distinguish conclusive hashes
+from lossy ones. A direct provider field named `arguments_json` has ambiguous
+legacy preimages for every value type, including literal strings and their
+whitespace. A universal wrapper is conclusive only when the legacy parser's
+possible successful JSON-string and nested/flat interpretations bind the same
+business input. Type-faithful direct, nested and flat representations still fence
+proven completed calls across invocation forms. Solely lossy hash matches return
+`retry_evidence_requires_review`; they never create a completed v2 identity or
+an activity in the current turn. Later Retry retains the original ambiguous
+ancestor, including when the refused request changes type or literal bytes.
+Ignored historical wrapper decorations and retired handles in raw nested/flat
+native hashes cannot be reconstructed. Every historical native label retains
+ambiguity evidence, including `run_schedule_now` and tools whose effects depend
+on arguments. An unmatched request for that native tool, or an unmatched
+historical provider request for the same canonical provider tool, returns
+`retry_evidence_requires_review` before activity creation or dispatch. Changed
+arguments alone cannot establish new intent when that historical evidence is
+ambiguous. A provably different canonical tool remains eligible. Generic
+historical labels require review for unmatched provider calls and native writes.
+Only a current call recognized as a read by the closed native registry and
+argument-aware action classifier avoids ambiguity review; unknown calls require
+review. Established native reads remain eligible, subject to the existing exact-call
+fence and closed saved-state read exceptions. Native provenance uses the closed
+registry and action classifier, never a provider-name prefix or a guessed HTTP
+method. A Retry admitted by a base replica without additive matching evidence
+retains matching-hash protection and requires review for unmatched writes or
+provider calls. Unknown outcomes keep their existing admission review gate.
+
+Modern business identities distinguish intentionally changed arguments.
+Refused proven duplicates retain all three identities through activity
+finalization and chained Retry, with `retry_duplicate_action` metadata so the
+outcome does not claim a second creation. An ambiguous refusal creates no
+completed or unknown-effect activity and retains its historical ancestor's
+review requirement through later Retry. A later conclusive match can establish
+a truthful v2 identity for that completed effect. Subsequent Retry of that same
+semantic call returns `retry_duplicate_action`, even while ambiguous historical
+evidence remains in its ancestry.
 
 Normative NyxID 0.24.0 contract, verified against the read-only NxyAgent clone
 at commit `58f647e4`. The retained design records are
@@ -801,8 +866,55 @@ still running (cards appear as soon as the tool call is refused, usually before
 the reply finishes), the running turn cannot observe the decision: NyxAgent ends
 a turn on a card and answers same-turn repeats locally. The browser therefore
 queues the continuation and sends one marked continuation turn covering every card allowed
-during that turn as soon as it settles; nothing is sent if the user pressed Stop.
+during that turn as soon as it settles. A newly settled Stop for the decision's
+turn suppresses that decision's continuation; a cancellation already settled
+before the owner's new explicit Allow does not suppress an otherwise valid card.
+The browser captures the active turn and latest transcript sequence at the click
+and checks for a later failed assistant reply with `cancelled` on that exact turn.
+If an idle source becomes busy while the decision is pending, its queue binds the
+turn active at queueing. Other turns' cancellations do not suppress the decision,
+and cards sharing a queue retain their individual turn fences. Backend card
+validity and task-cancellation checks remain authoritative.
 **Deny** sends nothing.
+
+The browser captures the source conversation and acting account, including its
+identity revision, when the owner submits the decision, before asynchronous
+mutation middleware. The request, continuation and history invalidation retain
+that source across navigation. An idle source resumes immediately; an active
+source keeps its own queue until settlement, even while another thread is open.
+The transport owns this in-memory queue and pending decision completion across
+chat-view unmounts, including navigation into a crew or a restricted specialist.
+A view's disabled state fences only that view's source; it cannot discard another
+thread's work. For queued sources without an active history observer, the browser
+refreshes history every two seconds, with at most one such read in flight per
+source and identity revision. A selected, enabled source uses its existing
+history observer. This also observes server-started turns that have no local
+stream subscription. The additional timer and reads stop when every queued
+source has an observer or no queued work remains. Every transport history read
+captures its source, acting identity and source authority revision before I/O,
+including selected refreshes, older-page reads and internal stream/recovery/final
+refreshes. A read's 403/404 discards all surviving entries for that same identity
+and source authority revision, including cards queued while the read was pending,
+even after navigation or unmount. A refusal from an earlier identity or authority
+revision, a transient error or a refusal for another source cannot erase valid work.
+Before sending, the browser requires a positive user decision and filters
+non-allowed decisions and malformed deadlines against the latest loaded source
+history. An allowed action must also be before its exact expiry; allowed
+non-action grants and used receipts retain the server's post-deadline semantics.
+If history has changed since the decision response, an absent card is also
+unavailable. The continuation text
+and `acknowledgement_id` use only the surviving cards, with the first survivor as
+the marker; an empty queue sends nothing. Idle-source decisions apply the same
+eligibility rules to the returned card and start before mutation-refresh
+completion. These checks do not grant authority; server card and turn admission
+remain decisive.
+Automatic continuations never change the selected thread, and a late decision
+does not restore composer focus in another thread or account. Account transitions
+(including switching away and back) discard queued continuations. Queue state is
+not restored on a browser reload. Server-owned continuations remain server-owned.
+Each allowed-card instruction includes the shared task-continuation wording in
+`shared/allowed-card-continuation.json`, which instructs the assistant to continue
+the original task until it finishes or needs user input.
 
 Independently, every turn's input context includes a note listing the cards the
 user allowed or denied since the previous user message, oldest first and at most
@@ -1004,6 +1116,10 @@ deleted with its threads. Deleting a thread deletes only that thread.
 
 Group chats (`assistant_groups`, `assistant_group_messages`, routes
 `/assistant/nyxagent/groups[/{id}[/messages]]`) hold the owner plus 1–8 agents.
+Server-issued `/assistant?c=<group>` links select the same crew as `?g=<group>`.
+The shared browser search parser recognizes group IDs with the `nyxg-` prefix
+and 32 hexadecimal characters before choosing a chat engine; an explicit `g`
+selector takes precedence and draft selection keeps its ordinary behavior.
 A user message goes to the members it `@mentions`, else to the lead (NyxBot when
 it is a member); members hand work on with `@name`, bounded by the owner's
 `max_group_handoffs` (per request, default 6) and `max_group_handoffs_per_hour`
@@ -1366,8 +1482,9 @@ Part reads are native, read-only and idempotent: no downstream re-call, billing,
 or action card in any access mode. Specialist guests can read only their own
 original result; NyxBot guests remain unable to call tools. Encrypted snapshots
 bind the owner, authenticated actor, conversation, exact turn, key/authority fence,
-agent and guest lane. Reads recheck live authority and expiry before decryption
-and delivery. A Stop, ended/expired turn, changed key, removed participant or
+agent and guest lane. Reads check expiry before decryption and again immediately
+before delivery, after decryption and the final live/key checks; equality with
+the expiry time refuses. A Stop, ended/expired turn, changed key, removed participant or
 revoked guest access makes the reference unusable. **Retry creates a new turn and
 cannot recover an old reference**: request human review of a completed write,
 never resend it just to recover its response. Existing duplicate-action receipts

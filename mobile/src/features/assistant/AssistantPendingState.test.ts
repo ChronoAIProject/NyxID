@@ -25,13 +25,19 @@ const approval = {
   expires_at: "2099-01-01T00:00:00Z",
 };
 function render(file: string, name: string, props: any) {
+  const openedUrls: string[] = [];
+  let rejectNextOpen = false;
   const h = hookHarness<E>({
     "react/jsx-runtime": {
       jsx: (type: any, props: any) => ({ type, props }),
       jsxs: (type: any, props: any) => ({ type, props }),
     },
     "../../components/ServiceIcon": { ServiceIcon: "ServiceIcon" },
-    "react-native": { View: "View", Pressable: "Pressable" },
+    "react-native": { View: "View", Pressable: "Pressable", Linking: { openURL: async (url: string) => {
+      if (rejectNextOpen) { rejectNextOpen = false; throw new Error("Browser unavailable"); }
+      openedUrls.push(url);
+    } } },
+    "../../lib/env": { getFrontendUrl: () => "https://app.example.test" },
     "lucide-react-native": new Proxy({}, { get: (_, key) => String(key) }),
     "../../components/AgentAvatar": { AgentAvatar: "Avatar" },
     "./AssistantMessageFooter": { AssistantMessageTime: "Time" },
@@ -47,10 +53,15 @@ function render(file: string, name: string, props: any) {
       }),
     },
   });
+  h.mock("./AssistantExecutionApprovalCard", h.load(fileURLToPath(new URL("./AssistantExecutionApprovalCard.tsx", import.meta.url))));
   const C = h.load(fileURLToPath(new URL(file, import.meta.url)))[name] as any;
-  h.mount(() => C(props));
+  const expand = (node: any): any => {
+    if (typeof node?.type === "function") return expand(node.type(node.props));
+    return node;
+  };
+  h.mount(() => expand(C(props)));
   return {
-    h,
+    h, openedUrls, rejectNextOpen: () => { rejectNextOpen = true; },
     nodes: () => nodes(h.value()),
     text: () => text(h.value()),
     button: (label: string) =>
@@ -104,6 +115,122 @@ test("real proxy approval shows scope, commits once, recovers failures and refus
   assert.equal(count, 2);
   assert.equal(expired.button("Approve and send").props.disabled, true);
   expired.h.unmount();
+});
+
+test("decoded assistant execution proposal opens its exact Review and never ordinary decisions", async () => {
+  const reviewPath = `/assistant?c=nyxa-${"a".repeat(32)}&card=${approval.id}`;
+  const page = historySchema.parse({
+    conversation: {
+      id: `nyxa-${"a".repeat(32)}`, title: "Review", model: "nyxagent/chat",
+      created_at: "2026-10-28", last_message_at: "2026-10-28", message_count: 0, active_turn: null,
+    }, messages: [], before_seq: null,
+    approvals: [{ ...approval, review_path: reviewPath, execution_proposal: {
+      version: 4, state: "pending", supported: true, can_decide: true, review_path: reviewPath,
+    } }],
+  });
+  assert.equal((page.approvals[0] as any).execution_proposal?.review_path, reviewPath);
+  let calls = 0;
+  const x = render("./AssistantPendingState.tsx", "AssistantApprovalCard", {
+    approval: page.approvals[0], disabled: false, onDecide: async () => { calls++; },
+  });
+  assert.equal(x.button("Approve and send"), undefined);
+  assert.equal(x.button("Deny"), undefined);
+  assert.ok(x.button("Review in the web app"));
+  x.button("Review in the web app").props.onPress();
+  await x.h.settle();
+  assert.deepEqual(x.openedUrls, [`https://app.example.test${reviewPath}`]);
+  x.rejectNextOpen();
+  x.button("Review in the web app").props.onPress();
+  await x.h.settle();
+  assert.match(x.text(), /Could not open review. Try again./);
+  x.button("Review in the web app").props.onPress();
+  await x.h.settle();
+  assert.deepEqual(x.openedUrls, [`https://app.example.test${reviewPath}`, `https://app.example.test${reviewPath}`]);
+  assert.doesNotMatch(x.text(), /Could not open review/);
+  assert.equal(calls, 0);
+  x.h.unmount();
+});
+
+test("unsupported and denied proposals never expose ordinary decision controls", async () => {
+  const reviewPath = `/assistant?c=nyxa-${"a".repeat(32)}&card=${approval.id}`;
+  for (const value of [{ version: 999, supported: true, state: "pending", can_decide: true, review_path: reviewPath }, { version: 4, supported: false, state: "unsupported", can_decide: false, review_path: reviewPath }, { version: 4, supported: true, state: "denied", can_decide: false, review_path: reviewPath }, false]) {
+    const page = historySchema.parse({
+      conversation: { id: `nyxa-${"a".repeat(32)}`, title: "Review", model: "nyxagent/chat", created_at: "2026-10-28", last_message_at: "2026-10-28", message_count: 0, active_turn: null },
+      messages: [], before_seq: null, approvals: [{ ...approval, execution_proposal: value }],
+    });
+    let decisions = 0;
+    const x = render("./AssistantPendingState.tsx", "AssistantApprovalCard", { approval: page.approvals[0], disabled: false, onDecide: async () => { decisions++; } });
+    assert.equal(x.button("Approve and send"), undefined);
+    assert.equal(x.button("Deny"), undefined);
+    if (value && typeof value === "object" && value.state === "denied") {
+      assert.ok(x.button("Review in the web app")); // Read-only review navigation.
+    } else assert.equal(x.button("Review in the web app"), undefined);
+    assert.equal(decisions, 0);
+    x.h.unmount();
+  }
+});
+
+test("waiting and cancelled decoded group proposals retain exact read-only Review and visible state", async () => {
+  const reviewPath = `/assistant?c=nyxg-${"b".repeat(32)}`;
+  for (const [state, label] of [["waiting", "Waiting for approval"], ["cancelled", "Cancelled"]] as const) {
+    for (const version of [1, 2, 3, 4, 5]) {
+      const path = version === 2 ? "/assistant/approvals" : reviewPath;
+      const page = historySchema.parse({
+        conversation: { id: `nyxa-${"a".repeat(32)}`, title: "Review", model: "nyxagent/chat", created_at: "2026-10-28", last_message_at: "2026-10-28", message_count: 0, active_turn: null },
+        messages: [], before_seq: null, approvals: [{ ...approval, review_path: path, execution_proposal: {
+          version, state, supported: true, can_decide: false, review_path: path,
+        } }],
+      });
+      let decisions = 0;
+      const x = render("./AssistantPendingState.tsx", "AssistantApprovalCard", {
+        approval: page.approvals[0], disabled: false, onDecide: async () => { decisions++; },
+      });
+      assert.match(x.text(), new RegExp(label));
+      assert.equal(x.button("Approve and send"), undefined);
+      assert.equal(x.button("Deny"), undefined);
+      assert.ok(x.button("Review in the web app"));
+      x.button("Review in the web app").props.onPress();
+      await x.h.settle();
+      assert.deepEqual(x.openedUrls, [`https://app.example.test${path}`]);
+      assert.equal(decisions, 0);
+      x.h.unmount();
+    }
+  }
+});
+
+test("real chat hook refuses both native choices for decoded proposals, including stale controls, and preserves ordinary approval", async () => {
+  const id = `nyxa-${"a".repeat(32)}`;
+  const raw = {
+    conversation: { id, title: "Review", model: "nyxagent/chat", created_at: "2026-10-28", last_message_at: "2026-10-28", message_count: 0, active_turn: null },
+    messages: [], before_seq: null, approvals: [approval],
+  };
+  let calls = 0;
+  const h = hookHarness<any>({
+    "./useAssistantLiveRefresh": { useAssistantLiveRefresh: () => {} },
+    "react-native": { AppState: { currentState: "active", addEventListener: () => ({ remove() {} }) } },
+    "@react-navigation/native": { useIsFocused: () => true },
+    "@react-native-community/netinfo": { addEventListener: () => () => {} },
+    "@tanstack/react-query": { useQuery: () => ({ data: { agents: [] } }) },
+    "../../lib/api/agentsApi": { agentsApi: {} },
+    "../../lib/api/assistantApi": { assistantApi: {
+      history: async () => historySchema.parse(raw), list: async () => ({ conversations: [], next_cursor: null }), models: async () => [],
+      decideApproval: async () => { calls++; },
+    } },
+  });
+  const hook = h.load(fileURLToPath(new URL("./useAssistant.ts", import.meta.url))).useAssistant as any;
+  h.mount(() => hook(id));
+  await h.settle();
+  const stale = h.value().decideApproval;
+  for (const proposal of [...["pending", "waiting", "cancelled", "denied"].map((state) => ({ version: 4, state, supported: true, can_decide: state === "pending", review_path: `/assistant?c=${id}&card=${approval.id}` })), { version: 999 }]) {
+    const decoded = historySchema.parse({ ...raw, approvals: [{ ...approval, execution_proposal: proposal }] });
+    h.value().history.approvals[0] = decoded.approvals[0];
+    for (const approved of [true, false]) await assert.rejects(stale(approval.id, approved), /Review this execution permission/);
+    assert.equal(calls, 0);
+  }
+  h.value().history.approvals[0] = historySchema.parse(raw).approvals[0];
+  await stale(approval.id, true);
+  assert.equal(calls, 1);
+  h.unmount();
 });
 test("external wait preserves expiry/auto-resume and pending update wording from real history", () => {
   const x = render("./AssistantPendingState.tsx", "AssistantWaitingNote", {

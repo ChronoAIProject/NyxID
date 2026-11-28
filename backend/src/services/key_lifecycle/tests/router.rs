@@ -171,6 +171,18 @@ async fn real_admin_router_fences_credentials_and_commits_metadata_only_audit() 
         },
     ))
     .unwrap();
+    let rotate = json!({"scope":first.scope,"recording":recording(first.revision),"transition":{"kind":"begin_roll"}});
+    for (token, expected) in [
+        (&op_bearer, StatusCode::FORBIDDEN),
+        (&admin_bearer, StatusCode::CONFLICT),
+    ] {
+        assert_eq!(
+            call(&app, "POST", "/rotation", "authorization", token, &rotate)
+                .await
+                .0,
+            expected
+        );
+    }
     for (header, cred) in [
         ("authorization", format!("Bearer {delegated}")),
         ("authorization", format!("Bearer {sa}")),
@@ -182,6 +194,7 @@ async fn real_admin_router_fences_credentials_and_commits_metadata_only_audit() 
             ("GET", "/dependencies", &Value::Null),
             ("POST", "/enroll", &enroll),
             ("POST", "/evidence", &record),
+            ("POST", "/rotation", &rotate),
         ] {
             let (s, _) = call(&app, method, path, header, &cred, body).await;
             assert_eq!(s, StatusCode::FORBIDDEN, "{method} {path}");

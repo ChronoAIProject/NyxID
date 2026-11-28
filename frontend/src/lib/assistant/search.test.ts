@@ -31,6 +31,17 @@ describe("parseAssistantSearch", () => {
     expect(parseAssistantSearch({ g: "" })).toEqual({});
   });
 
+  it("routes server-emitted group destinations through the same crew selection as g", () => {
+    for (const group of [`nyxg-${"a".repeat(32)}`, `nyxg-${"B".repeat(32)}`]) {
+      expect(parseAssistantSearch({ c: group })).toEqual({ g: group });
+      expect(parseAssistantSearch({ c: group, g: "explicit-group" })).toEqual({ g: "explicit-group" });
+      expect(parseAssistantSearch({ c: group, draft: true })).toEqual({ c: group, draft: true });
+    }
+    for (const c of ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", `nyxg-${"a".repeat(31)}`, `nyxg-${"z".repeat(32)}`, `nyxa-${"a".repeat(32)}`]) {
+      expect(parseAssistantSearch({ c })).toEqual({ c });
+    }
+  });
+
   it("keeps a linked agent details section for supported sheet tabs", () => {
     expect(parseAssistantSearch({ agent: "a1", details: "grants" })).toEqual({
       agent: "a1",

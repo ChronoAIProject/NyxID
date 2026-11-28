@@ -230,6 +230,17 @@ pub async fn read(
     actor: &str,
     request: &ReadRequest,
 ) -> AppResult<Value> {
+    read_with_clock(db, keys, chat, actor, request, Utc::now).await
+}
+
+async fn read_with_clock(
+    db: &Database,
+    keys: &EncryptionKeys,
+    chat: &ChatAuthority,
+    actor: &str,
+    request: &ReadRequest,
+    now: impl Fn() -> chrono::DateTime<Utc>,
+) -> AppResult<Value> {
     if Uuid::parse_str(&request.reference).is_err() {
         return Err(missing());
     }
@@ -238,7 +249,7 @@ pub async fn read(
         "_id":&request.reference,"version":1,"user_id":&chat.user_id,"actor_id":actor,
         "conversation_id":&chat.conversation_id,"turn_id":chat.turn_id.as_deref().ok_or_else(missing)?,
         "api_key_id":&chat.api_key_id,"agent_id":&chat.agent_id,"guest":chat.guest,
-        "expires_at":{"$gt":bson::DateTime::now()},
+        "expires_at":{"$gt":bson::DateTime::from_chrono(now())},
     }).await?.ok_or_else(missing)?;
     if key_authority_fence(db, chat).await? != row.key_authority_fence {
         return Err(missing());
@@ -255,6 +266,11 @@ pub async fn read(
     let value = render(&row, request.part, text)?;
     require_live(db, chat).await?;
     if key_authority_fence(db, chat).await? != row.key_authority_fence {
+        return Err(missing());
+    }
+    // Decryption and live authority reads may outlast the immutable snapshot's
+    // TTL. Enforce it again at delivery, after every awaited security check.
+    if row.expires_at <= now() {
         return Err(missing());
     }
     Ok(value)

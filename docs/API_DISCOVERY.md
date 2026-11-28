@@ -760,6 +760,14 @@ ranks 1 and 2, in the same relative order. Guest connected search/list includes
 only granted UserManaged/Platform connections and drops Internal catalog entries;
 native `nyxid` virtual tools retain their separate guest authorization.
 
+Large onboarding results use the native tools' completion contracts, not the
+length of a visible preview. Service result recovery follows
+[retained result parts](chat/08-nyxagent-engine.md#tool-images); pinned skill
+files use [source-bound reads and targeted pin verification](AGENT_SKILLS.md#packages-and-disclosure),
+and saved operation selections use [snapshot pagination](AGENT_OPERATION_SCOPES.md#native-discovery-pagination-2271).
+Recover read output without repeating completed setup writes; report source or
+saved configuration that remains unverified as incomplete.
+
 The minimal grouped GET and human-only scoped PUT/hidden DELETE are documented
 in [API.md](API.md#agent-discovery-order-per-service-group). Relay REST reads and
 writes are rejected; scoped MCP applies the verified relay owner's order.

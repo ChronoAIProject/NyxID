@@ -664,6 +664,26 @@ the bounded response, with conventional secret fields redacted. Errors before th
 an unavailable response reports unknown. Neither a receipt nor a TaskRef is
 bearer authority. The original caller's normal billing lane remains unchanged.
 
+Mobile assistant history retains proposal metadata and the server's `review_path`.
+Its normal thread card offers web Review instead of native approval/denial, and
+the native decision handler refuses proposals independently of the controls.
+Private reviews retain the exact `/assistant?c=<conversation>&card=<request>`
+destination, group reviews retain `/assistant?c=<group>` with a `nyxg-` prefix and
+32 hexadecimal characters, and supported v2 sources
+retain `/assistant/approvals`. Links use the configured first-party frontend;
+external paths, duplicate selectors, mismatched card IDs or conflicting top-level
+and proposal paths are unusable. Bare UUIDs are not group destinations. Versions
+1–5 retain the proposal states `pending`, `queued`, `preparing`, `dispatched`,
+`waiting`, `completed`, `denied`, `expired`, `cancelled`, `not_sent` and `unknown`.
+Waiting and cancelled proposals display their state and retain read-only web
+Review; cancellation is distinct from request expiry. An activity's `failed`
+outcome is not a proposal state. Unknown versions or states, malformed metadata and
+unsupported proposals remain non-decidable and expose no Review link. Supported
+terminal proposals keep their state and may link to their web record without
+granting a native decision action. Ordinary approvals keep their native controls.
+A failed browser launch shows retryable feedback and retains the exact Review
+destination; it never falls back to a native decision.
+
 ### Authoring rollout
 
 Deploy readers, dispatchers and authoring support to every replica; observed

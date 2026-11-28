@@ -100,3 +100,21 @@ pub async fn advance_retirement(
         .await?,
     ))
 }
+
+pub async fn rotate(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Json(request): Json<lifecycle::rotation::Request>,
+) -> AppResult<Json<lifecycle::Receipt>> {
+    require_first_party_human(&auth)?;
+    require_admin(&state, &auth).await?;
+    Ok(Json(
+        lifecycle::rotation::submit(
+            &state.db,
+            &state.config,
+            &AuditActor::from_auth_user(&auth),
+            &request,
+        )
+        .await?,
+    ))
+}

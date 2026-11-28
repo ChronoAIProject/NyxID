@@ -212,6 +212,7 @@
   "Could not confirm the model change.": "无法确认模型更改。",
   "Could not load connections.": "无法加载连接。",
   "Could not open automation": "无法打开自动化",
+  "Could not open review. Try again.": "无法打开审核页面。请重试。",
   "Could not open the provider. Try again.": "无法打开提供程序。再试一次。",
   "Could not reach the assistant. Try again.": "无法联系到助理。再试一次。",
   "Could not save the image. Please try again.": "无法保存图片。请重试。",

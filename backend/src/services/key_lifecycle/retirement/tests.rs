@@ -19,7 +19,7 @@ fn recording(revision: i64) -> Recording {
         evidence_ref: fresh(),
     }
 }
-async fn fixture(db: &Database) -> Fixture {
+async fn installation(db: &Database) -> (AppConfig, AuditActor, tempfile::TempDir, Receipt) {
     let mut config = test_app_config();
     config.encryption_key_previous = Some("5a".repeat(32));
     config.contextual_record_writes = true;
@@ -38,7 +38,7 @@ async fn fixture(db: &Database) -> Fixture {
         .unwrap();
     config.hmac_keyset_path = Some(path.to_str().unwrap().into());
     let actor = AuditActor::from_auth_user(&test_auth_user(&fresh()));
-    let mut receipt = enroll(
+    let receipt = enroll(
         db,
         &config,
         &actor,
@@ -57,7 +57,7 @@ async fn fixture(db: &Database) -> Fixture {
         .insert_one(doc! {"_id":"native-entry-v2","state":"ready","schema_version":2})
         .await
         .unwrap();
-    fleet::observe_retirement_test_replica(db, cohort(&receipt.scope)).await;
+
     db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
         .insert_one(crate::test_utils::test_user(
             &actor.user_id,
@@ -72,9 +72,30 @@ async fn fixture(db: &Database) -> Fixture {
     ] {
         db.create_collection(name).await.unwrap();
     }
-    let keys = EncryptionKeys::from_config(&config);
-    let generation = report::start(db, &keys, &config).await.unwrap().generation;
-    let head = status(db, &config).await.unwrap().unwrap();
+    (config, actor, files, receipt)
+}
+
+async fn fixture(db: &Database) -> Fixture {
+    let (config, actor, files, receipt) = installation(db).await;
+    fleet::observe_retirement_test_replica(db, layout_cohort(&head(db).await).await.unwrap()).await;
+    let request = clean_census(db, &config, &actor, receipt).await;
+    Fixture {
+        config,
+        actor,
+        request,
+        _files: files,
+    }
+}
+
+async fn clean_census(
+    db: &Database,
+    config: &AppConfig,
+    actor: &AuditActor,
+    mut receipt: Receipt,
+) -> Request {
+    let keys = EncryptionKeys::from_config(config);
+    let generation = report::start(db, &keys, config).await.unwrap().generation;
+    let head = status(db, config).await.unwrap().unwrap();
     let target = Target {
         generation: generation.clone(),
         retiring: head
@@ -110,8 +131,8 @@ async fn fixture(db: &Database) -> Fixture {
     {
         receipt = append(
             db,
-            &config,
-            &actor,
+            config,
+            actor,
             &Append {
                 recording: recording(receipt.revision),
                 scope: receipt.scope,
@@ -122,7 +143,7 @@ async fn fixture(db: &Database) -> Fixture {
         .unwrap();
     }
     for _ in 0..128 {
-        if report::advance(db, &keys, &config, &generation)
+        if report::advance(db, &keys, config, &generation)
             .await
             .unwrap()
             .complete
@@ -130,19 +151,13 @@ async fn fixture(db: &Database) -> Fixture {
             break;
         }
     }
-    let report = evaluate(db, &config, &target).await.unwrap();
+    let report = evaluate(db, config, &target).await.unwrap();
     assert_eq!(report.blockers, BTreeSet::from([LOAD_BLOCKER]));
-    let request = Request {
+    Request {
         recording: recording(receipt.revision),
         expected_step_revision: receipt.revision,
         target,
         report_revision: report.report_revision.unwrap(),
-    };
-    Fixture {
-        config,
-        actor,
-        request,
-        _files: files,
     }
 }
 
@@ -167,9 +182,9 @@ async fn witnessed_consumption_replay_and_exact_survivor_admission() {
         for phase in [Phase::Decision,Phase::Approved,Phase::Consume,Phase::Consumed,Phase::Published]{
             let dual_ticket = admit_enrolled(&db,&db,&f.config,f.request.expected_step_revision,"release-9").await.unwrap();
             assert!(admit_enrolled(&db,&db,&survivor,f.request.expected_step_revision,"release-9").await.is_err());
-            let progress=step(&db,&f.config,&f.actor,&f.request,&CertifiedRelease).await.unwrap();
+            let progress=step(&db,&f.config,&f.actor,&f.request,&CertifiedRelease::Rehearsal).await.unwrap();
             assert_eq!(progress.phase,phase);
-            let replay=step(&db,&f.config,&f.actor,&f.request,&CertifiedRelease).await.unwrap();
+            let replay=step(&db,&f.config,&f.actor,&f.request,&CertifiedRelease::Rehearsal).await.unwrap();
             assert_eq!((replay.phase,replay.revision),(phase,progress.revision));
             let row=head(&db).await;
             assert_eq!(row.contains_key("published_retirement"),phase==Phase::Published);
@@ -267,9 +282,15 @@ async fn each_evidence_class_and_immutable_partition_is_required_at_consumption(
                 BTreeSet::from([LOAD_BLOCKER, "census_evidence_unavailable"])
             );
             assert!(
-                step(&db, &f.config, &f.actor, &f.request, &CertifiedRelease)
-                    .await
-                    .is_err()
+                step(
+                    &db,
+                    &f.config,
+                    &f.actor,
+                    &f.request,
+                    &CertifiedRelease::Rehearsal
+                )
+                .await
+                .is_err()
             );
             reports
                 .replace_one(doc! {"_id":id}, part.clone())
@@ -278,9 +299,15 @@ async fn each_evidence_class_and_immutable_partition_is_required_at_consumption(
                 .unwrap();
         }
         let mut request = f.request;
-        let first = step(&db, &f.config, &f.actor, &request, &CertifiedRelease)
-            .await
-            .unwrap();
+        let first = step(
+            &db,
+            &f.config,
+            &f.actor,
+            &request,
+            &CertifiedRelease::Rehearsal,
+        )
+        .await
+        .unwrap();
         request.expected_step_revision = first.revision;
         let edit = append(
             &db,
@@ -299,9 +326,15 @@ async fn each_evidence_class_and_immutable_partition_is_required_at_consumption(
         .await
         .unwrap();
         assert!(
-            step(&db, &f.config, &f.actor, &request, &CertifiedRelease)
-                .await
-                .is_err()
+            step(
+                &db,
+                &f.config,
+                &f.actor,
+                &request,
+                &CertifiedRelease::Rehearsal
+            )
+            .await
+            .is_err()
         );
         assert_eq!(head(&db).await.get_i64("revision"), Ok(edit.revision));
         assert!(
@@ -325,7 +358,7 @@ async fn lease_loss_at_every_transition_and_response_loss_after_every_commit() {
         let mut f=fixture(&db).await;
         for phase in [Phase::Decision,Phase::Approved,Phase::Consume,Phase::Consumed,Phase::Published] {
             let previous=f.request.expected_step_revision;
-            let outcome=async {assert!(step(&db,&f.config,&f.actor,&f.request,&CertifiedRelease).await.is_err());};
+            let outcome=async {assert!(step(&db,&f.config,&f.actor,&f.request,&CertifiedRelease::Rehearsal).await.is_err());};
             resume_after("retirement_claimed",outcome,async {
                 let changed=db.collection::<Document>(report::REPORTS).update_one(
                     doc!{"_id":&f.request.target.generation,"claim":{"$exists":true}},
@@ -333,8 +366,8 @@ async fn lease_loss_at_every_transition_and_response_loss_after_every_commit() {
                 assert_eq!(changed.modified_count,1);
             }).await;
             assert_eq!(head(&db).await.get_i64("revision"),Ok(previous));
-            drop_after("retirement_committed",step(&db,&f.config,&f.actor,&f.request,&CertifiedRelease)).await;
-            let recovered=step(&db,&f.config,&f.actor,&f.request,&CertifiedRelease).await.unwrap();
+            drop_after("retirement_committed",step(&db,&f.config,&f.actor,&f.request,&CertifiedRelease::Rehearsal)).await;
+            let recovered=step(&db,&f.config,&f.actor,&f.request,&CertifiedRelease::Rehearsal).await.unwrap();
             assert_eq!(recovered.phase,phase);
             assert_eq!(recovered.revision,previous+1);
             f.request.expected_step_revision=recovered.revision;
@@ -384,9 +417,15 @@ async fn stale_source_copy_and_current_writes_across_all_markers() {
             Phase::Published,
         ] {
             let work = async {
-                let result = step(&db, &f.config, &f.actor, &f.request, &CertifiedRelease)
-                    .await
-                    .unwrap();
+                let result = step(
+                    &db,
+                    &f.config,
+                    &f.actor,
+                    &f.request,
+                    &CertifiedRelease::Rehearsal,
+                )
+                .await
+                .unwrap();
                 assert_eq!(result.phase, phase);
             };
             resume_after("retirement_claimed", work, async {
@@ -480,3 +519,6 @@ mod crash;
 mod races;
 
 mod blockers;
+
+mod load_evidence;
+mod rotation;
