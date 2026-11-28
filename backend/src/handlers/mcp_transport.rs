@@ -548,7 +548,7 @@ async fn service_tool_content(
         String::new()
     };
     let status = response.status;
-    let is_error = !(200..300).contains(&status);
+    let is_error = !(200..300).contains(&status) || response.is_supervisor_write_unconfirmed();
     let guest_downstream_error = (400..600).contains(&status)
         && auth
             .chat

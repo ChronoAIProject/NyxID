@@ -5218,6 +5218,27 @@ async fn execute_resolved_proxy_inner<'a>(
         );
     }
 
+    let marked_supervisor_operation = crate::services::supervisor_write::marked_chat(
+        auth_user.assistant_chat.as_deref(),
+        effective_owner_for_approval
+            .as_deref()
+            .unwrap_or(&approval_owner_user_id),
+    ) && crate::services::supervisor_write::operation_family(
+        target.catalog_slug.as_deref().unwrap_or_default(),
+        &method_str,
+        path,
+    );
+    if marked_supervisor_operation
+        && (invocation_diagnostic_probe
+            || channel_guest_sheets.is_some()
+            || is_ws_candidate
+            || shared_connect
+            || streaming_body.is_some())
+    {
+        return Err(AppError::Forbidden(
+            "The required original-chat write review is unavailable on this transport".into(),
+        ));
+    }
     // Only enrolled callers can carry coverage; skip body/header preparation
     // entirely for everyone else (admit_http would return immediately).
     if let Some(execution_permission) = auth_user.execution_permission.as_ref()

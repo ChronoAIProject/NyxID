@@ -1237,6 +1237,156 @@ async fn supervisor_write_marked_rejection_survives_readback_recovery_and_later_
 }
 
 #[tokio::test]
+async fn supervisor_write_marked_application_error_200_keeps_failure_and_unconfirmed_readback() {
+    for (proxy, fault, already_matches) in [
+        (false, 1, false),
+        (true, 1, true),
+        (true, 2, false),
+        (false, 3, false),
+        (false, 4, false),
+    ] {
+        let j = Box::pin(marked_journey(proxy)).await;
+        let proposal = initial_gap(&j).await;
+        j.script.application_error.store(fault, Ordering::SeqCst);
+        j.script.hold_readback.store(true, Ordering::SeqCst);
+        web_allow(&j, &proposal, "operation", &Uuid::new_v4().to_string()).await;
+        let (review, code) = wait_review(&j).await;
+        assert_no_write(&j);
+        // The matching-state negative is installed only after the no-effect proof.
+        // It cannot serve as evidence that this attempted update succeeded.
+        if already_matches {
+            j.ledger.lock().unwrap().target = "Approved".into();
+        }
+        let delivery = cursor(&j).await;
+        let _ = body_text(
+            owner(
+                &j,
+                &format!("yes write-{code}"),
+                "ws7-application-error-yes",
+            )
+            .await,
+        )
+        .await;
+        let terminal = wait_terminal(&j, &proposal.id).await;
+        let p = proposals::proposal(&terminal).unwrap();
+        assert!(p.owner_continuation.is_none());
+        assert_eq!(p.state, if fault == 1 { "completed" } else { "unknown" });
+        assert_eq!(
+            terminal.activity_outcome.as_deref(),
+            if fault == 1 { Some("failed") } else { None }
+        );
+        assert_eq!(
+            p.failure_code.as_deref(),
+            Some(if fault == 1 {
+                "provider_application_rejected"
+            } else {
+                "provider_application_unconfirmed"
+            })
+        );
+        tokio::time::timeout(Duration::from_secs(15), async {
+            while !j
+                .observed
+                .lock()
+                .await
+                .iter()
+                .any(|event| event["stage"] == "readback_started")
+            {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let row = engine::get(&j.state.db, OWNER, &p.conversation_id)
+            .await
+            .unwrap();
+        let credential =
+            crate::services::assistant_agent_credential_service::load_for_conversation(
+                &j.state.db,
+                &j.state.encryption_keys,
+                OWNER,
+                &row.id,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let egress = crate::handlers::assistant_nyxagent::http_egress(
+            j.state.clone(),
+            crate::test_utils::test_auth_user(OWNER),
+        );
+        for _ in 0..2 {
+            let outcome = proposals::resume_turn(&j.state, egress.as_ref(), &row, &credential)
+                .await
+                .unwrap()
+                .unwrap();
+            let proposals::ResumeOutcome::Receipt(text) = outcome else {
+                panic!("a terminal application failure cannot restart readback");
+            };
+            assert!(text.contains("unconfirmed"));
+            assert_eq!(text.contains("provider rejected"), fault == 1);
+            assert_eq!(j.ledger.lock().unwrap().writes.len(), 1);
+        }
+        j.script.release.add_permits(1);
+        let report = later_dm_report(
+            &j,
+            &delivery,
+            &review,
+            if fault == 1 {
+                "provider rejected"
+            } else {
+                "write outcome is unknown"
+            },
+        )
+        .await;
+        assert_row_report(
+            &report,
+            &j,
+            if already_matches {
+                "Approved"
+            } else {
+                "Pending"
+            },
+            3,
+        );
+        if fault == 1 {
+            assert!(
+                report.contains("not confirmed as successful")
+                    && report.contains("observed state only")
+            );
+        } else {
+            assert!(report.contains("does not establish cause"));
+        }
+        let ledger = j.ledger.lock().unwrap();
+        assert_eq!(
+            ledger.writes,
+            [(
+                j.script.selected.clone(),
+                json!({"fields":{"Status":"Approved"}})
+            )]
+        );
+        assert_eq!(
+            ledger.target,
+            if already_matches {
+                "Approved"
+            } else {
+                "Pending"
+            }
+        );
+        assert_eq!(ledger.control, "Untouched");
+        drop(ledger);
+        let wire = j._ledger_server.received_requests().await.unwrap();
+        assert_eq!(
+            wire.iter().filter(|r| r.method.as_str() == "PUT").count(),
+            1
+        );
+        assert_eq!(
+            wire.iter().filter(|r| r.method.as_str() == "POST").count(),
+            3
+        );
+        remove_adapter(&j);
+    }
+}
+
+#[tokio::test]
 async fn supervisor_write_marked_wrong_event_kind_or_assignment_cannot_resume_or_read() {
     for fault in ["kind", "assignment", "invocation"] {
         let j = Box::pin(marked_journey(false)).await;
@@ -1532,6 +1682,293 @@ async fn supervisor_write_marked_persistent_coverage_keeps_a_fresh_exact_dm_floo
         assert_eq!(ledger.control, "Untouched");
         drop(ledger);
         remove_adapter(&j);
+    }
+}
+
+#[tokio::test]
+async fn supervisor_write_marked_http_and_mcp_grant_resume_and_covered_calls_keep_exact_dm_floor() {
+    use crate::models::service_approval_config::{ApprovalEffect, ApprovalMode, ApprovalRule};
+    for proxy in [false, true] {
+        let j = Box::pin(marked_journey(proxy)).await;
+        let connection = j
+            .state
+            .db
+            .collection::<Document>("user_services")
+            .find_one(doc! {"user_id":OWNER,"slug":"ledger"})
+            .await
+            .unwrap()
+            .unwrap();
+        let catalog = connection.get_str("catalog_service_id").unwrap();
+        crate::services::approval_service::set_service_approval_config(
+            &j.state.db,
+            OWNER,
+            catalog,
+            "Ledger",
+            Some(true),
+            Some(&ApprovalMode::Grant),
+            Some(&[ApprovalRule {
+                mandatory_review: false,
+                methods: vec!["PUT".into()],
+                resource_pattern: "*".into(),
+                verbs: vec![],
+                effect: ApprovalEffect::RequireApproval,
+                mode: ApprovalMode::Grant,
+            }]),
+            Some(&ApprovalEffect::AutoAllow),
+        )
+        .await
+        .unwrap();
+        let agent = j
+            .state
+            .db
+            .collection::<Document>("assistant_agents")
+            .find_one(doc! {"user_id":OWNER,"name":"accountant"})
+            .await
+            .unwrap()
+            .unwrap();
+        team::set_agent_policy(
+            &j.state.db,
+            &crate::services::audit_service::AuditActor {
+                user_id: OWNER.into(),
+                ip_address: None,
+                user_agent: None,
+                api_key_id: None,
+                api_key_name: None,
+            },
+            agent.get_str("_id").unwrap(),
+            team::AgentPolicy {
+                model: None,
+                access_mode_override: Some(Some(
+                    crate::models::assistant_settings::AccessMode::Autopilot,
+                )),
+            },
+        )
+        .await
+        .unwrap();
+        let proposal = initial_gap(&j).await;
+        let p = proposals::proposal(&proposal).unwrap();
+        // This is genuine marked ingress, not a prepared Resume seeded by the
+        // test. The encrypted retained payload must carry the actual assignment.
+        let context = crate::crypto::record_field::RecordContext::new(
+            "approval_requests",
+            &proposal.id,
+            OWNER,
+            &["execution_proposal", "v4", "payload"],
+        )
+        .unwrap();
+        assert_eq!(p.payload_context_version, Some(3));
+        let payload = j
+            .state
+            .encryption_keys
+            .decrypt_record(&p.payload.as_ref().unwrap().bytes, &context)
+            .await
+            .unwrap();
+        let effect: crate::models::execution_proposal::PreparedEffect =
+            serde_json::from_slice(&payload).unwrap();
+        let origin = effect
+            .supervisor
+            .as_ref()
+            .expect("Grant-mode v5 must retain its assigning source");
+        assert_eq!(origin.marked.operation_id, p.effect_id);
+        assert_eq!(origin.marked.origin_turn, p.source_turn_id);
+        assert!(crate::services::supervisor_write::same_task(
+            &origin.marked.task,
+            &p.task
+        ));
+        web_allow(&j, &proposal, "persistent", &Uuid::new_v4().to_string()).await;
+        let (review, code) = wait_review(&j).await;
+        assert_eq!(review.approval_mode, ApprovalMode::PerRequest);
+        assert_eq!(review.supervisor_write.as_ref().unwrap().version, 2);
+        assert_no_write(&j);
+        reject_ordinary_web(&j, &review).await;
+        reject_other_routes(&j, &review, &code).await;
+        let delivery = cursor(&j).await;
+        let decision =
+            body_text(owner(&j, &format!("no write-{code}"), "ws7-grant-first-deny").await).await;
+        assert!(decision.contains("Write rejected"));
+        assert_eq!(
+            proposals::proposal(&wait_terminal(&j, &proposal.id).await)
+                .unwrap()
+                .state,
+            "not_sent"
+        );
+        later_dm_report(&j, &delivery, &review, NO_CONFIRMATION).await;
+        let binding = review.supervisor_write.as_ref().unwrap();
+        wait_idle(&j, &binding.specialist_conversation).await;
+        wait_idle(&j, &binding.source.channel.conversation_id).await;
+        // The next real HTTP/MCP ingress is fully covered. Even Full access and
+        // Grant mode cannot turn its independent DM floor into ordinary execution.
+        let result = marked_assign(&j, &j.script.selection(), "ws7-grant-covered").await;
+        let (next, code) = wait_review(&j).await;
+        assert_ne!(next.id, review.id);
+        assert_no_write(&j);
+        assert_eq!(
+            j.state
+                .db
+                .collection::<Document>("approval_requests")
+                .count_documents(doc! {"execution_proposal":{"$ne":null}})
+                .await
+                .unwrap(),
+            1,
+            "this actual later call must use its saved execution coverage"
+        );
+        reject_ordinary_web(&j, &next).await;
+        let _ =
+            body_text(owner(&j, &format!("yes write-{code}"), "ws7-grant-covered-yes").await).await;
+        let report = owner_text(
+            &tokio::time::timeout(Duration::from_secs(25), result)
+                .await
+                .unwrap()
+                .unwrap(),
+        );
+        assert_row_report(&report, &j, "Approved", 4);
+        assert_eq!(j.ledger.lock().unwrap().writes.len(), 1);
+        assert_eq!(j.ledger.lock().unwrap().control, "Untouched");
+        assert_eq!(
+            j.state
+                .db
+                .collection::<Document>("approval_grants")
+                .count_documents(doc! {"user_id":OWNER,"execution":null})
+                .await
+                .unwrap(),
+            0,
+            "a DM decision never creates an ordinary Grant"
+        );
+        assert_eq!(
+            j.state
+                .db
+                .collection::<Document>("approval_requests")
+                .count_documents(
+                    doc! {"user_id":OWNER,"supervisor_write":null,"execution_proposal":null}
+                )
+                .await
+                .unwrap(),
+            0,
+            "no ordinary web approval may replace either DM decision"
+        );
+        remove_adapter(&j);
+    }
+}
+
+#[tokio::test]
+async fn supervisor_write_marked_autoallow_gap_and_policy_race_refuse_before_proposal_or_send() {
+    use crate::models::service_approval_config::{ApprovalEffect, ApprovalMode};
+    for proxy in [false, true] {
+        for control in ["gap", "policy_race", "ordinary"] {
+            let j = Box::pin(marked_journey(proxy)).await;
+            let connection = j
+                .state
+                .db
+                .collection::<Document>("user_services")
+                .find_one(doc! {"user_id":OWNER,"slug":"ledger"})
+                .await
+                .unwrap()
+                .unwrap();
+            crate::services::approval_service::set_service_approval_config(
+                &j.state.db,
+                OWNER,
+                connection.get_str("catalog_service_id").unwrap(),
+                "Ledger",
+                Some(false),
+                Some(&ApprovalMode::PerRequest),
+                Some(&[]),
+                Some(&ApprovalEffect::AutoAllow),
+            )
+            .await
+            .unwrap();
+            if control == "ordinary" {
+                let agent = j
+                    .state
+                    .db
+                    .collection::<Document>("assistant_agents")
+                    .find_one(doc! {"user_id":OWNER,"name":"accountant"})
+                    .await
+                    .unwrap()
+                    .unwrap();
+                team::set_agent_policy(
+                    &j.state.db,
+                    &crate::services::audit_service::AuditActor {
+                        user_id: OWNER.into(),
+                        ip_address: None,
+                        user_agent: None,
+                        api_key_id: None,
+                        api_key_name: None,
+                    },
+                    agent.get_str("_id").unwrap(),
+                    team::AgentPolicy {
+                        model: None,
+                        access_mode_override: Some(Some(
+                            crate::models::assistant_settings::AccessMode::Autopilot,
+                        )),
+                    },
+                )
+                .await
+                .unwrap();
+            }
+            let listing = marked_assign(
+                &j,
+                "Ask accountant for today's pending ledger rows",
+                "ws7-autoallow-list",
+            )
+            .await;
+            let list = owner_text(
+                &tokio::time::timeout(Duration::from_secs(25), listing)
+                    .await
+                    .unwrap()
+                    .unwrap(),
+            );
+            assert_row_report(&list, &j, "Pending", 1);
+            j.stage.store(1, Ordering::SeqCst);
+            if control == "policy_race" {
+                *j.script.review_fault.lock().unwrap() = Some(ReviewFault::PolicyRace);
+            }
+            let result = marked_assign(&j, &j.script.selection(), "ws7-autoallow-write").await;
+            let report = owner_text(
+                &tokio::time::timeout(Duration::from_secs(25), result)
+                    .await
+                    .unwrap()
+                    .unwrap(),
+            );
+            assert_eq!(
+                j.state
+                    .db
+                    .collection::<Document>("approval_requests")
+                    .count_documents(doc! {})
+                    .await
+                    .unwrap(),
+                0,
+                "{control}: no unbound v4 or ordinary approval may be authored"
+            );
+            if control == "ordinary" {
+                assert_row_report(&report, &j, "Approved", 3);
+                assert_eq!(j.ledger.lock().unwrap().writes.len(), 1);
+                assert_eq!(j.ledger.lock().unwrap().control, "Untouched");
+            } else {
+                assert_eq!(report, NO_CONFIRMATION);
+                assert_no_write(&j);
+                assert_eq!(
+                    j._ledger_server
+                        .received_requests()
+                        .await
+                        .unwrap()
+                        .iter()
+                        .filter(|request| request.method.as_str() == "PUT")
+                        .count(),
+                    0
+                );
+                let observed = j.observed.lock().await;
+                let write = &observed
+                    .iter()
+                    .find(|event| event["stage"] == "write")
+                    .unwrap()["result"];
+                assert!(if proxy {
+                    write["status"] == 403
+                } else {
+                    tool_value(write).is_none()
+                });
+            }
+            remove_adapter(&j);
+        }
     }
 }
 
@@ -1978,10 +2415,15 @@ async fn supervisor_write_marked_terminal_recovery_is_unverifiable_and_never_rep
 #[tokio::test]
 async fn supervisor_write_marked_coalesced_decisions_preserve_notices_and_do_not_choose_a_read_target()
  {
-    for failed in [false, true] {
+    for (failed, application) in [(false, false), (true, false), (true, true)] {
         let j = Box::pin(marked_journey(false)).await;
         let approved = initial_gap_stage(&j, 2).await;
-        j.script.reject_write.store(failed, Ordering::SeqCst);
+        j.script
+            .reject_write
+            .store(failed && !application, Ordering::SeqCst);
+        j.script
+            .application_error
+            .store(usize::from(application), Ordering::SeqCst);
         let denied = j
         .state
         .db
@@ -2030,6 +2472,24 @@ async fn supervisor_write_marked_coalesced_decisions_preserve_notices_and_do_not
                 && report.contains("unconfirmed")
         );
         assert_eq!(report.contains("provider rejected"), failed);
+        let terminal = load(&j, &approved.id).await;
+        assert_eq!(
+            terminal.activity_outcome.as_deref(),
+            Some(if failed { "failed" } else { "completed" })
+        );
+        assert_eq!(
+            proposals::proposal(&terminal)
+                .unwrap()
+                .failure_code
+                .as_deref(),
+            if application {
+                Some("provider_application_rejected")
+            } else if failed {
+                Some("provider_http_rejected")
+            } else {
+                None
+            }
+        );
         assert!(
             !j.observed
                 .lock()

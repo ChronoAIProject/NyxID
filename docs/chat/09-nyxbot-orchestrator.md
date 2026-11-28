@@ -256,12 +256,15 @@ forwarded sources cannot acquire this decision path. A private-chat label or
 Admission captures the exact authenticated source event, owner, NyxBot thread,
 key and assigning turn. The connected write binds its specialist agent, key,
 turn, request occurrence, exact connection and authority, method, destination
-and prepared body. Only PerRequest approval participates, including the implicit
-default used with Writes only. The independent DM decision remains required on
-enrolled delegated work even when execution permission covers the underlying
-personal-service layer. A permission gap retains its web-only proposal; after
-that web decision, the exact retained operation requires its own original-DM
-decision before dispatch. Grant-mode policies keep their existing review route.
+and prepared body. Unmarked work uses PerRequest approval, including the implicit
+default used with Writes only. Marked assigned writes retain the independent DM
+decision under required personal PerRequest and Grant policies, including when
+execution permission covers the personal-service layer or the specialist uses
+Full access. A permission gap retains its web-only proposal and durable assigning
+source; after that web decision, the exact retained operation requires its own
+original-DM decision before dispatch. The DM request is always one PerRequest
+occurrence and creates no ordinary or reusable grant. Ordinary Grant policies
+outside this marked assigned family keep their review route.
 The [execution-permission contract](../EXECUTION_PERMISSIONS.md#verified-owner-channel-proposals-v4)
 specifies retained-source compatibility and dispatcher deployment requirements.
 
@@ -279,7 +282,11 @@ requests with the optional public `decision_destination: originating_owner_chat`
 marker. The marker contains no code, chat identity or private binding data.
 For live pending requests, web, mobile and Watch surfaces show an instruction to
 review in the original private NyxBot chat in place of decision controls.
-Expired and terminal requests retain their factual status. Generic review paths remain
+A mounted Approval History page schedules a render at the earliest pending
+owner-chat deadline; both compact and table layouts show Expired at that deadline
+and remove the live DM instruction. This display transition does not mutate the
+server's pending-list filter or counts. Expired and terminal requests retain their
+factual status. Generic review paths remain
 history navigation for older readers; they do not authorize a web decision.
 The ordinary web/mobile decision endpoint refuses both Allow and Deny for a
 bound request. Standard approvals and execution-proposal review paths keep
@@ -297,8 +304,15 @@ review never displays a rounded ledger amount.
 
 For marked assigned writes, the operation family and verified assignment select
 the independent DM requirement before safe review preparation or execution
-coverage. Unsafe bodies, headers, identifiers or correlation provenance refuse
-that operation; they cannot drop the requirement or select a web fallback.
+coverage or a legacy transport return. The underlying policy decision uses the
+same authority snapshot as classification and final egress, so a policy change
+cannot establish a new baseline after source selection. Unsafe bodies, headers,
+identifiers or correlation provenance refuse that operation; they cannot drop the
+requirement or select a web fallback. Diagnostic and unsupported streaming calls
+refuse before authoring. An explicitly AutoAllow service keeps ordinary and
+covered execution; an independent gap on this assigned operation refuses before
+creating an unbound retained proposal. Historical retained rows without an
+authenticated assigning source never infer consent.
 The ordinary fallback described above applies only outside this marked bound.
 
 The bot connectors' published paths include `/open-apis`; OAuth connectors'

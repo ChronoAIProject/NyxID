@@ -120,8 +120,10 @@ fn same_owner_chat(
 const PROVIDER_REJECTION: &str = "The provider rejected this write; this attempt is not confirmed as successful. An independent read reports observed state only, even if it already matches the requested value.";
 
 fn rejected(request: &ApprovalRequest, p: &Proposal) -> bool {
-    p.failure_code.as_deref() == Some("provider_http_rejected")
-        || (p.state == "completed" && request.activity_outcome.as_deref() == Some("failed"))
+    matches!(
+        p.failure_code.as_deref(),
+        Some("provider_http_rejected" | "provider_application_rejected")
+    ) || (p.state == "completed" && request.activity_outcome.as_deref() == Some("failed"))
 }
 
 fn event_source_matches(
@@ -444,17 +446,30 @@ pub(crate) async fn resume_turn(
             continue;
         }
         if matches!(p.state.as_str(), "dispatched" | "unknown") {
+            let known_rejection = version == AssistantVersion::V5
+                && (rejected(&request, p) || request.activity_outcome.as_deref() == Some("failed"));
+            let failure = if known_rejection {
+                if p.failure_code.as_deref() == Some("provider_application_rejected") {
+                    "provider_application_rejected"
+                } else {
+                    "provider_http_rejected"
+                }
+            } else {
+                "provider_outcome_unknown"
+            };
             let mut session = state.db.client().start_session().await?;
             session.start_transaction().and_run((&state.db,id),move |session,(db,id)|Box::pin(async move {
                 let result:AppResult<()>=async {
-                    if db.collection::<Document>(REQUESTS).update_one(version.selector(doc!{"_id":*id,"execution_proposal.v1.state":{"$in":["dispatched","unknown"]}}),version.update(doc!{"$set":{"execution_proposal.v1.state":"unknown","execution_proposal.v1.failure_code":"provider_outcome_unknown"},"$unset":Slot::Assistant(version).unset(&[Field::Payload])})).session(&mut *session).await?.matched_count==1 {
+                    if db.collection::<Document>(REQUESTS).update_one(version.selector(doc!{"_id":*id,"execution_proposal.v1.state":{"$in":["dispatched","unknown"]}}),version.update(doc!{"$set":{"execution_proposal.v1.state":"unknown","execution_proposal.v1.failure_code":failure},"$unset":Slot::Assistant(version).unset(&[Field::Payload])})).session(&mut *session).await?.matched_count==1 {
                         lifecycle::retire_operations(db,session,&[(*id).to_owned()]).await?;
                     }
                     Ok(())
                 }.await;
                 super::super::super::api_key_mutation_service::transaction_result(result)
             })).await.map_err(super::super::super::api_key_mutation_service::map_transaction_error)?;
-            notes.push(associated(if version == AssistantVersion::V5 {
+            notes.push(associated(if known_rejection {
+                format!("{PROVIDER_REJECTION} The final row state is unknown and unconfirmed. A later observation cannot prove this attempt caused it. It will not be sent again.")
+            } else if version == AssistantVersion::V5 {
                 "The write outcome is unknown and its final row state is unconfirmed. A later observation cannot prove this attempt caused it. It will not be sent again.".into()
             } else { "The operation's outcome is unknown. It will not be sent again.".into() }));
             continue;
@@ -559,6 +574,7 @@ pub(crate) async fn resume_turn(
         } else {
             None
         };
+        let provider_path = (version == AssistantVersion::V5).then(|| resume.effect.path.clone());
         let outcome = egress.resume_execution(row, resume).await;
         let current = state
             .db
@@ -588,12 +604,31 @@ pub(crate) async fn resume_turn(
         let (state_name, text, code) = match outcome {
             Ok(response) if sent => {
                 let status = response.status();
-                let provider_rejected = version == AssistantVersion::V5 && !status.is_success();
-                if provider_rejected {
-                    activity_outcome = Some("failed");
-                }
                 match tokio::time::timeout(std::time::Duration::from_secs(120),axum::body::to_bytes(response.into_body(),MAX_PAYLOAD)).await {
                     Ok(Ok(bytes))=>{
+                        if let Some(path) = &provider_path {
+                            use crate::services::supervisor_write::{ProviderResult, provider_result};
+                            match provider_result(path, status.as_u16(), &bytes) {
+                                ProviderResult::Rejected => {
+                                    activity_outcome = Some("failed");
+                                    let code = if status.is_success() {"provider_application_rejected"} else {"provider_http_rejected"};
+                                    let text = format!("{PROVIDER_REJECTION} HTTP {}. The final row state is unconfirmed; do not repeat the write.", status.as_u16());
+                                    private_result = Some(text.clone());
+                                    ("completed", text, Some(code))
+                                }
+                                ProviderResult::Unconfirmed => {
+                                    let text = "The provider response did not confirm this exact record update. The write outcome is unknown and its final row state is unconfirmed. Do not repeat the write.".to_owned();
+                                    private_result = Some(text.clone());
+                                    ("unknown", text, Some("provider_application_unconfirmed"))
+                                }
+                                ProviderResult::Succeeded => {
+                                    activity_outcome = Some("completed");
+                                    let text = format!("Operation finished (HTTP {}). A provider receipt was received; an independent read is required before reporting the final row state.", status.as_u16());
+                                    private_result = Some(text.clone());
+                                    ("completed", text, None)
+                                }
+                            }
+                        } else {
                         let text=String::from_utf8_lossy(&bytes);
                         let text=match serde_json::from_slice::<serde_json::Value>(&bytes) {
                             Ok(mut value)=>{redact(&mut value);value.to_string()},
@@ -605,9 +640,9 @@ pub(crate) async fn resume_turn(
                         let result=format!("Operation finished (HTTP {}).\n{}",status.as_u16(),text.chars().take(16_384).collect::<String>());
                         private_result=Some(result.clone());
                         activity_outcome = Some(if status.is_success() {"completed"}else{"failed"});
-                        ("completed",if row.group_id.is_some() || row.collaboration.is_some(){format!("Operation finished (HTTP {}). The private result is available on the requester's permission card.",status.as_u16())}else{result},provider_rejected.then_some("provider_http_rejected"))
+                        ("completed",if row.group_id.is_some() || row.collaboration.is_some(){format!("Operation finished (HTTP {}). The private result is available on the requester's permission card.",status.as_u16())}else{result},None)
+                        }
                     },
-                    _ if provider_rejected => ("completed", format!("{PROVIDER_REJECTION} HTTP {}. The response body was unavailable.",status.as_u16()), Some("provider_http_rejected")),
                     _=>("unknown","The response was incomplete or unavailable. The operation will not be sent again.".into(),Some("response_unavailable")),
                 }
             }

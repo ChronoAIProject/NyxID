@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ApprovalRequestItem } from "@/types/approvals";
@@ -535,6 +535,52 @@ describe("ApprovalHistoryPage", () => {
 
 
 describe("owner-chat decision destination", () => {
+  it("expires mounted owner-chat rows at each deadline in compact and table layouts without a web action", async () => {
+    vi.useFakeTimers();
+    const start = Date.parse("2026-11-28T00:00:00Z");
+    vi.setSystemTime(start);
+    try {
+      const reviewPath = "/assistant?c=task&card=execution";
+      fixtures.requests = [
+        makeRequest({ id: "first", service_name: "First ledger", decision_destination: "originating_owner_chat", expires_at: new Date(start + 1_000).toISOString() }),
+        makeRequest({ id: "second", service_name: "Second ledger", decision_destination: "originating_owner_chat", expires_at: new Date(start + 2_000).toISOString() }),
+        makeRequest({ id: "ordinary", service_name: "Ordinary write" }),
+        makeRequest({ id: "execution", service_name: "Execution review", execution_proposal: {
+          version: 5, supported: true, revision: 1, state: "pending", can_decide: true,
+          review_path: reviewPath, review: null, choices: [], grant_id: null, failure_code: null,
+        } }),
+      ];
+      fixtures.total = fixtures.requests.length;
+      const view = render(<ApprovalHistoryPage />);
+      const check = (name: string, expired: boolean) => {
+        for (const [layout, selector] of [[view.container.querySelector<HTMLElement>(".md\\:hidden")!, "div.relative"], [screen.getByRole("table"), "tr"]] as const) {
+          const row = within(layout).getByText(name).closest(selector) as HTMLElement;
+          expect(within(row).getByText(expired ? "Expired" : "Pending")).toBeInTheDocument();
+          expect(within(row).queryByText("Review this request in your original private chat with NyxBot.") !== null).toBe(!expired);
+          expect(within(row).queryByRole("button")).not.toBeInTheDocument();
+          expect(within(row).queryByRole("link")).not.toBeInTheDocument();
+        }
+      };
+      check("First ledger", false);
+      check("Second ledger", false);
+      await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+      check("First ledger", true);
+      check("Second ledger", false);
+      await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+      check("First ledger", true);
+      check("Second ledger", true);
+      expect(screen.getAllByRole("link", { name: "Review" })).toHaveLength(2);
+      for (const link of screen.getAllByRole("link", { name: "Review" })) expect(link).toHaveAttribute("href", reviewPath);
+      expect(screen.getAllByRole("button", { name: "Approve" })).toHaveLength(2);
+      expect(screen.getAllByRole("button", { name: "Reject" })).toHaveLength(2);
+      expect(mockDecideMutateAsync).not.toHaveBeenCalled();
+      expect(mockRefetch).not.toHaveBeenCalled();
+      view.unmount();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it.each([
     ["pending", "2099-01-01T00:00:00Z", "Pending", true],
     ["pending", "2000-01-01T00:00:00Z", "Expired", false],

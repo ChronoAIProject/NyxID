@@ -52,7 +52,7 @@ control. Nothing in this release changes those gates.
 | --- | --- |
 | Access-mode risk prompts (Auto/Ask) | Yes, within the permission's complete scope. |
 | Personal service approval layer (Grant/PerRequest) | Yes, only for the acting person's own connection. |
-| Originating-owner DM decision for an eligible delegated personal Bitable write | **No.** This independent exact decision remains required when the underlying personal PerRequest policy requires review, including implicit Writes only. |
+| Originating-owner DM decision for an eligible delegated personal Bitable write | **No.** This independent exact decision remains required for an eligible marked assigned write under required personal Grant or PerRequest policy, including implicit Writes only; unmarked work participates under PerRequest. |
 | Shared-agent connection consent | Yes, only that exact actor in the shared lane, their connection and bound agent behavior. |
 | Webhook/automation confirmation (untrusted input) | **No.** |
 | `machine_confirm` | **No.** |
@@ -960,8 +960,10 @@ and is capped by the original task and reply-source deadline.
 
 The separate [personal supervisor ledger-write review](chat/09-nyxbot-orchestrator.md#personal-supervisor-ledger-write-review-2605)
 uses `yes write-<code>` for one eligible delegated personal Bitable write under
-the underlying PerRequest policy, including implicit Writes only. It applies to
-unmarked work and to enrolled work with exact execution coverage. Coverage can
+the underlying personal policy: PerRequest for unmarked work, and required Grant
+or PerRequest for marked assigned work, including implicit Writes only. It applies
+to enrolled work with exact execution coverage and preserves the underlying
+policy's authority snapshot before any approval or legacy-return decision. Coverage can
 satisfy its declared personal-service layer; it never supplies this independent
 DM decision. A gap retains its required web decision and all other floors. Its
 typed retained resume must obtain a fresh exact decision in the original DM
@@ -979,10 +981,18 @@ Retained readback requires a typed `permission_decided` event with its matching
 durable assignment and task. The exact request's provider rejection remains
 explicit in readback, coalesced and terminal notices; observing a matching row
 does not convert a rejected attempt into a successful write.
-For this bound retained path, `completed` records the finished HTTP exchange;
-a non-2xx records `activity_outcome: failed` and `provider_http_rejected` as its
-failure code. Recovery also preserves a prior exact receipt's failed activity
-when that receipt predates the explicit rejection code.
+For this bound retained path, `completed` records a finished HTTP exchange.
+Success also requires a completed response with a unique JSON `code: 0` and the
+exact selected record receipt. HTTP 202 is provisional. A documented definite
+Feishu/Lark rejection records `activity_outcome: failed` with
+`provider_http_rejected` or `provider_application_rejected`, including HTTP 200
+with a nonzero application code. The classifier uses the same documented
+non-application code distinction as `lark_base_writes::classify`. Transient or
+unrecognized codes, 5xx, malformed or mismatched receipts and transport ambiguity
+remain unconfirmed; none proves rejection or successful application. Provider
+prose never supplies the result notice. Recovery preserves the exact receipt's
+failed activity and rejection attribution, including receipts predating the
+explicit rejection code. Independent reads prove observed state only.
 
 Retained effects with this independent requirement use envelope version 5 and
 the existing `v4` storage arm, record binding and historical AAD. Their encrypted

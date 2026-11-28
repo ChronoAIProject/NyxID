@@ -1,7 +1,7 @@
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { translateErrorMessage } from "@/lib/error-messages";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useApprovalRequests, useDecideApproval } from "@/hooks/use-approvals";
 import { ApiError } from "@/lib/api-client";
 import {
@@ -79,6 +79,7 @@ export function ApprovalHistoryPage() {
   useUiTranslation();
   const [page, setPage] = useState(1);
   const [statusFilter, setStatusFilter] = useState("all");
+  const [now, setNow] = useState(Date.now);
   const [decideTarget, setDecideTarget] = useState<{
     readonly id: string;
     readonly service: string;
@@ -96,8 +97,17 @@ export function ApprovalHistoryPage() {
   const decideMutation = useDecideApproval();
 
   const requests = data?.requests ?? [];
+  const nextExpiry = Math.min(...requests
+    .filter((request) => request.decision_destination === "originating_owner_chat" && request.status === "pending")
+    .map((request) => Date.parse(request.expires_at))
+    .filter((deadline) => Number.isFinite(deadline) && deadline > now));
+  useEffect(() => {
+    if (!Number.isFinite(nextExpiry)) return;
+    const timer = setTimeout(() => setNow(Date.now()), Math.min(2_147_483_647, Math.max(0, nextExpiry - Date.now())));
+    return () => clearTimeout(timer);
+  }, [nextExpiry, now]);
   const hasActions = requests.some(
-    (request) => approvalStatus(request) === "pending" ||
+    (request) => approvalStatus(request, now) === "pending" ||
       (request.decision_destination !== "originating_owner_chat" && request.execution_proposal),
   );
   const total = data?.total ?? 0;
@@ -193,7 +203,7 @@ export function ApprovalHistoryPage() {
                       {request.requester_label ?? request.requester_type}
                     </p>
                   </div>
-                  {getStatusBadge(approvalStatus(request))}
+                  {getStatusBadge(approvalStatus(request, now))}
                 </div>
                 <ApprovalAction className="mt-1.5 line-clamp-2">
                   {isToolApproval(request)
@@ -213,14 +223,14 @@ export function ApprovalHistoryPage() {
                   {request.decided_at && <span>{translateUi("Decided ")}{formatDate(request.decided_at)}</span>}
                 </div>
                 {request.decision_destination === "originating_owner_chat" ? (
-                  approvalStatus(request) === "pending" && (
+                  approvalStatus(request, now) === "pending" && (
                     <p className="mt-3 border-t border-border/40 pt-3 type-secondary text-muted-foreground">
-                      {translateUi(Date.parse(request.expires_at) > Date.now()
+                      {translateUi(Date.parse(request.expires_at) > now
                         ? "Review this request in your original private chat with NyxBot."
                         : "Waiting for the server")}
                     </p>
                   )
-                ) : (request.execution_proposal || approvalStatus(request) === "pending") && (
+                ) : (request.execution_proposal || approvalStatus(request, now) === "pending") && (
                   <div className="mt-3 flex gap-2 border-t border-border/40 pt-3">
                     {request.execution_proposal ? (
                       <Button asChild variant="outline" size="sm" className="flex-1">
@@ -348,7 +358,7 @@ export function ApprovalHistoryPage() {
                         )}
                       </div>
                     </TableCell>
-                    <TableCell>{getStatusBadge(approvalStatus(request))}</TableCell>
+                    <TableCell>{getStatusBadge(approvalStatus(request, now))}</TableCell>
                     <TableCell className="text-muted-foreground">
                       {formatDate(request.created_at)}
                     </TableCell>
@@ -360,9 +370,9 @@ export function ApprovalHistoryPage() {
                     {hasActions && (
                       <TableCell>
                         {request.decision_destination === "originating_owner_chat" ? (
-                          approvalStatus(request) === "pending" && (
+                          approvalStatus(request, now) === "pending" && (
                             <p className="type-secondary text-muted-foreground">
-                              {translateUi(Date.parse(request.expires_at) > Date.now()
+                              {translateUi(Date.parse(request.expires_at) > now
                                 ? "Review this request in your original private chat with NyxBot."
                                 : "Waiting for the server")}
                             </p>
@@ -371,7 +381,7 @@ export function ApprovalHistoryPage() {
                           <Button asChild variant="outline" size="sm">
                             <a href={request.execution_proposal.review_path}>{translateUi("Review")}</a>
                           </Button>
-                        ) : approvalStatus(request) === "pending" && (
+                        ) : approvalStatus(request, now) === "pending" && (
                           <div className="flex justify-end gap-1">
                             <Button
                               variant="ghost"

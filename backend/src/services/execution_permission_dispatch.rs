@@ -31,6 +31,11 @@ pub(crate) mod tasks;
 pub const READINESS: &str = "permissions:execution-dispatch-v1";
 const MAX_CANDIDATES: i64 = 256;
 
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static SUPERVISOR_POLICY_CLASSIFIED: Arc<dyn Fn(Database) -> futures::future::BoxFuture<'static, ()> + Send + Sync>;
+}
+
 /// One authenticated HTTP/MCP call. Clones share its snapshot and decision;
 /// neither the context nor its operation identity can be deserialized.
 pub(crate) struct RequestContext {
@@ -51,6 +56,8 @@ pub(crate) struct RequestContext {
     authoring: std::sync::atomic::AtomicBool,
     generated_correlation: OnceLock<String>,
     supervisor: OnceLock<Box<crate::models::approval_request::SupervisorOrigin>>,
+    supervisor_policy: OnceLock<(String, String)>,
+    optional_supervisor_write: std::sync::atomic::AtomicBool,
     resume: Option<Arc<proposals::Resume>>,
     drain: OnceLock<Drain>,
     authenticated_key: OnceLock<String>,
@@ -262,6 +269,25 @@ impl RequestContext {
     /// enrollment is disabled. Unsupported and unmarked paths never get here.
     pub(crate) fn check_drain<'a>(&'a self) -> futures::future::BoxFuture<'a, AppResult<()>> {
         Box::pin(async move {
+            if let Some((connection, key)) = self.supervisor_policy.get() {
+                let drain = self.drain.get().ok_or_else(refused)?;
+                let snapshot = self.authority.get().ok_or_else(refused)?;
+                if !snapshot.same(
+                    &authority::Snapshot::load(
+                        &drain.db,
+                        connection,
+                        key,
+                        self.source_credential.get().map(String::as_str),
+                    )
+                    .await?,
+                ) {
+                    return Err(refused());
+                }
+                let scope = (drain.db.clone(), snapshot.clone());
+                super::transaction_service::run_db_only(&drain.db, &scope, |tx, (db, snapshot)| {
+                    Box::pin(async move { snapshot.fence(db, tx).await })
+                }).await?;
+            }
             if self.permit().is_some() {
                 return Ok(());
             } // Covered has stronger transactional fences.
@@ -347,6 +373,8 @@ impl RequestContext {
             authoring: std::sync::atomic::AtomicBool::new(false),
             generated_correlation: OnceLock::new(),
             supervisor: OnceLock::new(),
+            supervisor_policy: OnceLock::new(),
+            optional_supervisor_write: std::sync::atomic::AtomicBool::new(false),
             resume: None,
             drain: OnceLock::new(),
             authenticated_key: OnceLock::new(),
@@ -1044,6 +1072,19 @@ pub(crate) fn prepare<'a>(
         }
         if context.resume().is_some() {
             return Err(refused());
+        }
+        if context
+            .optional_supervisor_write
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            // AutoAllow can keep ordinary/covered execution. A new retained
+            // assigned PUT without the required durable source is unsupported;
+            // refuse before authoring a v4 that restoration cannot consume.
+            if effect.floors.is_empty() {
+                let _ = context.decision.set(Resolution::Gap);
+                return Ok(None);
+            }
+            return Err(AppError::Forbidden("This assigned ledger operation cannot retain the required source under its current approval policy; nothing was sent".into()));
         }
         context.observation.decide(diagnostics::Decision::gap(
             gaps.first()
@@ -1754,6 +1795,107 @@ pub(crate) fn admit_http<'a>(
             ));
             return context.legacy_without_supervisor();
         };
+        let actor = auth.effective_approval_owner_user_id();
+        let owner = owner.unwrap_or(&actor);
+        // Recognize this independent floor before any legacy transport return,
+        // policy exemption or execution coverage. Rendering is deliberately a
+        // later step: an assigned write cannot shed its floor via unsafe inputs.
+        if owner == actor
+            && super::supervisor_write::marked_chat(auth.assistant_chat.as_deref(), owner)
+            && super::supervisor_write::operation_family(
+                target.catalog_slug.as_deref().unwrap_or_default(),
+                method,
+                path,
+            )
+        {
+            let classification = context
+                .authority(
+                    &state.db,
+                    connection,
+                    auth.api_key_id.as_deref().ok_or_else(refused)?,
+                )
+                .await?;
+            let policy = super::approval_service::resolve_org_aware_approval(
+                &state.db,
+                &actor,
+                owner,
+                &target.service.id,
+                descriptor,
+                auto_connected,
+            )
+            .await?;
+            #[cfg(test)]
+            if let Ok(hook) = SUPERVISOR_POLICY_CLASSIFIED.try_with(Clone::clone) {
+                hook(state.db.clone()).await;
+            }
+            if policy.effect == crate::models::service_approval_config::ApprovalEffect::Deny {
+                return Err(refused());
+            }
+            if !policy.from_org_policy || context.supervisor().is_some() {
+                let effect = super::supervisor_write::effect(
+                    target.catalog_slug.as_deref().unwrap_or_default(),
+                    method,
+                    path,
+                    query,
+                    body,
+                    !super::supervisor_write::http_headers_allow_review(
+                        headers,
+                        &[
+                            target.catalog_headers(),
+                            target.user_service_default_headers.as_slice(),
+                        ],
+                        context.generated_request_id(),
+                    ),
+                );
+                let captured = super::supervisor_write::capture_marked(
+                    &state.db,
+                    auth.assistant_chat.as_deref(),
+                    connection,
+                    owner,
+                    &target.service.id,
+                    &target.base_url,
+                    effect,
+                    &context.operation_id,
+                    context.supervisor(),
+                    context.resume().is_some_and(|r| r.supervisor_assignment),
+                    policy.required,
+                )
+                .await?;
+                match captured {
+                    Some(super::supervisor_write::MarkedWrite::Required(origin)) => {
+                        let _ = context.supervisor.set(origin);
+                    }
+                    Some(super::supervisor_write::MarkedWrite::Optional) => {
+                        context
+                            .optional_supervisor_write
+                            .store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    None if context.supervisor().is_some() => return Err(refused()),
+                    None => {}
+                }
+                if context.supervisor().is_some()
+                    || context
+                        .optional_supervisor_write
+                        .load(std::sync::atomic::Ordering::Relaxed)
+                {
+                    let _ = context.supervisor_policy.set((
+                        connection.into(),
+                        auth.api_key_id.as_deref().ok_or_else(refused)?.into(),
+                    ));
+                }
+            }
+            if !classification.same(
+                &authority::Snapshot::load(
+                    &state.db,
+                    connection,
+                    auth.api_key_id.as_deref().ok_or_else(refused)?,
+                    context.source_credential.get().map(String::as_str),
+                )
+                .await?,
+            ) {
+                return Err(refused());
+            }
+        }
         if method == "CONNECT"
             || headers.contains_key(axum::http::header::UPGRADE)
             || (auth.api_key_purpose != crate::models::api_key::ApiKeyPurpose::General
@@ -1834,8 +1976,6 @@ pub(crate) fn admit_http<'a>(
                 auth.api_key_id.as_deref().ok_or_else(refused)?,
             )
             .await?;
-        let actor = auth.effective_approval_owner_user_id();
-        let owner = owner.unwrap_or(&actor);
         context.observation.stage(diagnostics::Stage::Policy);
         let (outcome, _) = approval(
             Some(context),
@@ -1857,48 +1997,6 @@ pub(crate) fn admit_http<'a>(
                 .observation
                 .decide(diagnostics::Decision::new("hard_denial", "policy_denied"));
             return Err(refused());
-        }
-        if matches!(&outcome, super::approval_service::ApprovalOutcome::NeedsApproval(p)
-            if !p.resolution.from_org_policy && p.resolution.mode == crate::models::service_approval_config::ApprovalMode::PerRequest && owner == actor)
-            && super::supervisor_write::operation_family(
-                target.catalog_slug.as_deref().unwrap_or_default(),
-                method,
-                path,
-            )
-        {
-            let effect = super::supervisor_write::effect(
-                target.catalog_slug.as_deref().unwrap_or_default(),
-                method,
-                path,
-                query,
-                body,
-                !super::supervisor_write::http_headers_allow_review(
-                    headers,
-                    &[
-                        target.catalog_headers(),
-                        target.user_service_default_headers.as_slice(),
-                    ],
-                    context.generated_request_id(),
-                ),
-            );
-            let captured = super::supervisor_write::capture_marked(
-                &state.db,
-                auth.assistant_chat.as_deref(),
-                connection,
-                owner,
-                &target.service.id,
-                &target.base_url,
-                effect,
-                &context.operation_id,
-                context.supervisor(),
-                context.resume().is_some_and(|r| r.supervisor_assignment),
-            )
-            .await?;
-            if let Some(origin) = captured {
-                let _ = context.supervisor.set(origin);
-            } else if context.supervisor().is_some() {
-                return Err(refused());
-            }
         }
         let mut floors = Vec::new();
         if matches!(outcome, super::approval_service::ApprovalOutcome::NeedsApproval(ref p) if !p.resolution.from_org_policy && owner == actor)
@@ -2168,7 +2266,7 @@ pub(crate) fn approval<'a>(
                 return Err(AppError::Forbidden("Mandatory organization operation review cannot be satisfied by an execution permission".into()));
             }
         }
-        let decision = super::approval_service::evaluate_for_chat(
+        let mut decision = super::approval_service::evaluate_for_chat(
             db,
             actor,
             owner,
@@ -2182,6 +2280,32 @@ pub(crate) fn approval<'a>(
             chat,
         )
         .await?;
+        if context.supervisor().is_some() {
+            // Grant/access-mode exemptions apply to the service layer only.
+            // This pending request is one exact DM decision and mints no grant.
+            let resolution = super::approval_service::resolve_org_aware_approval(
+                db,
+                actor,
+                owner,
+                catalog,
+                descriptor,
+                auto_connected,
+            )
+            .await?;
+            decision = (
+                super::supervisor_write::approval_outcome(
+                    resolution,
+                    decision.0,
+                    actor,
+                    owner,
+                    connection,
+                    requester_type,
+                    requester_id,
+                    chat,
+                )?,
+                None,
+            );
+        }
         cache.push((key, decision.clone()));
         Ok(decision)
     })

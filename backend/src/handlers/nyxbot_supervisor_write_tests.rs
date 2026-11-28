@@ -206,6 +206,7 @@ enum ReviewFault {
     UnsafeValue,
     WrappedBody,
     DuplicateField,
+    PolicyRace,
 }
 
 struct Script {
@@ -214,6 +215,7 @@ struct Script {
     repeat_after_resume: std::sync::atomic::AtomicBool,
     readback_fault: std::sync::atomic::AtomicBool,
     reject_write: std::sync::atomic::AtomicBool,
+    application_error: AtomicUsize,
     hold_readback: std::sync::atomic::AtomicBool,
     review_fault: std::sync::Mutex<Option<ReviewFault>>,
     stage: Arc<AtomicUsize>,
@@ -390,7 +392,40 @@ async fn model(
             return format!("Pending ledger entries. {selected} Control entry. {control}");
         }
         let fault = *script.review_fault.lock().unwrap();
-        let written = if let Some(fault) = fault {
+        let written = if matches!(fault, Some(ReviewFault::PolicyRace)) {
+            let hook: Arc<
+                dyn Fn(mongodb::Database) -> futures::future::BoxFuture<'static, ()> + Send + Sync,
+            > = Arc::new(|db| {
+                Box::pin(async move {
+                    let updated = db.collection::<Document>("service_approval_configs").update_one(
+                    doc! {"user_id":OWNER,"default_effect":"auto_allow"},
+                    doc! {"$set":{"default_effect":"require_approval","approval_required":true,"approval_mode":"per_request"}},
+                ).await.unwrap();
+                    assert_eq!(updated.modified_count, 1);
+                })
+            });
+            crate::services::execution_permission_dispatch::SUPERVISOR_POLICY_CLASSIFIED
+                .scope(hook, async {
+                    if script.proxy {
+                        raw_update(
+                            state,
+                            raw,
+                            &script.selected,
+                            r#"{"fields":{"Status":"Approved"}}"#,
+                        )
+                        .await
+                    } else {
+                        mcp(
+                            state,
+                            raw,
+                            "ledger__bitable_record_update",
+                            update_arguments(&script.selected, json!({"Status":"Approved"})),
+                        )
+                        .await
+                    }
+                })
+                .await
+        } else if let Some(fault) = fault {
             let body = match fault {
                 ReviewFault::UnsafeValue => {
                     r#"{"fields":{"Status":"https://example.com/private"}}"#
@@ -646,6 +681,7 @@ async fn setup_transport_journey(slug: &str, proxy: bool, transport: &str) -> Jo
         repeat_after_resume: std::sync::atomic::AtomicBool::new(false),
         readback_fault: std::sync::atomic::AtomicBool::new(false),
         reject_write: std::sync::atomic::AtomicBool::new(false),
+        application_error: AtomicUsize::new(0),
         hold_readback: std::sync::atomic::AtomicBool::new(false),
         review_fault: std::sync::Mutex::new(None),
         stage: stage.clone(),
@@ -715,10 +751,28 @@ async fn setup_transport_journey(slug: &str, proxy: bool, transport: &str) -> Jo
             let body: Value = serde_json::from_slice(&request.body).unwrap();
             let mut r = written.lock().unwrap();
             r.writes.push((record.clone(), body.clone()));
+            if write_script.application_error.load(Ordering::SeqCst) == 1 {
+                r.rejected.push(record);
+                return ResponseTemplate::new(200)
+                    .set_body_json(json!({"code":1254027,"msg":"provider rejected update"}));
+            }
+            if write_script.application_error.load(Ordering::SeqCst) == 2 {
+                return ResponseTemplate::new(200).set_body_json(
+                    json!({"code":0,"data":{"record":{"record_id":write_script.control}}}),
+                );
+            }
+            if write_script.application_error.load(Ordering::SeqCst) == 3 {
+                return ResponseTemplate::new(202)
+                    .set_body_json(json!({"code":0,"data":{"record":{"record_id":record}}}));
+            }
+            if write_script.application_error.load(Ordering::SeqCst) == 4 {
+                return ResponseTemplate::new(200)
+                    .set_body_json(json!({"code":1254291,"msg":"transient provider prose"}));
+            }
             if write_script.reject_write.load(Ordering::SeqCst) {
                 r.rejected.push(record);
                 return ResponseTemplate::new(403)
-                    .set_body_json(json!({"code":403,"msg":"provider rejected update"}));
+                    .set_body_json(json!({"code":1254027,"msg":"provider rejected update"}));
             }
             if record == write_script.selected {
                 r.target = body["fields"]["Status"].as_str().unwrap().into();
@@ -1307,6 +1361,50 @@ async fn supervisor_write_two_approvals_real_catalog_and_independent_readback() 
             .unwrap()
             .remove(&j.channel.channel_bot_id);
     }
+}
+
+#[tokio::test]
+async fn supervisor_write_connected_mcp_application_error_200_is_an_error_with_observation_only() {
+    let j = setup_journey("api-feishu", false).await;
+    let connected = start(&j, 1).await;
+    let (review, code) = wait_review(&j).await;
+    assert_eq!(review.supervisor_write.as_ref().unwrap().version, 1);
+    assert!(j.ledger.lock().unwrap().writes.is_empty());
+    j.script.application_error.store(1, Ordering::SeqCst);
+    let _ =
+        body_text(owner(&j, &format!("yes write-{code}"), "ws7-connected-app-error").await).await;
+    let report = owner_text(
+        &tokio::time::timeout(Duration::from_secs(25), connected)
+            .await
+            .unwrap()
+            .unwrap(),
+    );
+    assert_row_report(&report, &j, "Pending", 2);
+    assert_row_report(&report, &j, "Pending", 3);
+    assert!(!report.contains("Status = Approved"));
+    let observations = j.observed.lock().await;
+    let write = &observations
+        .iter()
+        .find(|event| event["stage"] == "write")
+        .unwrap()["result"];
+    assert_eq!(write["result"]["isError"], true);
+    assert!(write.to_string().contains("provider rejected this write"));
+    assert!(
+        observations
+            .iter()
+            .any(|event| event["stage"] == "independent_readback")
+    );
+    drop(observations);
+    let ledger = j.ledger.lock().unwrap();
+    assert_eq!(ledger.writes.len(), 1);
+    assert_eq!(ledger.rejected, [j.script.selected.clone()]);
+    assert_eq!(ledger.target, "Pending");
+    assert_eq!(ledger.control, "Untouched");
+    drop(ledger);
+    crate::handlers::channel_relay::TEST_REPLY_ADAPTERS
+        .lock()
+        .unwrap()
+        .remove(&j.channel.channel_bot_id);
 }
 
 #[tokio::test]

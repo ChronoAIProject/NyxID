@@ -5954,6 +5954,7 @@ pub struct ToolResponse {
 enum ToolResponseBodyError {
     TooLarge,
     MalformedUtf8,
+    SupervisorWriteUnconfirmed,
 }
 
 #[derive(Debug)]
@@ -5999,6 +6000,10 @@ impl ToolResponse {
 
     pub(crate) fn is_policy_refusal(&self) -> bool {
         matches!(self.origin, ToolResponseOrigin::AssistantPolicy)
+    }
+
+    pub(crate) fn is_supervisor_write_unconfirmed(&self) -> bool {
+        self.body_error == Some(ToolResponseBodyError::SupervisorWriteUnconfirmed)
     }
 }
 
@@ -8007,6 +8012,21 @@ async fn execute_tool_resolved_inner(
                 None,
             ))
             .await?;
+
+        if egress_guard.as_ref().is_some_and(|guard| guard.has_supervisor()) {
+            use super::supervisor_write::{ProviderResult, provider_result};
+            match provider_result(&path, status, response.text.as_bytes()) {
+                ProviderResult::Succeeded => {}
+                ProviderResult::Rejected => {
+                    response.body_error = Some(ToolResponseBodyError::SupervisorWriteUnconfirmed);
+                    response.text = format!("The provider rejected this write (HTTP {status}); this attempt is not confirmed as successful. An independent read reports observed state only. Do not repeat the write.");
+                }
+                ProviderResult::Unconfirmed => {
+                    response.body_error = Some(ToolResponseBodyError::SupervisorWriteUnconfirmed);
+                    response.text = format!("The provider response (HTTP {status}) did not confirm this exact record update. The write outcome and final row state are unconfirmed. Do not repeat the write.");
+                }
+            }
+        }
 
         destination_audit.complete(status);
         if lark_fields {

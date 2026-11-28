@@ -418,6 +418,83 @@ pub(crate) fn readback_instruction(
     ))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProviderResult {
+    Succeeded,
+    Rejected,
+    Unconfirmed,
+}
+
+/// This classifier is called only for an admitted supervisor Bitable update.
+/// Provider prose is data, never a notice or instruction. Duplicate envelope
+/// members, malformed bodies and missing/mismatched record receipts cannot prove
+/// success. A nonzero Feishu/Lark code reports failure even with HTTP 200.
+pub(crate) fn provider_result(path: &str, status: u16, body: &[u8]) -> ProviderResult {
+    #[derive(serde::Deserialize)]
+    struct Envelope {
+        code: i64,
+        data: Option<Box<serde_json::value::RawValue>>,
+        error: Option<Value>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Data {
+        record: Box<serde_json::value::RawValue>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Record {
+        record_id: String,
+    }
+
+    if status == 202 || status >= 500 {
+        return ProviderResult::Unconfirmed;
+    }
+    let path = format!("/{}", path.trim_start_matches('/'));
+    let Some([_, _, expected]) = row_ids(path.strip_prefix("/open-apis").unwrap_or(&path)) else {
+        return ProviderResult::Unconfirmed;
+    };
+    if body.len() > 64 * 1024
+        || body.iter().copied().find(|b| !b.is_ascii_whitespace()) != Some(b'{')
+    {
+        return ProviderResult::Unconfirmed;
+    }
+    let Ok(envelope) = serde_json::from_slice::<Envelope>(body) else {
+        return ProviderResult::Unconfirmed;
+    };
+    if envelope.code != 0 {
+        // Same documented non-application codes as lark_base_writes::classify.
+        // Throttling, transient and unknown codes retain outcome uncertainty.
+        return if matches!(
+            envelope.code,
+            1254001 | 1254004 | 1254045 | 1254069 | 1254027 | 1254303 | 1254302
+        ) {
+            ProviderResult::Rejected
+        } else {
+            ProviderResult::Unconfirmed
+        };
+    }
+    if !(200..300).contains(&status) {
+        return ProviderResult::Unconfirmed;
+    }
+    if envelope.error.is_some_and(|error| !error.is_null()) {
+        return ProviderResult::Unconfirmed;
+    }
+    let record = envelope.data.and_then(|data| {
+        if !data.get().trim_start().starts_with('{') {
+            return None;
+        }
+        let data: Data = serde_json::from_str(data.get()).ok()?;
+        if !data.record.get().trim_start().starts_with('{') {
+            return None;
+        }
+        serde_json::from_str::<Record>(data.record.get()).ok()
+    });
+    if record.is_some_and(|record| record.record_id == expected) {
+        ProviderResult::Succeeded
+    } else {
+        ProviderResult::Unconfirmed
+    }
+}
+
 fn effect_fields(path: &str, body: &[u8]) -> Option<Effect> {
     // Derived struct deserializers also accept positional sequences. The
     // provider contract requires an object with the named `fields` member.
@@ -508,6 +585,55 @@ fn eligible_chat(chat: &ChatAuthority, owner: &str) -> bool {
         && owner == chat.user_id
 }
 
+pub(crate) fn marked_chat(chat: Option<&ChatAuthority>, owner: &str) -> bool {
+    chat.is_some_and(|chat| {
+        eligible_chat(chat, owner)
+            && chat.report_to.is_some()
+            && chat
+                .execution_task
+                .as_ref()
+                .is_some_and(|task| task.channel_source.is_some())
+    })
+}
+
+/// Only a captured marked assignment calls this projection. Ordinary Grant
+/// policies and their saved grants keep their existing behavior everywhere else.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn approval_outcome(
+    mut resolution: super::approval_service::ApprovalResolution,
+    outcome: super::approval_service::ApprovalOutcome,
+    actor: &str,
+    owner: &str,
+    connection: Option<&str>,
+    requester_type: Option<&str>,
+    requester_id: &str,
+    chat: Option<&ChatAuthority>,
+) -> AppResult<super::approval_service::ApprovalOutcome> {
+    use super::approval_service::{ApprovalOutcome, PendingApproval};
+    use crate::models::service_approval_config::ApprovalEffect;
+    if matches!(outcome, ApprovalOutcome::Denied) || resolution.effect == ApprovalEffect::Deny {
+        return Ok(ApprovalOutcome::Denied);
+    }
+    if owner != actor
+        || resolution.from_org_policy
+        || !resolution.required
+        || resolution.primary_owner_user_id != actor
+        || !marked_chat(chat, owner)
+    {
+        return Err(refused());
+    }
+    resolution.mode = ApprovalMode::PerRequest;
+    resolution.grant_scope = None;
+    resolution.connection_id = connection.map(str::to_owned);
+    Ok(ApprovalOutcome::NeedsApproval(PendingApproval {
+        options: chat.ok_or_else(refused)?.approval_options(),
+        primary_owner_user_id: actor.into(),
+        requester_type: requester_type.ok_or_else(refused)?.into(),
+        requester_id: requester_id.into(),
+        resolution,
+    }))
+}
+
 // Compare one proof's substantive identity, never its display label. The task
 // root and assigning event are separate proofs and may have different events,
 // turns and expiry; their own live validators remain independently required.
@@ -554,8 +680,13 @@ pub(crate) fn same_task(
 }
 
 /// The caller first identifies the single-record operation family under the
-/// underlying PerRequest policy. Once its assigned source is verified, failure
+/// underlying personal approval policy. Once its assigned source is verified, failure
 /// to prepare an exact review refuses execution rather than dropping this floor.
+pub(crate) enum MarkedWrite {
+    Required(Box<SupervisorOrigin>),
+    Optional,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn capture_marked(
     db: &Database,
@@ -568,7 +699,8 @@ pub(crate) async fn capture_marked(
     operation_id: &str,
     retained: Option<&SupervisorOrigin>,
     resuming: bool,
-) -> AppResult<Option<Box<SupervisorOrigin>>> {
+    required: bool,
+) -> AppResult<Option<MarkedWrite>> {
     let Some(chat) = chat.filter(|c| eligible_chat(c, owner)) else {
         return Ok(None);
     };
@@ -611,6 +743,9 @@ pub(crate) async fn capture_marked(
         }
         return Ok(None);
     };
+    if !required && retained.is_none() {
+        return Ok(Some(MarkedWrite::Optional));
+    }
     let effect = effect.ok_or_else(refused)?;
     let url = format!(
         "{}/{}",
@@ -649,9 +784,9 @@ pub(crate) async fn capture_marked(
         {
             return Err(refused());
         }
-        return Ok(Some(Box::new(expected.clone())));
+        return Ok(Some(MarkedWrite::Required(Box::new(expected.clone()))));
     }
-    Ok(Some(Box::new(origin)))
+    Ok(Some(MarkedWrite::Required(Box::new(origin))))
 }
 
 /// Only the typed, claimed execution-decision path can restore an assigning
@@ -1187,6 +1322,50 @@ impl Permit {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn supervisor_write_provider_json_errors_and_exact_receipt_control_success() {
+        let path = "/bitable/v1/apps/bascnLedger/tables/tblLedger/records/recSelected";
+        let success = br#"{"code":0,"data":{"record":{"record_id":"recSelected"}}}"#;
+        for path in [path.to_owned(), format!("/open-apis{path}")] {
+            assert_eq!(
+                provider_result(&path, 200, success),
+                ProviderResult::Succeeded
+            );
+            assert_eq!(
+                provider_result(&path, 202, success),
+                ProviderResult::Unconfirmed
+            );
+            for body in [
+                br#"{"code":1254027,"msg":"credential-canary"}"#.as_slice(),
+                br#"{"code":1254303,"msg":"permission denied","data":null}"#.as_slice(),
+            ] {
+                assert_eq!(provider_result(&path, 200, body), ProviderResult::Rejected);
+            }
+            for body in [
+                br#"{"code":0}"#.as_slice(),
+                br#"{"code":0,"data":{"record":{"record_id":"recControl"}}}"#.as_slice(),
+                br#"{"code":1254027,"code":0,"data":{"record":{"record_id":"recSelected"}}}"#.as_slice(),
+                br#"{"code":0,"error":{"code":1254027},"data":{"record":{"record_id":"recSelected"}}}"#.as_slice(),
+                br#"[0,{"record":{"record_id":"recSelected"}}]"#.as_slice(),
+                br#"{"code":0,"data":[["recSelected"]]}"#.as_slice(),
+                br#"not-json"#.as_slice(),
+                br#"{"code":1254291,"msg":"rate limited"}"#.as_slice(),
+                br#"{"code":1255006,"msg":"transient"}"#.as_slice(),
+                br#"{"code":99991672,"msg":"unrecognized for this operation"}"#.as_slice(),
+            ] {
+                assert_eq!(provider_result(&path, 200, body), ProviderResult::Unconfirmed);
+            }
+            assert_eq!(
+                provider_result(&path, 403, success),
+                ProviderResult::Unconfirmed
+            );
+            assert_eq!(
+                provider_result(&path, 503, br#"{"code":1254027}"#),
+                ProviderResult::Unconfirmed
+            );
+        }
+    }
 
     #[test]
     fn supervisor_write_http_headers_use_egress_admission_and_json_media() {
