@@ -94,22 +94,6 @@ pub fn ssh_destination_mac(
     mac
 }
 
-/// Bind the local SSH selector and its command signature to the requested endpoint.
-pub fn ssh_destination_mac(
-    secret: &[u8],
-    command_signature: &str,
-    host: Option<&str>,
-    port: Option<u16>,
-) -> Hmac<Sha256> {
-    let mut mac = Hmac::<Sha256>::new_from_slice(secret).expect("HMAC accepts any key size");
-    serde_json::to_writer(
-        &mut mac,
-        &("nyxid-node-ssh.v2", command_signature, host, port),
-    )
-    .expect("string fields serialize");
-    mac
-}
-
 pub fn sign(
     request: &Request<impl std::borrow::Borrow<serde_json::Value>>,
     secret: &[u8],
