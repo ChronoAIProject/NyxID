@@ -1,6 +1,119 @@
 use super::*;
 use crate::services::assistant_authority_tests::fixture;
 
+#[tokio::test]
+async fn retained_part_expiry_is_checked_after_decryption_and_final_authority() {
+    use crate::crypto::{
+        key_provider::{KeyProvider, WrappedKey},
+        local_key_provider::LocalKeyProvider,
+    };
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use zeroize::Zeroizing;
+
+    #[derive(Debug)]
+    struct ObservedProvider {
+        inner: LocalKeyProvider,
+        unwraps: Arc<AtomicUsize>,
+    }
+    #[async_trait::async_trait]
+    impl KeyProvider for ObservedProvider {
+        async fn wrap_dek(&self, bytes: &[u8]) -> AppResult<WrappedKey> {
+            self.inner.wrap_dek(bytes).await
+        }
+        async fn unwrap_dek(&self, wrapped: &WrappedKey) -> AppResult<Zeroizing<Vec<u8>>> {
+            let clear = self.inner.unwrap_dek(wrapped).await?;
+            self.unwraps.fetch_add(1, Ordering::SeqCst);
+            Ok(clear)
+        }
+        fn current_key_id(&self) -> u8 {
+            self.inner.current_key_id()
+        }
+        fn has_key_id(&self, id: u8) -> bool {
+            self.inner.has_key_id(id)
+        }
+        fn has_previous_key(&self) -> bool {
+            self.inner.has_previous_key()
+        }
+    }
+    let f = fixture("retained_delivery_expiry").await;
+    let unwraps = Arc::new(AtomicUsize::new(0));
+    let keys = EncryptionKeys::with_provider(Arc::new(ObservedProvider {
+        inner: LocalKeyProvider::new([0x29; 32], None),
+        unwraps: unwraps.clone(),
+    }));
+    let original = "独立正文🙂\n".repeat(2000);
+    let first = retain(&f.state.db, &keys, &f.chat, &f.owner, &original)
+        .await
+        .unwrap();
+    let request = ReadRequest {
+        reference: first["ref"].as_str().unwrap().into(),
+        part: 0,
+    };
+    let row = f
+        .state
+        .db
+        .collection::<AssistantToolResult>(COLLECTION_NAME)
+        .find_one(doc! {"_id":&request.reference})
+        .await
+        .unwrap()
+        .unwrap();
+    // No sleeps or TTL sweeper: advance an injected clock only after the real
+    // decrypt and final live/key checks have completed. Equality is expired.
+    for final_now in [
+        row.expires_at - Duration::milliseconds(1),
+        row.expires_at,
+        row.expires_at + Duration::milliseconds(1),
+    ] {
+        let clock_reads = AtomicUsize::new(0);
+        let before = unwraps.load(Ordering::SeqCst);
+        let clock = || {
+            if clock_reads.fetch_add(1, Ordering::SeqCst) == 0 {
+                row.expires_at - Duration::minutes(1)
+            } else {
+                assert!(
+                    unwraps.load(Ordering::SeqCst) > before,
+                    "delivery check follows decryption"
+                );
+                final_now
+            }
+        };
+        let outcome = read_with_clock(&f.state.db, &keys, &f.chat, &f.owner, &request, clock).await;
+        assert_eq!(clock_reads.load(Ordering::SeqCst), 2);
+        if final_now < row.expires_at {
+            let page = outcome.unwrap();
+            assert_eq!(page["content"], first["content"]);
+            assert!(envelope(&page.to_string()).to_string().len() <= BUDGET);
+        } else {
+            let error = outcome.unwrap_err();
+            assert_eq!(error.to_string(), missing().to_string());
+            assert!(!error.to_string().contains("独立正文"));
+        }
+    }
+    // A revoked key still refuses before a delivery clock can expose content.
+    transactions::update_one(
+        &f.state.db,
+        doc! {"_id":&f.chat.api_key_id},
+        doc! {"$set":{"is_active":false}},
+        None,
+    )
+    .await
+    .unwrap();
+    let clock_reads = AtomicUsize::new(0);
+    assert!(
+        read_with_clock(&f.state.db, &keys, &f.chat, &f.owner, &request, || {
+            clock_reads.fetch_add(1, Ordering::SeqCst);
+            row.expires_at - Duration::minutes(1)
+        })
+        .await
+        .is_err()
+    );
+    assert!(clock_reads.load(Ordering::SeqCst) <= 1);
+    f.state.db.drop().await.unwrap();
+}
+
 async fn reassemble(
     f: &crate::services::assistant_authority_tests::Fixture,
     first: Value,

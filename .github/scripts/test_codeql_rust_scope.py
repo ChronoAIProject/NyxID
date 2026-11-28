@@ -11,8 +11,8 @@ from unittest.mock import patch
 
 import yaml
 
-from ci_gate_reuse import strict_load_workflow
 from codeql_rust_scope import LANGUAGES, WORKFLOW_FILE, prepare_config, select_languages
+from workflow_test_helpers import USES_WITH_TAG, load_workflow_with_action_tags
 
 REPO = Path(__file__).resolve().parents[2]
 
@@ -99,9 +99,9 @@ class ConfigTests(unittest.TestCase):
 
 class WorkflowTests(unittest.TestCase):
     def setUp(self):
-        self.workflow = strict_load_workflow((REPO / WORKFLOW_FILE).read_text())
+        self.workflow = load_workflow_with_action_tags(REPO / WORKFLOW_FILE)
         self.detection = next(step for step in self.workflow["jobs"]["changes"]["steps"]
-                              if step.get("uses") == "dorny/paths-filter@v4")
+                              if step.get(USES_WITH_TAG) == "dorny/paths-filter@v4")
         self.patterns = yaml.safe_load(self.detection["with"]["filters"])["rust"]
 
     def matches(self, paths):
@@ -135,10 +135,10 @@ class WorkflowTests(unittest.TestCase):
     def test_default_categories_single_upload_and_no_install_or_duplicate_tests(self):
         job = self.workflow["jobs"]["codeql"]
         steps = job["steps"]
-        init = next(step for step in steps if step.get("uses") == "github/codeql-action/init@v3")
+        init = next(step for step in steps if step.get(USES_WITH_TAG) == "github/codeql-action/init@v3")
         self.assertEqual(init["with"]["config-file"],
                          "${{ matrix.language == 'rust' && './target/codeql-rust.yml' || './.github/codeql/codeql-config.yml' }}")
-        analyze = next(step for step in steps if step.get("uses") == "github/codeql-action/analyze@v3")
+        analyze = next(step for step in steps if step.get(USES_WITH_TAG) == "github/codeql-action/analyze@v3")
         self.assertNotIn("category", analyze.get("with", {}))
         self.assertFalse(any(step.get("uses", "").startswith(("github/codeql-action/upload-sarif", "actions/setup-python"))
                              for step in steps))
@@ -149,7 +149,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertNotIn('pip', prepare["run"])
         self.assertNotIn('unittest', prepare["run"])
         upload = next(step for step in steps if step.get("name") == "Upload analysis scope")
-        self.assertEqual(upload["uses"], "actions/upload-artifact@v4")
+        self.assertEqual(upload.get(USES_WITH_TAG), "actions/upload-artifact@v4")
         self.assertIn("matrix.language == 'rust'", upload["if"])
 
     def test_filters_cover_rust_inputs_and_leave_docs_and_other_languages(self):

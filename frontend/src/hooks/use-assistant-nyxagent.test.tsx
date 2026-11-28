@@ -5,9 +5,10 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { continuationForAll, continuationText, useNyxAgentAssistantChat, useNyxAgentThreads } from "./use-assistant-nyxagent";
 import { nyxBotQueryKeys } from "@/hooks/use-nyxbot-agents";
 import { nyxAgentTransport } from "@/lib/assistant/nyxagent-transport";
+import { nyxAgentDecisions } from "@/lib/assistant/nyxagent-decisions";
 import { useAuthStore } from "@/stores/auth-store";
 import { useCreditsDenialStore } from "@/stores/credits-denial-store";
-import type { NyxAgentHistory } from "@/schemas/assistant-nyxagent";
+import type { NyxAgentAcknowledgement, NyxAgentHistory } from "@/schemas/assistant-nyxagent";
 
 const id = `nyxa-${"a".repeat(32)}`;
 const NYXBOT = "agent-nyxbot";
@@ -250,7 +251,7 @@ it("polls pending acknowledgements after settlement, throttles decisions, and re
       decider: "user", decided_by: null, reason: null,
       service_slug: null, service_name: null, tool_name: null,
       created_at: "2026-09-17T00:00:00Z", decided_at: null,
-      expires_at: "2026-09-17T00:15:00Z",
+      expires_at: "2099-09-17T00:15:00Z",
     }];
     const { result } = renderHook(() => useNyxAgentAssistantChat({
       selectedConversationId: id, onConversationAdopted: vi.fn(),
@@ -263,6 +264,7 @@ it("polls pending acknowledgements after settlement, throttles decisions, and re
     const send = vi.spyOn(nyxAgentTransport, "send").mockResolvedValue(undefined);
     const decide = vi.spyOn(nyxAgentTransport, "decide").mockImplementation(async (_c, _i, choice) => {
       page.acknowledgements[0]!.status = choice === "allow" ? "allowed" : "denied";
+      page.acknowledgements[0]!.decided_by = "user";
       page.conversation.pending_acknowledgements = 0;
       return page.acknowledgements[0]!;
     });
@@ -300,7 +302,7 @@ it("sends one continuation after a turn settles for cards allowed while it ran, 
       service_name: kind === "service" ? "GitHub" : null,
       tool_name: null,
       created_at: "2026-09-17T00:00:00Z", decided_at: null,
-      expires_at: "2026-09-17T00:15:00Z",
+      expires_at: "2099-09-17T00:15:00Z",
     });
     page.acknowledgements = [card("1", "service"), card("2", "account")];
     const { result, rerender } = renderHook(() => useNyxAgentAssistantChat({
@@ -313,6 +315,7 @@ it("sends one continuation after a turn settles for cards allowed while it ran, 
     vi.spyOn(nyxAgentTransport, "decide").mockImplementation(async (_c, ackId) => {
       const row = page.acknowledgements.find((ack) => ack.id === ackId)!;
       row.status = "allowed";
+      row.decided_by = "user";
       return row;
     });
     let running = true;
@@ -386,7 +389,7 @@ it.each(["specialist", "automation", "voice", "invocation"])(
         tool_name: kind === "invocation" ? "nyxid__delete_node" : null,
         created_at: "2026-09-17T00:00:00Z",
         decided_at: null,
-        expires_at: "2026-09-17T00:15:00Z",
+        expires_at: "2099-09-17T00:15:00Z",
       },
     ];
     const { result, unmount } = renderHook(
@@ -427,6 +430,626 @@ it.each(["specialist", "automation", "voice", "invocation"])(
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(send).not.toHaveBeenCalled();
     unmount();
+  },
+);
+
+function decisionNavigationFixture(running: boolean, destinationStatus?: number, destinationRunning = false) {
+  const second = `nyxa-${"b".repeat(32)}`;
+  const third = `nyxa-${"c".repeat(32)}`;
+  const activeTurn = page.conversation.active_turn;
+  if (!running) page.conversation.active_turn = null;
+  page.conversation.pending_acknowledgements = 1;
+  const card = {
+    id: "12345678-1234-4123-8123-123456789012",
+    kind: "action" as const, status: "pending" as const, summary: "Update ledger",
+    decider: "user" as const, decided_by: null, reason: null,
+    service_slug: "sheets", service_name: "Sheets", tool_name: "sheets_update_values",
+    created_at: "2026-09-17T00:00:00Z", decided_at: null,
+    expires_at: "2099-09-17T00:15:00Z",
+  };
+  page.acknowledgements = [card];
+  let resolveDecision!: (response: Response) => void;
+  const response = new Promise<Response>((resolve) => { resolveDecision = resolve; });
+  const mock = globalThis.__nyxidAssistantHttpMock!;
+  globalThis.__nyxidAssistantHttpMock = (request) => {
+    if (request.endpoint.endsWith(`/acknowledgements/${card.id}`)) {
+      requests.push(`${request.init.method} ${request.endpoint}`);
+      return response;
+    }
+    if ([second, third].some((id) => request.endpoint.includes(`/conversations/${id}`))) {
+      requests.push(`${request.init.method} ${request.endpoint}`);
+      if (destinationStatus) return new Response(null, { status: destinationStatus });
+      return json({
+        ...page, acknowledgements: [],
+        conversation: { ...page.conversation, id: request.endpoint.includes(second) ? second : third, active_turn: destinationRunning ? activeTurn : null },
+      });
+    }
+    return mock(request);
+  };
+  const adopted = vi.fn();
+  const hook = renderHook(
+    ({ selected, enabled }: { selected: string; enabled: boolean }) => useNyxAgentAssistantChat({
+      selectedConversationId: selected, enabled, onConversationAdopted: adopted,
+    }),
+    { wrapper, initialProps: { selected: id, enabled: true } },
+  );
+  return {
+    ...hook, second, third, card, adopted,
+    resolve: (choice: "allow" | "deny" = "allow", fields: Partial<NyxAgentAcknowledgement> = {}) => {
+      const row: NyxAgentAcknowledgement = {
+        ...card, status: choice === "allow" ? "allowed" : "denied", decided_by: "user", ...fields,
+      };
+      page.acknowledgements = page.acknowledgements.map((ack) => ack.id === card.id ? row : ack);
+      resolveDecision(json(row));
+    },
+  };
+}
+
+it.each([[false, false], [false, true], [true, false], [true, true]])("keeps an in-flight Allow bound to its source across navigation (source running: %s, destination running: %s)", async (running, destinationRunning) => {
+  const f = decisionNavigationFixture(running, undefined, destinationRunning);
+  await waitFor(() => expect(f.result.current.acknowledgements).toHaveLength(1));
+  const send = vi.spyOn(nyxAgentTransport, "send").mockResolvedValue(undefined);
+  const invalidate = vi.spyOn(client, "invalidateQueries");
+  let decision!: Promise<unknown>;
+  act(() => { decision = f.result.current.decideAcknowledgement({ id: f.card.id, choice: "allow" }); });
+  await waitFor(() => expect(requests.some((r) => r.endsWith(`/acknowledgements/${f.card.id}`))).toBe(true));
+  f.rerender({ selected: f.second, enabled: true });
+  await waitFor(() => expect(f.result.current.conversation?.id).toBe(f.second));
+  invalidate.mockClear();
+  await act(async () => { f.resolve(); await decision; });
+  if (running) {
+    expect(send).not.toHaveBeenCalled();
+    page.conversation.active_turn = null;
+  }
+  await waitFor(() => expect(send).toHaveBeenCalledOnce(), { timeout: 3500 });
+  expect(send).toHaveBeenCalledWith(
+    id, continuationText({ ...f.card, status: "allowed" }), expect.any(Function), expect.any(Function),
+    expect.objectContaining({ acknowledgementId: f.card.id }),
+  );
+  expect(invalidate).toHaveBeenCalledWith(
+    { queryKey: nyxBotQueryKeys.history("owner", id) }, { cancelRefetch: false },
+  );
+  // Even a late transport callback cannot move the owner back to this thread.
+  f.rerender({ selected: f.third, enabled: true });
+  act(() => send.mock.calls[0]![2](id));
+  expect(f.adopted).not.toHaveBeenCalled();
+  f.rerender({ selected: f.third, enabled: true });
+  expect(send).toHaveBeenCalledOnce();
+  f.unmount();
+});
+
+it.each([false, true])("a restricted selection preserves the original Allow (queued: %s)", async (queued) => {
+  const f = decisionNavigationFixture(queued);
+  await waitFor(() => expect(f.result.current.acknowledgements).toHaveLength(1));
+  const send = vi.spyOn(nyxAgentTransport, "send").mockResolvedValue(undefined);
+  let decision!: Promise<unknown>;
+  act(() => { decision = f.result.current.decideAcknowledgement({ id: f.card.id, choice: "allow" }); });
+  await waitFor(() => expect(requests.some((r) => r.endsWith(`/acknowledgements/${f.card.id}`))).toBe(true));
+  f.rerender({ selected: f.second, enabled: false });
+  await act(async () => { f.resolve(); await decision; });
+  if (queued) page.conversation.active_turn = null;
+  await waitFor(() => expect(send).toHaveBeenCalledOnce(), { timeout: 3500 });
+  expect(send.mock.calls[0]?.[0]).toBe(id);
+  expect(f.adopted).not.toHaveBeenCalled();
+  f.unmount();
+});
+
+it.each([false, true])("an unmounted chat preserves an in-flight Allow through settlement (queued: %s)", async (queued) => {
+  const f = decisionNavigationFixture(queued);
+  await waitFor(() => expect(f.result.current.acknowledgements).toHaveLength(1));
+  const send = vi.spyOn(nyxAgentTransport, "send").mockResolvedValue(undefined);
+  let decision!: Promise<unknown>;
+  act(() => { decision = f.result.current.decideAcknowledgement({ id: f.card.id, choice: "allow" }); });
+  await waitFor(() => expect(requests.some((r) => r.endsWith(`/acknowledgements/${f.card.id}`))).toBe(true));
+  f.unmount();
+  await act(async () => { f.resolve(); await decision; });
+  page.conversation.active_turn = null;
+  await waitFor(() => expect(send).toHaveBeenCalledOnce(), { timeout: 3500 });
+  expect(send.mock.calls[0]?.[0]).toBe(id);
+  expect(f.adopted).not.toHaveBeenCalled();
+});
+
+it.each(["expired", "invalid deadline", "denied", "all expired"])("settlement drops %s cards before selecting continuation text and marker", async (state) => {
+  const f = decisionNavigationFixture(true);
+  const secondCard = { ...f.card, id: "12345678-1234-4123-8123-123456789013", summary: "Second ledger action" };
+  page.acknowledgements.push(secondCard);
+  await act(() => nyxAgentTransport.history(id));
+  await waitFor(() => expect(f.result.current.acknowledgements).toHaveLength(2));
+  const send = vi.spyOn(nyxAgentTransport, "send").mockResolvedValue(undefined);
+  let now = Date.now();
+  vi.spyOn(Date, "now").mockImplementation(() => now);
+  const original = globalThis.__nyxidAssistantHttpMock!;
+  globalThis.__nyxidAssistantHttpMock = (request) => {
+    if (!request.endpoint.endsWith(`/acknowledgements/${secondCard.id}`)) return original(request);
+    const allowed = { ...secondCard, status: "allowed" as const, decided_by: "user" as const };
+    page.acknowledgements = page.acknowledgements.map((ack) => ack.id === secondCard.id ? allowed : ack);
+    return json(allowed);
+  };
+  await act(async () => {
+    const decision = f.result.current.decideAcknowledgement({ id: f.card.id, choice: "allow" });
+    f.resolve(); await decision;
+  });
+  now += 750;
+  await act(() => f.result.current.decideAcknowledgement({ id: secondCard.id, choice: "allow" }));
+  expect(send).not.toHaveBeenCalled();
+  page.acknowledgements = [
+    { ...f.card, status: state === "denied" ? "denied" : "expired", expires_at: state === "invalid deadline" ? "invalid" : "2000-01-01T00:00:00Z" },
+    { ...secondCard, decided_by: "user", status: state === "all expired" ? "expired" : "allowed", expires_at: "2099-01-01T00:00:00Z" },
+  ];
+  page.conversation.active_turn = null;
+  await act(() => nyxAgentTransport.history(id));
+  if (state === "all expired") expect(send).not.toHaveBeenCalled();
+  else {
+    expect(send).toHaveBeenCalledOnce();
+    expect(send.mock.calls[0]?.[1]).not.toContain(f.card.id);
+    expect(send.mock.calls[0]?.[1]).toContain(secondCard.id);
+    expect(send.mock.calls[0]?.[4]).toMatchObject({ acknowledgementId: secondCard.id });
+  }
+  f.unmount();
+});
+
+it.each(["past", "exact", "invalid", "denied", "valid"])("an idle Allow rechecks %s eligibility at response time before immediate send", async (eligibility) => {
+  const f = decisionNavigationFixture(false);
+  await waitFor(() => expect(f.result.current.acknowledgements).toHaveLength(1));
+  const send = vi.spyOn(nyxAgentTransport, "send").mockResolvedValue(undefined);
+  const now = Date.now();
+  vi.spyOn(Date, "now").mockReturnValue(now);
+  let decision!: Promise<unknown>;
+  act(() => { decision = f.result.current.decideAcknowledgement({ id: f.card.id, choice: "allow" }); });
+  await waitFor(() => expect(requests.some((r) => r.endsWith(`/acknowledgements/${f.card.id}`))).toBe(true));
+  let finishRefresh!: () => void;
+  const refresh = new Promise<void>((resolve) => { finishRefresh = resolve; });
+  vi.spyOn(client, "invalidateQueries").mockImplementation(() => refresh);
+  await act(async () => {
+    f.resolve("allow", {
+      status: eligibility === "denied" ? "denied" : "allowed",
+      expires_at: eligibility === "invalid" ? "invalid" : new Date(now + (eligibility === "valid" ? 1000 : eligibility === "past" ? -1 : 0)).toISOString(),
+    });
+    await Promise.resolve();
+  });
+  if (eligibility === "valid") {
+    // Continuation starts before mutation settlement waits on history refresh.
+    await waitFor(() => expect(send).toHaveBeenCalledOnce());
+    expect(send.mock.calls[0]?.[4]).toMatchObject({ acknowledgementId: f.card.id });
+  } else expect(send).not.toHaveBeenCalled();
+  await act(async () => { finishRefresh(); await decision; });
+  f.unmount();
+});
+
+it.each(["Stop", "identity", "refusal"])("an unmounted source retains its %s fence", async (outcome) => {
+  const f = decisionNavigationFixture(true);
+  await waitFor(() => expect(f.result.current.acknowledgements).toHaveLength(1));
+  const send = vi.spyOn(nyxAgentTransport, "send").mockResolvedValue(undefined);
+  await act(async () => {
+    const decision = f.result.current.decideAcknowledgement({ id: f.card.id, choice: "allow" });
+    f.resolve(); await decision;
+  });
+  f.unmount();
+  page.conversation.active_turn = null;
+  if (outcome === "Stop") page.messages.push({ ...page.messages[0]!, id: "stop", seq: 2, role: "assistant", status: "failed", error_code: "cancelled" });
+  if (outcome === "identity") act(() => useAuthStore.getState().setUser(null));
+  if (outcome === "refusal") {
+    const original = globalThis.__nyxidAssistantHttpMock!;
+    globalThis.__nyxidAssistantHttpMock = (request) => request.endpoint.includes(`/conversations/${id}`)
+      ? new Response(null, { status: 403 }) : original(request);
+  }
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 2200)); });
+  expect(send).not.toHaveBeenCalled();
+});
+
+it.each([false, true])("refuses a decision after an actor transition in mutation middleware (round trip: %s)", async (roundTrip) => {
+  let release!: () => void;
+  const middleware = new Promise<void>((resolve) => { release = resolve; });
+  client.setDefaultOptions({ mutations: { onMutate: () => middleware } });
+  const f = decisionNavigationFixture(false);
+  await waitFor(() => expect(f.result.current.acknowledgements).toHaveLength(1));
+  const send = vi.spyOn(nyxAgentTransport, "send").mockResolvedValue(undefined);
+  let decision!: Promise<unknown>;
+  act(() => { decision = f.result.current.decideAcknowledgement({ id: f.card.id, choice: "allow" }); });
+  const rejected = expect(decision).rejects.toMatchObject({ name: "AbortError", message: "Identity changed" });
+  const owner = useAuthStore.getState().user!;
+  act(() => {
+    useAuthStore.getState().setUser({ ...owner, id: "another-owner" });
+    if (roundTrip) useAuthStore.getState().setUser(owner);
+  });
+  await act(async () => { release(); await rejected; });
+  expect(requests.filter((r) => r.includes("/acknowledgements/"))).toEqual([]);
+  expect(send).not.toHaveBeenCalled();
+  f.unmount();
+});
+
+it.each([false, true])("a saved control cannot adopt a newer actor's authority (round trip: %s)", async (roundTrip) => {
+  const f = decisionNavigationFixture(false);
+  await waitFor(() => expect(f.result.current.acknowledgements).toHaveLength(1));
+  const saved = f.result.current.decideAcknowledgement;
+  const send = vi.spyOn(nyxAgentTransport, "send").mockResolvedValue(undefined);
+  const owner = useAuthStore.getState().user!;
+  act(() => {
+    useAuthStore.getState().setUser({ ...owner, id: "another-owner" });
+    if (roundTrip) useAuthStore.getState().setUser(owner);
+  });
+  await act(async () => {
+    await expect(saved({ id: f.card.id, choice: "allow" })).rejects.toMatchObject({ name: "AbortError" });
+  });
+  expect(requests.some((r) => r.includes("/acknowledgements/"))).toBe(false);
+  expect(send).not.toHaveBeenCalled();
+  f.unmount();
+});
+
+it.each(["account", "service", "operations", "skills", "used action"])("retains an allowed %s continuation after its pending deadline", async (kind) => {
+  const f = decisionNavigationFixture(true);
+  await waitFor(() => expect(f.result.current.acknowledgements).toHaveLength(1));
+  const send = vi.spyOn(nyxAgentTransport, "send").mockResolvedValue(undefined);
+  await act(async () => {
+    const decision = f.result.current.decideAcknowledgement({ id: f.card.id, choice: "allow" });
+    f.resolve("allow", { kind: kind === "used action" ? "action" : kind as "account" | "service" | "operations" | "skills" });
+    await decision;
+  });
+  expect(send).not.toHaveBeenCalled();
+  page.acknowledgements = page.acknowledgements.map((row) => ({ ...row, expires_at: "2000-01-01T00:00:00Z", status: kind === "used action" ? "used" : "allowed" }));
+  page.conversation.active_turn = null;
+  await act(() => nyxAgentTransport.history(id));
+  expect(send).toHaveBeenCalledOnce();
+  expect(send.mock.calls[0]?.[4]).toMatchObject({ acknowledgementId: f.card.id });
+  f.unmount();
+});
+
+it.each([null, "future_decider", "access_mode", "orchestrator"])("does not send a marker without a positive user decision (%s)", async (decidedBy) => {
+  const f = decisionNavigationFixture(true);
+  await waitFor(() => expect(f.result.current.acknowledgements).toHaveLength(1));
+  const send = vi.spyOn(nyxAgentTransport, "send").mockResolvedValue(undefined);
+  await act(async () => {
+    const decision = f.result.current.decideAcknowledgement({ id: f.card.id, choice: "allow" });
+    f.resolve(); await decision;
+  });
+  page.acknowledgements = page.acknowledgements.map((row) => ({ ...row, decided_by: decidedBy }));
+  page.conversation.active_turn = null;
+  await act(() => nyxAgentTransport.history(id));
+  expect(send).not.toHaveBeenCalled();
+  f.unmount();
+});
+
+it.each(["Deny", "server", "orchestrator", "trigger"])("navigation preserves %s continuation ownership", async (kind) => {
+  const f = decisionNavigationFixture(false);
+  await waitFor(() => expect(f.result.current.acknowledgements).toHaveLength(1));
+  const send = vi.spyOn(nyxAgentTransport, "send").mockResolvedValue(undefined);
+  const choice = kind === "Deny" ? "deny" : "allow";
+  let decision!: Promise<unknown>;
+  act(() => { decision = f.result.current.decideAcknowledgement({ id: f.card.id, choice }); });
+  await waitFor(() => expect(requests.some((r) => r.endsWith(`/acknowledgements/${f.card.id}`))).toBe(true));
+  f.rerender({ selected: f.second, enabled: true });
+  await act(async () => {
+    f.resolve(choice, {
+      ...(kind === "server" ? { continuation_owner: "server" as const } : {}),
+      ...(kind === "orchestrator" ? { decider: "orchestrator" as const } : {}),
+      ...(kind === "trigger" ? { trigger_run_id: "run-id" } : {}),
+    });
+    await decision;
+  });
+  expect(send).not.toHaveBeenCalled();
+  f.unmount();
+});
+
+it.each([403, 404, "Stop"])("observes a queued source's %s after navigation without a local stream", async (outcome) => {
+  const f = decisionNavigationFixture(true);
+  await waitFor(() => expect(f.result.current.acknowledgements).toHaveLength(1));
+  const send = vi.spyOn(nyxAgentTransport, "send").mockResolvedValue(undefined);
+  await act(async () => {
+    const decision = f.result.current.decideAcknowledgement({ id: f.card.id, choice: "allow" });
+    f.resolve(); await decision;
+  });
+  f.rerender({ selected: f.second, enabled: true });
+  await waitFor(() => expect(f.result.current.conversation?.id).toBe(f.second));
+  const mock = globalThis.__nyxidAssistantHttpMock!;
+  let sourceReads = 0;
+  globalThis.__nyxidAssistantHttpMock = (r) => {
+    if (r.endpoint.includes(`/conversations/${id}`)) {
+      sourceReads++;
+      if (typeof outcome === "number") return new Response(null, { status: outcome });
+    }
+    return mock(r);
+  };
+  page.messages.push({ ...page.messages[0]!, id: "stopped", seq: 2, role: "assistant", status: "failed", error_code: "cancelled" });
+  page.conversation.active_turn = null;
+  await waitFor(() => expect(sourceReads).toBe(1), { timeout: 3500 });
+  expect(send).not.toHaveBeenCalled();
+  // No pending work remains; another poll period makes no source request.
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 2100)); });
+  expect(sourceReads).toBe(1);
+  expect(send).not.toHaveBeenCalled();
+  f.unmount();
+});
+
+it.each([403, 404])("an off-selection %s fences cards queued during the same source read", async (status) => {
+  const f = decisionNavigationFixture(true);
+  await waitFor(() => expect(f.result.current.acknowledgements).toHaveLength(1));
+  vi.useFakeTimers();
+  const history = vi.spyOn(nyxAgentTransport, "history");
+  const send = vi.spyOn(nyxAgentTransport, "send").mockResolvedValue(undefined);
+  const decideSource = f.result.current.decideAcknowledgement;
+  await act(async () => {
+    const decision = decideSource({ id: f.card.id, choice: "allow" });
+    f.resolve(); await decision;
+    await vi.advanceTimersByTimeAsync(0);
+  });
+  // The selected source uses only its existing two-second Query observer.
+  history.mockClear();
+  await act(() => vi.advanceTimersByTimeAsync(2000));
+  expect(history).toHaveBeenCalledExactlyOnceWith(id, undefined, null);
+  await act(async () => {
+    f.rerender({ selected: f.second, enabled: true });
+    await vi.advanceTimersByTimeAsync(0);
+  });
+  const secondCard = { ...f.card, id: "12345678-1234-4123-8123-123456789013", status: "allowed", decided_by: "user" };
+  let refuse!: (response: Response) => void;
+  const pendingRead = new Promise<Response>((resolve) => { refuse = resolve; });
+  let sourceReads = 0;
+  const mock = globalThis.__nyxidAssistantHttpMock!;
+  globalThis.__nyxidAssistantHttpMock = (r) => {
+    if (r.endpoint.endsWith(`/acknowledgements/${secondCard.id}`)) return json(secondCard);
+    if (r.endpoint.includes(`/conversations/${id}`)) { sourceReads++; return pendingRead; }
+    return mock(r);
+  };
+  await act(() => vi.advanceTimersByTimeAsync(2000));
+  expect(sourceReads).toBe(1);
+  await act(async () => {
+    await decideSource({ id: secondCard.id, choice: "allow" });
+    await vi.advanceTimersByTimeAsync(4000);
+  });
+  expect(sourceReads).toBe(1); // No overlapping source read after another card joins.
+  await act(async () => {
+    refuse(new Response(null, { status }));
+    await vi.advanceTimersByTimeAsync(0);
+  });
+  page.conversation.active_turn = null;
+  globalThis.__nyxidAssistantHttpMock = mock;
+  await act(() => vi.advanceTimersByTimeAsync(4000));
+  expect(sourceReads).toBe(1);
+  expect(send).not.toHaveBeenCalled();
+  f.unmount();
+});
+
+it.each([403, 404, 500])("source-owned history reads fence late %s across navigation and unmount", async (status) => {
+  for (const entryPoint of ["refreshHistory", "loadOlder", "transport"] as const) {
+    for (const leave of ["navigate", "unmount"] as const) {
+      page.before_seq = 1;
+      page.conversation.active_turn = { turn_id: "turn", started_at: "2026-09-17T00:00:00Z", activities: [], attachments: [] };
+      const f = decisionNavigationFixture(true);
+      await waitFor(() => expect(f.result.current.acknowledgements).toHaveLength(1));
+      const send = vi.spyOn(nyxAgentTransport, "send").mockResolvedValue(undefined);
+      await act(async () => {
+        const decision = f.result.current.decideAcknowledgement({ id: f.card.id, choice: "allow" });
+        f.resolve(); await decision;
+      });
+      let release!: (response: Response) => void;
+      const pending = new Promise<Response>((resolve) => { release = resolve; });
+      const mock = globalThis.__nyxidAssistantHttpMock!;
+      let reads = 0;
+      globalThis.__nyxidAssistantHttpMock = (r) => {
+        if (r.endpoint.includes(`/conversations/${id}`) && r.init.method === "GET") { reads++; return pending; }
+        return mock(r);
+      };
+      let read!: Promise<unknown>;
+      act(() => {
+        read = (entryPoint === "transport" ? nyxAgentTransport.history(id) : f.result.current[entryPoint]()).catch(() => undefined);
+      });
+      await waitFor(() => expect(reads).toBe(1));
+      if (leave === "unmount") f.unmount();
+      else f.rerender({ selected: f.second, enabled: true });
+      await act(async () => { release(new Response(null, { status })); await read; });
+      globalThis.__nyxidAssistantHttpMock = mock;
+      page.conversation.active_turn = null;
+      await act(() => nyxAgentTransport.history(id));
+      expect(send.mock.calls.length, `${entryPoint} ${leave}`).toBe(status === 500 ? 1 : 0);
+      f.unmount();
+      nyxAgentTransport.clear();
+      send.mockRestore();
+    }
+  }
+});
+
+it.each(["actor", "authority"])("a late prior %s refusal cannot poison new queued work on the same source", async (transition) => {
+  const f = decisionNavigationFixture(true);
+  await waitFor(() => expect(f.result.current.acknowledgements).toHaveLength(1));
+  const send = vi.spyOn(nyxAgentTransport, "send").mockResolvedValue(undefined);
+  const complete = vi.spyOn(nyxAgentDecisions, "complete");
+  let release!: (response: Response) => void;
+  const pending = new Promise<Response>((resolve) => { release = resolve; });
+  const mock = globalThis.__nyxidAssistantHttpMock!;
+  let first = true;
+  const secondCard: NyxAgentAcknowledgement = { ...f.card, id: "12345678-1234-4123-8123-123456789013", status: "allowed", decided_by: "user" };
+  globalThis.__nyxidAssistantHttpMock = (r) => {
+    if (r.endpoint.endsWith(`/acknowledgements/${secondCard.id}`)) return json(secondCard);
+    if (r.endpoint.includes(`/conversations/${id}`) && r.init.method === "GET" && first) {
+      first = false; return pending;
+    }
+    return mock(r);
+  };
+  let read!: Promise<unknown>;
+  act(() => { read = f.result.current.refreshHistory(); });
+  await waitFor(() => expect(first).toBe(false));
+  if (transition === "actor") {
+    const owner = useAuthStore.getState().user!;
+    act(() => {
+      useAuthStore.getState().setUser({ ...owner, id: "another-owner" });
+      useAuthStore.getState().setUser(owner);
+    });
+  } else {
+    f.rerender({ selected: id, enabled: false });
+    f.rerender({ selected: id, enabled: true });
+  }
+  page.acknowledgements = [secondCard];
+  await act(() => nyxAgentTransport.history(id));
+  let decision!: Promise<unknown>;
+  act(() => { decision = f.result.current.decideAcknowledgement({ id: secondCard.id, choice: "allow" }); });
+  // The new decision is queued before its invalidation waits for the old read.
+  await waitFor(() => expect(complete).toHaveBeenCalledWith(expect.anything(), "allow", secondCard));
+  await act(async () => { release(new Response(null, { status: 403 })); await read; await decision; });
+  expect(send).not.toHaveBeenCalled();
+  page.conversation.active_turn = null;
+  await act(() => nyxAgentTransport.history(id));
+  expect(send).toHaveBeenCalledOnce();
+  expect(send.mock.calls[0]?.[4]).toEqual(expect.objectContaining({ acknowledgementId: secondCard.id }));
+  f.unmount();
+});
+
+it.each([false, true])("does not resume when Stop settles before an in-flight Allow returns (later message: %s)", async (laterMessage) => {
+  const f = decisionNavigationFixture(true);
+  await waitFor(() => expect(f.result.current.acknowledgements).toHaveLength(1));
+  const send = vi.spyOn(nyxAgentTransport, "send").mockResolvedValue(undefined);
+  let decision!: Promise<unknown>;
+  act(() => { decision = f.result.current.decideAcknowledgement({ id: f.card.id, choice: "allow" }); });
+  await waitFor(() => expect(requests.some((r) => r.endsWith(`/acknowledgements/${f.card.id}`))).toBe(true));
+  f.rerender({ selected: f.second, enabled: true });
+  page.messages.push({ ...page.messages[0]!, id: "stopped", seq: 2, role: "assistant", status: "failed", error_code: "cancelled" });
+  if (laterMessage) page.messages.push({ ...page.messages[0]!, id: "unrelated", turn_id: "another-turn", seq: 3 });
+  page.conversation.active_turn = null;
+  await act(() => nyxAgentTransport.history(id));
+  await act(async () => { f.resolve(); await decision; });
+  expect(send).not.toHaveBeenCalled();
+  f.unmount();
+});
+
+it("a queued turn's Stop suppresses only the cards bound to that turn", async () => {
+  const f = decisionNavigationFixture(true);
+  await waitFor(() => expect(f.result.current.acknowledgements).toHaveLength(1));
+  let now = Date.now();
+  vi.spyOn(Date, "now").mockImplementation(() => now);
+  const send = vi.spyOn(nyxAgentTransport, "send").mockResolvedValue(undefined);
+  await act(async () => {
+    const decision = f.result.current.decideAcknowledgement({ id: f.card.id, choice: "allow" });
+    f.resolve(); await decision;
+  });
+  page.conversation.active_turn = { ...page.conversation.active_turn!, turn_id: "next-turn" };
+  page.messages.push({ ...page.messages[0]!, id: "completed", seq: 2, role: "assistant" });
+  page.messages.push({ ...page.messages[0]!, id: "next-user", turn_id: "next-turn", seq: 3 });
+  const secondCard = { ...f.card, id: "12345678-1234-4123-8123-123456789013" };
+  page.acknowledgements = [{ ...f.card, status: "allowed", decided_by: "user" }, secondCard];
+  await act(() => nyxAgentTransport.history(id));
+  const mock = globalThis.__nyxidAssistantHttpMock!;
+  globalThis.__nyxidAssistantHttpMock = (request) => {
+    if (!request.endpoint.endsWith(`/acknowledgements/${secondCard.id}`)) return mock(request);
+    const allowed = { ...secondCard, status: "allowed" as const, decided_by: "user" as const };
+    page.acknowledgements = page.acknowledgements.map((row) => row.id === secondCard.id ? allowed : row);
+    return json(allowed);
+  };
+  now += 750;
+  await act(() => f.result.current.decideAcknowledgement({ id: secondCard.id, choice: "allow" }));
+  expect(send).not.toHaveBeenCalled();
+  page.conversation.active_turn = null;
+  page.messages.push({ ...page.messages[0]!, id: "next-stopped", turn_id: "next-turn", seq: 4, role: "assistant", status: "failed", error_code: "cancelled" });
+  await act(() => nyxAgentTransport.history(id));
+  expect(send).toHaveBeenCalledOnce();
+  expect(send.mock.calls[0]?.[1]).toContain(f.card.id);
+  expect(send.mock.calls[0]?.[1]).not.toContain(secondCard.id);
+  expect(send.mock.calls[0]?.[4]).toMatchObject({ acknowledgementId: f.card.id });
+  f.unmount();
+});
+
+it("resumes a valid explicit Allow clicked after an earlier Stop has settled", async () => {
+  page.messages.push({ ...page.messages[0]!, id: "earlier-stop", seq: 2, role: "assistant", status: "failed", error_code: "cancelled" });
+  const f = decisionNavigationFixture(false);
+  await waitFor(() => expect(f.result.current.acknowledgements).toHaveLength(1));
+  const send = vi.spyOn(nyxAgentTransport, "send").mockResolvedValue(undefined);
+  await act(async () => {
+    const decision = f.result.current.decideAcknowledgement({ id: f.card.id, choice: "allow" });
+    f.resolve(); await decision;
+  });
+  expect(send).toHaveBeenCalledOnce();
+  expect(send.mock.calls[0]?.[0]).toBe(id);
+  f.unmount();
+});
+
+it.each([false, true])("an unrelated turn's cancellation cannot suppress Allow (queued: %s)", async (queued) => {
+  const f = decisionNavigationFixture(queued);
+  await waitFor(() => expect(f.result.current.acknowledgements).toHaveLength(1));
+  const send = vi.spyOn(nyxAgentTransport, "send").mockResolvedValue(undefined);
+  let decision!: Promise<unknown>;
+  act(() => { decision = f.result.current.decideAcknowledgement({ id: f.card.id, choice: "allow" }); });
+  await waitFor(() => expect(requests.some((r) => r.endsWith(`/acknowledgements/${f.card.id}`))).toBe(true));
+  if (queued) {
+    await act(async () => { f.resolve(); await decision; });
+    expect(send).not.toHaveBeenCalled();
+    f.rerender({ selected: f.second, enabled: true });
+  }
+  page.conversation.active_turn = null;
+  page.messages.push({ ...page.messages[0]!, id: "other-stop", turn_id: "another-turn", seq: 2, role: "assistant", status: "failed", error_code: "cancelled" });
+  if (!queued) {
+    await act(() => nyxAgentTransport.history(id));
+    await act(async () => { f.resolve(); await decision; });
+  }
+  await waitFor(() => expect(send).toHaveBeenCalledOnce(), { timeout: 3500 });
+  expect(send.mock.calls[0]?.[0]).toBe(id);
+  f.unmount();
+});
+
+it("binds the source before asynchronous mutation middleware", async () => {
+  let release!: () => void;
+  const middleware = new Promise<void>((resolve) => { release = resolve; });
+  client.setDefaultOptions({ mutations: { onMutate: () => middleware } });
+  const f = decisionNavigationFixture(false);
+  await waitFor(() => expect(f.result.current.acknowledgements).toHaveLength(1));
+  const send = vi.spyOn(nyxAgentTransport, "send").mockResolvedValue(undefined);
+  let decision!: Promise<unknown>;
+  act(() => { decision = f.result.current.decideAcknowledgement({ id: f.card.id, choice: "allow" }); });
+  f.rerender({ selected: f.second, enabled: true });
+  await act(async () => { release(); f.resolve(); await decision; });
+  expect(requests.filter((r) => r.includes("/acknowledgements/"))).toEqual([
+    `POST /assistant/nyxagent/conversations/${id}/acknowledgements/${f.card.id}`,
+  ]);
+  expect(send.mock.calls[0]?.[0]).toBe(id);
+  f.unmount();
+});
+
+it.each([403, 404])("a selected thread's %s cannot erase another thread's valid continuation", async (status) => {
+  const f = decisionNavigationFixture(true, status);
+  await waitFor(() => expect(f.result.current.acknowledgements).toHaveLength(1));
+  const send = vi.spyOn(nyxAgentTransport, "send").mockResolvedValue(undefined);
+  await act(async () => {
+    const decision = f.result.current.decideAcknowledgement({ id: f.card.id, choice: "allow" });
+    f.resolve(); await decision;
+  });
+  f.rerender({ selected: f.second, enabled: true });
+  await waitFor(() => expect(f.result.current.historyDenied).toBe(true));
+  expect(send).not.toHaveBeenCalled();
+  page.conversation.active_turn = null;
+  await waitFor(() => expect(send).toHaveBeenCalledOnce(), { timeout: 3500 });
+  expect(send.mock.calls[0]?.[0]).toBe(id);
+  f.unmount();
+});
+
+it.each(["actor", "actor round trip", "disabled", "source denied", "Stop"])(
+  "discards a queued continuation after %s", async (transition) => {
+    const f = decisionNavigationFixture(true);
+    await waitFor(() => expect(f.result.current.acknowledgements).toHaveLength(1));
+    const send = vi.spyOn(nyxAgentTransport, "send").mockResolvedValue(undefined);
+    await act(async () => {
+      const decision = f.result.current.decideAcknowledgement({ id: f.card.id, choice: "allow" });
+      f.resolve(); await decision;
+    });
+    expect(send).not.toHaveBeenCalled();
+    if (transition.startsWith("actor")) {
+      const owner = useAuthStore.getState().user!;
+      act(() => {
+        useAuthStore.getState().setUser({ ...owner, id: "another-owner" });
+        if (transition === "actor round trip") useAuthStore.getState().setUser(owner);
+      });
+    } else if (transition === "disabled") {
+      f.rerender({ selected: id, enabled: false });
+    } else if (transition === "source denied") {
+      const mock = globalThis.__nyxidAssistantHttpMock!;
+      globalThis.__nyxidAssistantHttpMock = (r) =>
+        r.endpoint.includes(`/conversations/${id}`) ? new Response(null, { status: 403 }) : mock(r);
+      await act(() => f.result.current.refreshHistory());
+      await waitFor(() => expect(f.result.current.historyDenied).toBe(true));
+    } else {
+      page.messages.push({ ...page.messages[0]!, id: "stopped", seq: 2, role: "assistant", status: "failed", error_code: "cancelled" });
+    }
+    page.conversation.active_turn = null;
+    if (transition !== "source denied") await act(() => nyxAgentTransport.history(id));
+    f.rerender({ selected: id, enabled: true });
+    expect(send).not.toHaveBeenCalled();
+    f.unmount();
   },
 );
 it("does not poll an idle thread while its agent works elsewhere, and re-reads it when the agent settles", async () => {
@@ -613,7 +1236,7 @@ it("phrases continuation turns per acknowledgement kind", () => {
     tool_name: null,
     created_at: "2026-09-17T00:00:00Z",
     decided_at: "2026-09-17T00:00:01Z",
-    expires_at: "2026-09-17T00:15:00Z",
+    expires_at: "2099-09-17T00:15:00Z",
   };
   expect(
     continuationText({ ...base, kind: "service", service_slug: "github", service_name: "GitHub" }),

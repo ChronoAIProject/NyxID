@@ -1,3 +1,4 @@
+import { AssistantExecutionApprovalCard } from "./AssistantExecutionApprovalCard";
 import { useLocalizedState } from "../../i18n/useLocalizedState";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { translateApp, appLocale } from "../../i18n/appTranslation";
@@ -13,7 +14,17 @@ import { useTheme } from "../../theme/ThemeContext";
 import type { AssistantHistory } from "./assistantTypes";
 
 type Approval = AssistantHistory["approvals"][number];
-export function AssistantApprovalCard({
+
+export function AssistantApprovalCard(props: {
+  approval: Approval;
+  disabled: boolean;
+  onDecide: (approved: boolean) => Promise<void>;
+}) {
+  return props.approval.execution_proposal
+    ? <AssistantExecutionApprovalCard approval={props.approval} disabled={props.disabled} />
+    : <AssistantLegacyApprovalCard {...props} />;
+}
+function AssistantLegacyApprovalCard({
   approval,
   disabled,
   onDecide,

@@ -171,6 +171,18 @@ async fn real_admin_router_fences_credentials_and_commits_metadata_only_audit() 
         },
     ))
     .unwrap();
+    let rotate = json!({"scope":first.scope,"recording":recording(first.revision),"transition":{"kind":"begin_roll"}});
+    for (token, expected) in [
+        (&op_bearer, StatusCode::FORBIDDEN),
+        (&admin_bearer, StatusCode::CONFLICT),
+    ] {
+        assert_eq!(
+            call(&app, "POST", "/rotation", "authorization", token, &rotate)
+                .await
+                .0,
+            expected
+        );
+    }
     for (header, cred) in [
         ("authorization", format!("Bearer {delegated}")),
         ("authorization", format!("Bearer {sa}")),
@@ -182,6 +194,7 @@ async fn real_admin_router_fences_credentials_and_commits_metadata_only_audit() 
             ("GET", "/dependencies", &Value::Null),
             ("POST", "/enroll", &enroll),
             ("POST", "/evidence", &record),
+            ("POST", "/rotation", &rotate),
         ] {
             let (s, _) = call(&app, method, path, header, &cred, body).await;
             assert_eq!(s, StatusCode::FORBIDDEN, "{method} {path}");
@@ -359,5 +372,65 @@ async fn census_router_authorizes_admin_and_operator_reads_and_audits_the_action
             }
         }).await.unwrap();
     }).await;
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn retirement_evaluation_is_readable_and_full_admin_issuance_refuses_the_release_gate() {
+    let db = connect_transaction_test_database("retirement_routes").await;
+    role_service::seed_system_roles(&db).await.unwrap();
+    let roles = role_service::get_platform_role_ids(&db).await.unwrap();
+    let state = test_utils::test_app_state(db.clone());
+    let (_, admin) = human(&state, roles.admin.clone()).await;
+    let (_, operator) = human(&state, roles.operator.clone()).await;
+    let (_, person) = human(&state, fresh()).await;
+    let (public, private) = crate::routes::build_router_with_state(state.clone());
+    let app = public.merge(private).with_state(state);
+    let target = json!({"generation":fresh(),"retiring":fresh(),"survivor":fresh()});
+    let path = format!(
+        "/retirement?generation={}&retiring={}&survivor={}",
+        target["generation"].as_str().unwrap(),
+        target["retiring"].as_str().unwrap(),
+        target["survivor"].as_str().unwrap()
+    );
+    let body = json!({"recording":recording(1),"target":target,"report_revision":1,"expected_step_revision":1});
+    for (token, read, write) in [
+        (admin, true, StatusCode::CONFLICT),
+        (operator, true, StatusCode::FORBIDDEN),
+        (person, false, StatusCode::FORBIDDEN),
+    ] {
+        let bearer = format!("Bearer {token}");
+        let (code, result) = call(&app, "GET", &path, "authorization", &bearer, &Value::Null).await;
+        assert_eq!(
+            code,
+            if read {
+                StatusCode::OK
+            } else {
+                StatusCode::FORBIDDEN
+            }
+        );
+        if read {
+            assert_eq!(result["certification_enabled"], false);
+            assert!(
+                result["blockers"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!(retirement::LOAD_BLOCKER))
+            );
+        }
+        let (code, result) =
+            call(&app, "POST", "/retirement", "authorization", &bearer, &body).await;
+        assert_eq!(code, write);
+        if code == StatusCode::CONFLICT {
+            assert!(result.to_string().contains(retirement::LOAD_BLOCKER));
+        }
+    }
+    assert!(
+        db.collection::<Document>(HEAD)
+            .find_one(doc! {})
+            .await
+            .unwrap()
+            .is_none()
+    );
     db.drop().await.unwrap();
 }

@@ -253,6 +253,11 @@ export type NyxAgentAccessMode = z.infer<typeof nyxAgentAccessModeSchema>;
 
 /** Why an action card was raised: its risk, the access mode that asked, and which policy. */
 export const nyxAgentActionConfirmationSchema = z.object({
+  image_publication: z.object({
+    draft_id: z.string().uuid(), company: z.string(), company_url: z.string().url().nullish(), caption: z.string(),
+    attachment_id: z.string().uuid(), conversation_id: z.string(),
+    content_type: z.enum(["image/png", "image/jpeg"]), label: z.string(),
+  }).nullish(),
   risk: z.enum(["read", "change", "sensitive", "destructive"]),
   access_mode: nyxAgentAccessModeSchema.nullish(),
   reason: z.enum(["access_mode", "webhook", "policy", "approval", "org_connection", "delegation"]).catch("access_mode"),

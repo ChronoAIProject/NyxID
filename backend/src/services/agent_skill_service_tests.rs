@@ -515,13 +515,13 @@ async fn agent_skill_reader_uses_only_attached_pins_and_never_runs_scripts() {
         .await
         .unwrap();
     assert!(
-        read(&registry, &agent, ID, None, "SKILL.md", 0)
+        read(&registry, &agent, ID, None, "SKILL.md", 0, None)
             .await
             .is_err()
     );
     assert!(registry.calls.lock().unwrap().is_empty());
     agent.skills = vec![registry.reference()];
-    let page = read(&registry, &agent, ID, None, "scripts/run.py", 0)
+    let page = read(&registry, &agent, ID, None, "scripts/run.py", 0, None)
         .await
         .unwrap();
     assert_eq!(page["content"], "print('guidance only')");
@@ -533,18 +533,27 @@ async fn agent_skill_reader_uses_only_attached_pins_and_never_runs_scripts() {
             "another-agent-skill",
             None,
             "SKILL.md",
-            0
+            0,
+            None
         )
         .await
         .is_err()
     );
     assert!(
-        read(&registry, &agent, ID, Some("not-attached"), "SKILL.md", 0)
-            .await
-            .is_err()
+        read(
+            &registry,
+            &agent,
+            ID,
+            Some("not-attached"),
+            "SKILL.md",
+            0,
+            None
+        )
+        .await
+        .is_err()
     );
     assert!(
-        read(&registry, &agent, ID, None, "../private", 0)
+        read(&registry, &agent, ID, None, "../private", 0, None)
             .await
             .is_err()
     );
@@ -558,7 +567,8 @@ async fn agent_skill_reader_uses_only_attached_pins_and_never_runs_scripts() {
             ID,
             None,
             "SKILL.md",
-            0
+            0,
+            None
         )
         .await
         .is_err()
@@ -568,7 +578,7 @@ async fn agent_skill_reader_uses_only_attached_pins_and_never_runs_scripts() {
         ..Registry::new()
     };
     assert!(matches!(
-        read(&tampered, &agent, ID, None, "SKILL.md", 0).await,
+        read(&tampered, &agent, ID, None, "SKILL.md", 0, None).await,
         Err(AppError::SkillRead(
             crate::errors::skill_read::SkillReadReason::PinnedVersionMismatch
         ))
@@ -584,13 +594,21 @@ async fn agent_skill_reader_uses_only_attached_pins_and_never_runs_scripts() {
         sha256: dependency.sha256,
     });
     assert!(
-        read(&registry, &agent, ID, Some("dependency"), "SKILL.md", 0)
-            .await
-            .is_ok()
+        read(
+            &registry,
+            &agent,
+            ID,
+            Some("dependency"),
+            "SKILL.md",
+            0,
+            None
+        )
+        .await
+        .is_ok()
     );
     agent.skills.clear();
     assert!(
-        read(&registry, &agent, ID, None, "SKILL.md", 0)
+        read(&registry, &agent, ID, None, "SKILL.md", 0, None)
             .await
             .is_err()
     );
@@ -624,6 +642,261 @@ fn agent_skill_pages_reconstruct_utf8_within_mcp_budget() {
     assert!(saw_partial);
     assert!(page("é", ID, "1.0", "SKILL.md", 1).is_err());
     assert!(page("x", ID, "1.0", "SKILL.md", 10).is_err());
+}
+
+#[tokio::test]
+async fn agent_skill_source_five_files_match_independent_bytes_and_hashes() {
+    let f = fixture("skill_source_bytes").await;
+    let registry = Registry {
+        bytes: source_fixture::archive(),
+        ..Registry::new()
+    };
+    let mut agent = team::agent(&f.state.db, &f.owner, &f.chat.agent_id)
+        .await
+        .unwrap();
+    agent.skills = vec![registry.reference()];
+    let manifest = read(&registry, &agent, ID, None, "/", 0, None)
+        .await
+        .unwrap();
+    let fingerprint = manifest["source_fingerprint"].as_str().unwrap();
+    let expected = source_fixture::expected();
+    assert_eq!(
+        source_fixture::files()
+            .iter()
+            .map(|(_, b)| b.len())
+            .sum::<usize>(),
+        49152
+    );
+    let paths: Vec<_> = manifest["content"].as_str().unwrap().lines().collect();
+    assert_eq!(
+        paths,
+        source_fixture::files()
+            .iter()
+            .map(|(p, _)| *p)
+            .collect::<Vec<_>>()
+    );
+    for (path, bytes) in source_fixture::files() {
+        let mut offset = 0;
+        let mut reconstructed = Vec::new();
+        loop {
+            let value = read(&registry, &agent, ID, None, path, offset, Some(fingerprint))
+                .await
+                .unwrap();
+            assert!(wire_len(&value) <= PAGE_BUDGET);
+            assert_eq!(value["offset"], offset);
+            assert_eq!(value["source_fingerprint"], fingerprint);
+            assert_eq!(value["archive_sha256"], registry.reference().sha256);
+            assert_eq!(value["total_bytes"], expected[path]["total_bytes"]);
+            assert_eq!(value["sha256"], expected[path]["sha256"]);
+            let chunk = value["content"].as_str().unwrap();
+            reconstructed.extend_from_slice(chunk.as_bytes());
+            if value["complete"] == true {
+                assert!(value["next_offset"].is_null());
+                break;
+            }
+            let next = value["next_offset"].as_u64().unwrap() as usize;
+            assert_eq!(next, offset + chunk.len());
+            assert!(next > offset);
+            offset = next;
+        }
+        assert_eq!(reconstructed, bytes);
+        assert_eq!(
+            hex::encode(Sha256::digest(&reconstructed)),
+            expected[path]["sha256"]
+        );
+        let eof = read(
+            &registry,
+            &agent,
+            ID,
+            None,
+            path,
+            bytes.len(),
+            Some(fingerprint),
+        )
+        .await
+        .unwrap();
+        assert_eq!(eof["complete"], true);
+        assert_eq!(eof["content"], "");
+        assert!(eof["next_offset"].is_null());
+        assert!(
+            read(
+                &registry,
+                &agent,
+                ID,
+                None,
+                path,
+                bytes.len() + 1,
+                Some(fingerprint)
+            )
+            .await
+            .is_err()
+        );
+        let interior = std::str::from_utf8(&bytes)
+            .unwrap()
+            .char_indices()
+            .find(|(_, c)| c.len_utf8() > 1)
+            .unwrap()
+            .0
+            + 1;
+        assert!(
+            read(
+                &registry,
+                &agent,
+                ID,
+                None,
+                path,
+                interior,
+                Some(fingerprint)
+            )
+            .await
+            .is_err()
+        );
+    }
+    let empty = Registry {
+        bytes: archive(&[("SKILL.md", b"")]),
+        ..Registry::new()
+    };
+    agent.skills = vec![empty.reference()];
+    let eof = read(&empty, &agent, ID, None, "SKILL.md", 0, None)
+        .await
+        .unwrap();
+    assert_eq!(eof["total_bytes"], 0);
+    assert_eq!(eof["complete"], true);
+    assert_eq!(eof["sha256"], hex::encode(Sha256::digest(b"")));
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn agent_skill_source_changes_refuse_after_authority_and_integrity() {
+    use crate::errors::skill_read::SkillReadReason;
+    let f = fixture("skill_source_changes").await;
+    let registry = Registry {
+        bytes: source_fixture::archive(),
+        ..Registry::new()
+    };
+    let mut agent = team::agent(&f.state.db, &f.owner, &f.chat.agent_id)
+        .await
+        .unwrap();
+    agent.skills = vec![registry.reference()];
+    let original = agent.clone();
+    let manifest = read(&registry, &agent, ID, None, "/", 0, None)
+        .await
+        .unwrap();
+    let fingerprint = manifest["source_fingerprint"].as_str().unwrap();
+    let first_file = read(
+        &registry,
+        &agent,
+        ID,
+        None,
+        "SKILL.md",
+        0,
+        Some(fingerprint),
+    )
+    .await
+    .unwrap();
+    assert_eq!(first_file["complete"], false);
+    assert_eq!(
+        first_file["sha256"],
+        source_fixture::expected()["SKILL.md"]["sha256"]
+    );
+    let next_offset = first_file["next_offset"].as_u64().unwrap() as usize;
+    assert_eq!(next_offset, first_file["content"].as_str().unwrap().len());
+    assert!(next_offset > 0);
+    // A later pin edit or preload metadata update cannot invalidate identical source.
+    agent.skills_revision += 1;
+    let mut unrelated = registry.reference();
+    unrelated.skill_id = uuid::Uuid::new_v4().to_string();
+    unrelated.name = "unrelated".into();
+    agent.skills.push(unrelated);
+    assert!(
+        read(
+            &registry,
+            &agent,
+            ID,
+            None,
+            "SKILL.md",
+            next_offset,
+            Some(fingerprint)
+        )
+        .await
+        .is_ok()
+    );
+    let missing = read(&registry, &agent, ID, None, "SKILL.md", next_offset, None)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        missing,
+        AppError::SkillRead(SkillReadReason::SourceRequired)
+    ));
+    for mutation in 0..5 {
+        let mut changed = original.clone();
+        match mutation {
+            0 => changed.skills[0].version = "2.0".into(),
+            1 => changed.skills[0].skill_id = uuid::Uuid::new_v4().to_string(),
+            2 => changed.skills[0].dependencies.push(SkillPin {
+                source: "ornn".into(),
+                skill_id: uuid::Uuid::new_v4().to_string(),
+                name: "dep".into(),
+                version: "1.0".into(),
+                sha256: registry.reference().sha256,
+            }),
+            3 => changed.id = uuid::Uuid::new_v4().to_string(),
+            _ => changed.skills[0].name = "new-alias".into(),
+        }
+        for (path, offset) in [("SKILL.md", next_offset), ("missing-file.md", 0)] {
+            let error = read(
+                &registry,
+                &changed,
+                &changed.skills[0].name,
+                None,
+                path,
+                offset,
+                Some(fingerprint),
+            )
+            .await
+            .unwrap_err();
+            assert!(matches!(
+                error,
+                AppError::SkillRead(SkillReadReason::SourceChanged)
+            ));
+            let details = error.response_body().details.unwrap();
+            assert_eq!(details["complete"], false);
+            assert_eq!(details["next_offset"], 0);
+            assert!(details.get("content").is_none());
+            assert!(details.get("source_fingerprint").is_none());
+            assert!(!details.to_string().contains(ID));
+        }
+    }
+    // New manifest/archive bytes at the same literal version are a source change.
+    let replacement = Registry {
+        bytes: archive(&[("SKILL.md", b"changed"), ("new.md", b"new")]),
+        ..Registry::new()
+    };
+    agent.skills = vec![replacement.reference()];
+    assert!(matches!(
+        read(&replacement, &agent, ID, None, "/", 0, Some(fingerprint)).await,
+        Err(AppError::SkillRead(SkillReadReason::SourceChanged))
+    ));
+    let denied = Registry {
+        deny: true,
+        ..Registry::new()
+    };
+    assert!(
+        read(&denied, &agent, ID, None, "/", 0, Some(fingerprint))
+            .await
+            .unwrap_err()
+            .is_forbidden()
+    );
+    assert!(matches!(
+        read(&registry, &agent, ID, None, "/", 0, Some(fingerprint)).await,
+        Err(AppError::SkillRead(SkillReadReason::PinnedVersionMismatch))
+    ));
+    agent.skills[0].disabled = true;
+    assert!(matches!(
+        read(&replacement, &agent, ID, None, "/", 0, Some(fingerprint)).await,
+        Err(AppError::SkillRead(SkillReadReason::SkillNotBound))
+    ));
+    f.state.db.drop().await.unwrap();
 }
 #[test]
 fn skill_zip_accepts_streamed_entries_and_requires_a_complete_directory() {
@@ -911,9 +1184,11 @@ async fn disabled_pins_are_inaccessible_to_skill_read() {
         .await
         .unwrap();
     agent.skills = vec![reader.reference()];
-    assert!(read(&reader, &agent, ID, None, "/", 0).await.is_ok());
+    assert!(read(&reader, &agent, ID, None, "/", 0, None).await.is_ok());
     agent.skills[0].disabled = true;
-    let error = read(&reader, &agent, ID, None, "/", 0).await.unwrap_err();
+    let error = read(&reader, &agent, ID, None, "/", 0, None)
+        .await
+        .unwrap_err();
     assert!(matches!(
         error,
         AppError::SkillRead(crate::errors::skill_read::SkillReadReason::SkillNotBound)

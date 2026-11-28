@@ -147,6 +147,7 @@ pub async fn get_mcp_config(
     for service in &mut catalog.services {
         service.endpoints.retain(|endpoint| {
             !crate::services::lark_attachment_tool::is_attachment_operation(endpoint)
+                && !crate::services::image_publication::candidate(endpoint)
                 && !crate::services::lark_im_tool::image_candidate(endpoint)
         });
     }

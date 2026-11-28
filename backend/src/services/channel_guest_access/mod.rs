@@ -9,6 +9,15 @@ pub(crate) mod setup;
 pub(crate) mod skills;
 pub(crate) mod transport;
 
+#[cfg(test)]
+mod discovery_tests;
+#[cfg(test)]
+mod sheets_runtime_tests;
+#[cfg(test)]
+mod test_support;
+#[cfg(test)]
+mod transport_sheets_tests;
+
 use mongodb::{
     ClientSession, Database,
     bson::{self, Document, doc},
@@ -40,6 +49,7 @@ pub(crate) struct VerifiedGuestInput<'a> {
     pub source_event_id: &'a str,
     pub sender_id: Option<&'a str>,
     pub audience: AnswerAudience,
+    pub shared_room_verified: bool,
     pub meta_grant_id: Option<&'a str>,
 }
 
@@ -366,6 +376,31 @@ fn event_identity(bot_id: &str, binding_id: &str, platform: &str, event_id: &str
 }
 
 impl GuestTurn {
+    // Unverified actors are event-scoped; the follow validator independently
+    // binds the retained source sender and exact event delivery.
+    pub(crate) fn matches_sender(&self, sender: &str) -> bool {
+        let (scope, subject) = match self.actor.assurance {
+            GuestAssurance::ProviderVerified => ("provider", sender),
+            GuestAssurance::Unverified => ("event", self.source_event_id.as_str()),
+        };
+        let mut parts = vec![
+            "channel-guest-actor-v1",
+            self.bot_id.as_str(),
+            self.binding_id.as_str(),
+            self.platform.as_str(),
+            scope,
+            subject,
+        ];
+        parts.extend(self.meta_grant_id.as_deref());
+        self.actor.id == digest(&parts)
+    }
+
+    pub(crate) fn allows_shared_sheets_write(&self) -> bool {
+        self.shared_room_verified
+            && self.audience == AnswerAudience::Shared
+            && self.actor.assurance == GuestAssurance::ProviderVerified
+    }
+
     pub(crate) fn hosted_conversation_id(&self) -> String {
         let audience = match self.audience {
             AnswerAudience::Private => "private",
@@ -386,6 +421,9 @@ impl GuestTurn {
             &revision,
             &policy,
         ];
+        if self.allows_shared_sheets_write() {
+            scope.push("verified-shared-room-v1");
+        }
         let settings_generation;
         let channel_generation;
         if let Some(assignment) = &self.hosted_assignment {
@@ -610,6 +648,9 @@ pub(crate) async fn classify_with_meta(
         } else {
             AnswerAudience::Shared
         },
+        shared_room_verified: sender.is_some()
+            && input.audience == AnswerAudience::Shared
+            && input.shared_room_verified,
         policy_revision,
         activation_epoch,
         bot_revision,

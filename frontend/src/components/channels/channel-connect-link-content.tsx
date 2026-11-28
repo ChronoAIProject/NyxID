@@ -63,6 +63,9 @@ export function ChannelConnectLinkContent({
             telegramRequestId:
               link.status.data.telegram_request_id ?? undefined,
             connectionId: link.status.data.connection_id ?? undefined,
+            recoveryUnavailable: link.recoveryUnavailable,
+            isRecoveryCurrent: link.isRecoveryCurrent,
+            getRecoveryGeneration: link.getRecoveryGeneration,
             refresh: link.refresh,
           }}
         >

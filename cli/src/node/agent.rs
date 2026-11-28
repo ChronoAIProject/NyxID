@@ -90,6 +90,14 @@ pub async fn cmd_register(
     Ok(())
 }
 
+fn legacy_credential_count(config: &NodeConfig) -> usize {
+    config
+        .credentials
+        .values()
+        .filter(|record| record.destination_binding.is_none())
+        .count()
+}
+
 pub async fn cmd_start(config_path: Option<&str>, log_level: Option<&str>) -> Result<()> {
     init_tracing(log_level);
     // Invalid explicit trust configuration is permanent for this process.
@@ -99,6 +107,12 @@ pub async fn cmd_start(config_path: Option<&str>, log_level: Option<&str>) -> Re
     let config_file = config_dir.join("config.toml");
 
     let node_config = NodeConfig::load(&config_file)?;
+    let legacy_count = legacy_credential_count(&node_config);
+    if legacy_count > 0 {
+        tracing::warn!(
+            "Local credentials include {legacy_count} legacy (unbound). List them with `nyxid node credentials list`. Bind each with `nyxid node credentials rebind --service <slug> --url <base>`."
+        );
+    }
     let backend = SecretBackend::from_config(&node_config, &config_dir)?;
 
     let auth_token = backend.load_auth_token(&node_config)?;
@@ -165,6 +179,10 @@ pub fn cmd_status(config_path: Option<&str>) -> Result<()> {
     for slug in credentials.service_slugs() {
         println!("    - {slug}");
     }
+    println!(
+        "  Destination binding: {} legacy (unbound)",
+        legacy_credential_count(&node_config)
+    );
 
     Ok(())
 }
@@ -251,6 +269,9 @@ pub async fn cmd_credentials(
             let mut node_config = load_node_config_for_credentials(&config_file, &config_dir)?;
             let backend = SecretBackend::from_config(&node_config, &config_dir)?;
 
+            if header.is_some() || query_param.is_some() {
+                node_config.prepare_local_install(&service, url.as_deref())?;
+            }
             if let Some(header_name) = header {
                 // Support legacy inline format "Name: value" for backwards compat
                 if header_name.contains(':') {
@@ -355,12 +376,13 @@ pub async fn cmd_credentials(
                         Some(u) => Some(u),
                         None => {
                             let input = prompt_string_optional(
-                                "Endpoint URL (optional, press Enter to skip)",
+                                "Endpoint URL (Enter to reuse the stored URL)",
                             )?;
                             if input.is_empty() { None } else { Some(input) }
                         }
                     };
 
+                    node_config.prepare_local_install(&service, effective_url.as_deref())?;
                     node_config.add_header_credential_via(
                         &service,
                         &header_name,
@@ -380,12 +402,13 @@ pub async fn cmd_credentials(
                         Some(u) => Some(u),
                         None => {
                             let input = prompt_string_optional(
-                                "Endpoint URL (optional, press Enter to skip)",
+                                "Endpoint URL (Enter to reuse the stored URL)",
                             )?;
                             if input.is_empty() { None } else { Some(input) }
                         }
                     };
 
+                    node_config.prepare_local_install(&service, effective_url.as_deref())?;
                     node_config.add_query_param_credential_via(
                         &service,
                         &param_name,
@@ -396,8 +419,22 @@ pub async fn cmd_credentials(
                 }
             }
 
-            node_config.save(&config_file)?;
+            node_config.save_local_credentials(&config_file)?;
             println!("Credential added for service '{service}'.");
+            Ok(())
+        }
+        NodeCredentialCommands::Rebind {
+            service,
+            url,
+            principal,
+        } => {
+            NodeConfig::rebind(
+                &config_file,
+                &service.to_lowercase(),
+                principal.as_deref(),
+                &url,
+            )?;
+            println!("Updated local destination binding.");
             Ok(())
         }
         NodeCredentialCommands::SetUrl { service, url } => {
@@ -443,21 +480,33 @@ pub async fn cmd_credentials(
 
         NodeCredentialCommands::List => {
             let node_config = load_node_config_for_credentials(&config_file, &config_dir)?;
-            let backend = SecretBackend::from_config(&node_config, &config_dir)?;
-            let creds = CredentialStore::from_config_with_backend(&node_config, &backend)?;
-
-            if creds.count() == 0 {
+            if node_config.credentials.is_empty() && node_config.ssh_keys.is_empty() {
                 println!("No credentials configured.");
             } else {
                 println!("Configured credentials:");
-                for slug in creds.service_slugs() {
-                    if let Some(cred) = creds.get(&slug) {
+                for (slug, credential) in &node_config.credentials {
+                    let binding = credential.destination_binding.as_ref().map_or_else(
+                        || "legacy (unbound)".to_string(),
+                        |binding| binding.description(),
+                    );
+                    let name = credential
+                        .header_name
+                        .as_deref()
+                        .or(credential.param_name.as_deref());
+                    if let Some(name) = name.filter(|name| !name.is_empty()) {
                         println!(
-                            "  {slug}: {} ({})",
-                            cred.injection_method(),
-                            cred.target_name()
+                            "  {slug}: {} ({name}), {binding}",
+                            credential.injection_method
                         );
+                    } else {
+                        println!("  {slug}: {}, {binding}", credential.injection_method);
                     }
+                }
+                for key in &node_config.ssh_keys {
+                    println!(
+                        "  {} ({}): ssh {} port {}",
+                        key.service_slug, key.principal, key.target_host, key.target_port
+                    );
                 }
             }
             Ok(())
@@ -517,7 +566,7 @@ pub async fn cmd_credentials(
             };
 
             store_pending_credential_locally(&mut node_config, &backend, &pending, &secret)?;
-            node_config.save(&config_file)?;
+            node_config.save_local_credentials(&config_file)?;
 
             let mut api = node_agent_api_client(&node_config, &backend)?;
             api.post_empty(
@@ -594,7 +643,7 @@ pub async fn cmd_credentials(
             let mut node_config = load_node_config_for_credentials(&config_file, &config_dir)?;
             let backend = SecretBackend::from_config(&node_config, &config_dir)?;
             node_config.remove_credential_via(&service, &backend)?;
-            node_config.save(&config_file)?;
+            node_config.save_local_credentials(&config_file)?;
             println!("Credential removed for service '{service}'.");
             Ok(())
         }
@@ -698,7 +747,7 @@ pub async fn cmd_ssh_credentials(
                     algorithms,
                 },
             )?;
-            node_config.save(&config_file)?;
+            node_config.save_local_credentials(&config_file)?;
 
             println!("SSH key added for service '{service}' principal '{principal}'.");
             if let Some(fingerprint) = host_key_sha256 {
@@ -843,7 +892,7 @@ pub async fn cmd_ssh_credentials(
             let mut node_config = NodeConfig::load(&config_file)?;
             let backend = SecretBackend::from_config(&node_config, &config_dir)?;
             ssh_keys::remove_entry(&mut node_config, &backend, &service, &principal)?;
-            node_config.save(&config_file)?;
+            node_config.save_local_credentials(&config_file)?;
             println!("SSH key removed for service '{service}' principal '{principal}'.");
             Ok(())
         }
@@ -908,7 +957,7 @@ pub async fn cmd_ssh_credentials(
             for (service, principal) in &stale_entries {
                 let _ = ssh_keys::remove_entry(&mut node_config, &backend, service, principal)?;
             }
-            node_config.save(&config_file)?;
+            node_config.save_local_credentials(&config_file)?;
             println!("Pruned {} stale SSH key entries.", stale_entries.len());
             Ok(())
         }
@@ -1508,6 +1557,26 @@ fn store_pending_credential_locally(
     pending: &PendingCredentialMetadata,
     secret: &str,
 ) -> Result<()> {
+    // An explicit acceptance establishes local policy even when replacing a legacy entry.
+    let target = pending
+        .target_url
+        .as_deref()
+        .filter(|url| !url.is_empty())
+        .or_else(|| {
+            node_config
+                .credentials
+                .get(&pending.service_slug)?
+                .target_url
+                .as_deref()
+        })
+        .map(str::to_owned);
+    if let Some(url) = target {
+        node_config.prepare_local_install(&pending.service_slug, Some(&url))?;
+    } else if let Some(record) = node_config.credentials.get_mut(&pending.service_slug)
+        && record.destination_binding.is_none()
+    {
+        record.destination_binding = Some(super::destination::DestinationBinding::new([])?);
+    }
     match pending.injection_method.as_str() {
         "ifttt-webhook" | "ifttt_webhook" => node_config.add_ifttt_credential_via(
             &pending.service_slug,
@@ -1597,7 +1666,7 @@ fn format_secret_value(secret: String, secret_format: CredentialSecretFormat) ->
     }
 }
 
-fn prompt_secret(prompt: &str) -> Result<String> {
+pub(crate) fn prompt_secret(prompt: &str) -> Result<String> {
     let value = rpassword::prompt_password(format!("{prompt}: "))
         .map_err(|e| super::error::Error::Validation(format!("Failed to read secret: {e}")))?;
     read_secret_value(Some(value), prompt)
@@ -1876,6 +1945,7 @@ async fn cmd_openclaw_connect(
     let backend = SecretBackend::from_config(&node_config, config_dir)?;
 
     let header_value = format!("Bearer {bearer_token}");
+    node_config.prepare_local_install(OPENCLAW_SERVICE_SLUG, Some(gateway_url))?;
     node_config.add_header_credential_via(
         OPENCLAW_SERVICE_SLUG,
         "Authorization",
@@ -1883,7 +1953,7 @@ async fn cmd_openclaw_connect(
         Some(gateway_url),
         &backend,
     )?;
-    node_config.save(config_file)?;
+    node_config.save_local_credentials(config_file)?;
     println!("Local credential stored for '{OPENCLAW_SERVICE_SLUG}'.");
 
     // 2. Create the NyxID-side node-routed AI Service (if an access token is available).
@@ -1984,7 +2054,7 @@ fn cmd_openclaw_disconnect(config_file: &Path, config_dir: &Path) -> Result<()> 
     let mut node_config = NodeConfig::load(config_file)?;
     let backend = SecretBackend::from_config(&node_config, config_dir)?;
     node_config.remove_credential_via(OPENCLAW_SERVICE_SLUG, &backend)?;
-    node_config.save(config_file)?;
+    node_config.save_local_credentials(config_file)?;
     println!("OpenClaw credentials removed from node.");
     println!("Note: To fully disconnect, also remove the binding in the NyxID web UI.");
     Ok(())
@@ -2485,6 +2555,7 @@ async fn cmd_credentials_setup(
             let mut node_config = load_node_config_for_credentials(config_file, config_dir)?;
             let backend = SecretBackend::from_config(&node_config, config_dir)?;
 
+            node_config.prepare_local_install(service, target_url.as_deref())?;
             // Store credential using the injection method matching the auth method
             if auth_method == "ifttt_webhook" {
                 node_config.add_ifttt_credential_via(
@@ -2532,7 +2603,7 @@ async fn cmd_credentials_setup(
                 )?;
             }
 
-            node_config.save(config_file)?;
+            node_config.save_local_credentials(config_file)?;
             println!("Credential added for service '{service}'.");
             if let Some(url) = target_url {
                 println!("  Target URL: {url}");
@@ -2569,7 +2640,7 @@ async fn cmd_credentials_add_oauth(
     device_code_url: Option<String>,
     scopes: Option<String>,
     additional_scopes: &[String],
-    target_url: Option<String>,
+    mut target_url: Option<String>,
     api_url: Option<String>,
     access_token: Option<String>,
 ) -> Result<()> {
@@ -2605,6 +2676,12 @@ async fn cmd_credentials_add_oauth(
                 ))
             })?;
 
+        if target_url.is_none() {
+            target_url = entry["base_url"]
+                .as_str()
+                .filter(|u| !u.is_empty())
+                .map(str::to_owned);
+        }
         oauth::oauth_config_from_catalog_value(&entry)?
     } else {
         let tok_url = token_url.ok_or_else(|| {
@@ -2634,6 +2711,7 @@ async fn cmd_credentials_add_oauth(
 
     let final_scopes = resolve_oauth_scopes(&oauth_config, scopes.as_deref(), additional_scopes)?;
 
+    node_config.prepare_local_install(service, target_url.as_deref())?;
     // 2. Get client credentials
     let cid = match client_id.or_else(|| oauth_config.oauth_client_id.clone()) {
         Some(id) => id,
@@ -2716,7 +2794,7 @@ async fn cmd_credentials_add_oauth(
         cred.oauth_request_options = oauth_config.request_options;
     }
 
-    node_config.save(config_file)?;
+    node_config.save_local_credentials(config_file)?;
     println!("OAuth credential stored for service '{service}'.");
     Ok(())
 }

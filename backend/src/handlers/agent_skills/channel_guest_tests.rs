@@ -116,7 +116,7 @@ async fn mcp(router: &axum::Router, key: &str, method: &str, params: Value) -> V
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn channel_guest_skill_exact_file_preload_and_live_revocation() {
+async fn skill_read_source_channel_guest_exact_file_preload_and_live_revocation() {
     let f = orchestrator_fixture("channel_guest_skill").await;
     let state = &f.state;
     let db = &state.db;
@@ -156,7 +156,10 @@ async fn channel_guest_skill_exact_file_preload_and_live_revocation() {
         })
         .await
         .unwrap();
-    let root_contents = archive("public pinned guide", "root supporting file");
+    let input = crate::services::agent_skill_service::source_fixture::files()
+        .remove(0)
+        .1;
+    let root_contents = archive("public pinned guide", std::str::from_utf8(&input).unwrap());
     let dependency_contents = archive("dependency instructions", "dependency supporting file");
     let root = SkillReference {
         source: "ornn".into(),
@@ -247,6 +250,7 @@ async fn channel_guest_skill_exact_file_preload_and_live_revocation() {
             source_event_id: &event_id,
             sender_id: Some("verified-sender"),
             audience: AnswerAudience::Private,
+            shared_room_verified: false,
             meta_grant_id: None,
         },
     )
@@ -451,6 +455,68 @@ async fn channel_guest_skill_exact_file_preload_and_live_revocation() {
     );
     assert_eq!(upstream.received_requests().await.unwrap().len(), 4);
 
+    // Ordinary guest MCP calls carry one root source from listing to a paged
+    // supporting file, through the same audience/approval/capability path.
+    let listing = guest_tool(state, &chat, &json!({"skill":root.skill_id,"path":"/"}))
+        .await
+        .unwrap();
+    let fingerprint = &listing["source_fingerprint"];
+    let mut offset = 0;
+    let mut actual = Vec::new();
+    loop {
+        let args = json!({"skill":root.skill_id,"path":"references/help.md","offset":offset,"source_fingerprint":fingerprint});
+        let params = if offset == 0 {
+            json!({"name":GUEST_TOOL_NAME,"arguments":args})
+        } else {
+            json!({"name":"nyx__call_tool","arguments":{"tool_name":GUEST_TOOL_NAME,"arguments_json":args.to_string()}})
+        };
+        let rpc = mcp(&router, credential.raw_key.as_str(), "tools/call", params).await;
+        assert_eq!(rpc["result"]["isError"], false, "{rpc}");
+        assert!(rpc["result"].to_string().len() <= 9200);
+        let page: Value =
+            serde_json::from_str(rpc["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(page["source_fingerprint"], *fingerprint);
+        actual.extend_from_slice(page["content"].as_str().unwrap().as_bytes());
+        if page["complete"] == true {
+            break;
+        }
+        offset = page["next_offset"].as_u64().unwrap() as usize;
+    }
+    assert_eq!(actual, input);
+    assert_eq!(
+        hex::encode(Sha256::digest(&actual)),
+        crate::services::agent_skill_service::source_fixture::expected()["SKILL.md"]["sha256"]
+    );
+    let dependency = guest_tool(state, &chat, &json!({"skill":root.skill_id,"dependency":dependency_id,"path":"references/help.md","source_fingerprint":fingerprint})).await.unwrap();
+    assert_eq!(dependency["source_fingerprint"], *fingerprint);
+    assert_eq!(dependency["archive_sha256"], root.dependencies[0].sha256);
+    agents
+        .update_one(
+            doc! {"_id":agent_id},
+            doc! {"$set":{"skills.0.name":"renamed-root"}},
+        )
+        .await
+        .unwrap();
+    let error = guest_tool(
+        state,
+        &chat,
+        &json!({"skill":root.skill_id,"path":"/","source_fingerprint":fingerprint}),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        AppError::SkillRead(SkillReadReason::SourceChanged)
+    ));
+    agents
+        .update_one(
+            doc! {"_id":agent_id},
+            doc! {"$set":{"skills.0.name":"root"}},
+        )
+        .await
+        .unwrap();
+    let source_read_count = upstream.received_requests().await.unwrap().len();
+
     let latest = upstream.received_requests().await.unwrap();
     let last = latest.last().unwrap();
     let token = last.headers[guest_skills::CAPABILITY_HEADER]
@@ -475,7 +541,10 @@ async fn channel_guest_skill_exact_file_preload_and_live_revocation() {
             .unwrap()
             .contains("public pinned guide")
     );
-    assert_eq!(upstream.received_requests().await.unwrap().len(), 4);
+    assert_eq!(
+        upstream.received_requests().await.unwrap().len(),
+        source_read_count
+    );
 
     crate::services::approval_service::delete_service_approval_config(
         db,
@@ -499,7 +568,10 @@ async fn channel_guest_skill_exact_file_preload_and_live_revocation() {
     assert!(guest_tool(state, &chat, &package).await.is_err());
     assert!(guest_tool_definition(state, &chat).await.is_some());
     assert!(guest_skills::lookup(state, token).await.is_err());
-    assert_eq!(upstream.received_requests().await.unwrap().len(), 4);
+    assert_eq!(
+        upstream.received_requests().await.unwrap().len(),
+        source_read_count
+    );
 
     agents
         .update_one(
@@ -517,7 +589,10 @@ async fn channel_guest_skill_exact_file_preload_and_live_revocation() {
             .unwrap()
             .contains("public pinned guide")
     );
-    assert_eq!(upstream.received_requests().await.unwrap().len(), 4);
+    assert_eq!(
+        upstream.received_requests().await.unwrap().len(),
+        source_read_count
+    );
     db.drop().await.unwrap();
 }
 
@@ -787,6 +862,7 @@ async fn channel_guest_skill_org_capability_uses_live_payer_and_maintainer() {
             source_event_id: &event_id,
             sender_id: Some("channel-visitor"),
             audience: AnswerAudience::Private,
+            shared_room_verified: false,
             meta_grant_id: None,
         },
     )

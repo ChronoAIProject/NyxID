@@ -23,7 +23,7 @@ User-side subcommands accept the common flags `--base-url`, `--access-token` / `
 - **`node register --token nyx_nreg_... --url <ws-url>`** — redeem a token and store the node's secrets locally. `--keychain` uses the OS keychain instead of an encrypted file; `--config <dir>`.
 - **`node start`** — connect and serve in the foreground. `--log-level <level>`.
 - **`node agent-status`** — show local config and connection state.
-- **`node rekey --auth-token nyx_nauth_... --signing-secret <hex>`** — apply new secrets after a server-side `rotate-token`.
+- **`node rekey`** — enter both replacement secrets at hidden prompts after a server-side `rotate-token`. For automation, use `--auth-token-file PATH` or `--auth-token-env NAME`, and `--signing-secret-file PATH` or `--signing-secret-env NAME`. Each credential accepts one source.
 - **`node migrate --to keychain|file`** — move secret storage between the encrypted file and the OS keychain.
 - **`node agent-version`** — print the node agent version.
 
@@ -32,10 +32,11 @@ User-side subcommands accept the common flags `--base-url`, `--access-token` / `
 The upstream secrets a node injects, held only on the node:
 
 - **`add --service <slug>`** — add a credential (prompts for the secret). `--header <name>` or `--query-param <name>`, `--url <target>`, `--secret-format raw|bearer|basic`.
+- **`rebind --service <slug> --url <base>`** replaces the locally approved destinations. Repeat `--url` for multiple entries. A base path limits requests to that path and its descendants. For an SSH node key, pass `--principal <name>` and one `ssh://host:port` URL.
 - **`set-url --service <slug> --url <url>`** — change an existing node-managed endpoint with an owner login, preserving its secret. `--url ""` requests an acknowledged clear.
 - **`add-oauth --service <slug>`** — run an OAuth / device-code flow for the service (`--from-catalog` to pull config from NyxID).
 - **`setup --service <slug>`** — auto-resolve a service's credential requirements from the catalog.
-- **`list`** — configured credentials. **`pending`** — pushed credentials awaiting acceptance.
+- **`list`** — configured credentials and their approved destinations. Legacy records display `legacy (unbound)`. **`pending`** — pushed credentials awaiting acceptance.
 - **`accept <slug>`** / **`decline <slug>`** — act on a pushed credential.
 - **`remove --service <slug>`** — delete a credential.
 
@@ -47,7 +48,7 @@ nyxid node credentials set-url --service monitor --url http://new-monitor:8080
 
 The credential must already exist locally. `set-url` validates the URL locally and uses your owner login (`NYXID_PROFILE` / `NYXID_ACCESS_TOKEN`) to update the existing server service and request local routing metadata synchronization through the running node. It does not upload or replace the secret. The service, endpoint and key IDs remain the same.
 
-An owner can also run `nyxid service update <id> --endpoint-url <url>` from another machine. Nonempty server URLs take precedence over local URLs. Offline or older nodes do not block that change; the response reports local sync status. Upgrade/reconnect and repeat the edit to retry sync. `set-url --service <slug> --url ""` explicitly requests a clear, which requires an upgraded online node to acknowledge the local clear first. Injection/node changes still require the existing explicit credential-promotion flow. `credentials add --service <slug> --url <url>` retains its interactive auth-method/header/secret prompts and local credential replacement, including for an existing credential; no owner login is required.
+An owner can also run `nyxid service update <id> --endpoint-url <url>` from another machine. Nonempty server URLs select the route. Run `credentials rebind` locally to authorize a changed destination for a bound credential. Offline or older nodes do not block that change; the response reports local sync status. Upgrade/reconnect and repeat the edit to retry sync. `set-url --service <slug> --url ""` explicitly requests a clear, which requires an upgraded online node to acknowledge the local clear first. Injection/node changes still require the existing explicit credential-promotion flow. `credentials add --service <slug> --url <url>` retains its interactive auth-method/header/secret prompts and local credential replacement, including for an existing credential; no owner login is required.
 
 ## node ssh-credentials (local SSH keys)
 

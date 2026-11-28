@@ -126,6 +126,7 @@ ci0O2dgc19c2/sLtanU7P2KAzhEo8O0tIc0Dwe/nMqKfue82eGVL3DqM\n\
             crash_reporting: Default::default(),
             port: 3001,
             shutdown_drain_timeout_secs: crate::config::DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_SECS,
+            admin_setup_secret_hash: None,
             auth_device_eight_char_codes: false,
             resource_request_proof_enabled: false,
             base_url: "https://auth.example.com".to_string(),

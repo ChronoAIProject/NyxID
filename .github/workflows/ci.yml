@@ -97,7 +97,7 @@ jobs:
       profile: ${{ steps.profile.outputs.profile }}
       ci: ${{ steps.profile.outputs.profile == 'full' || steps.filter.outputs.ci == 'true' }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: Test CI helpers
         env:
           NYXID_SKIP_RUST_FIXTURES: '1'
@@ -120,7 +120,7 @@ jobs:
             esac
           fi
           echo "profile=$profile" >> "$GITHUB_OUTPUT"
-      - uses: dorny/paths-filter@v4
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4
         if: steps.profile.outputs.profile != 'full'
         id: filter
         with:
@@ -321,8 +321,8 @@ jobs:
     if: >-
       !(inputs.force-all && contains(fromJSON(inputs.reuse-jobs || '[]'), 'workflow-permissions'))
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
       - name: Install PyYAML
@@ -343,8 +343,8 @@ jobs:
     env:
       CARGO_INCREMENTAL: 1
     steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: dtolnay/rust-toolchain@01e2821fc38dbca62c2557c927b33938a2e005fd # 1.98.1
         with:
           components: rustfmt, clippy
       - uses: ./.github/actions/ci-rust-cache
@@ -376,7 +376,7 @@ jobs:
       (inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.cursor_plugin == 'true')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: Validate Cursor plugin
         run: python3 scripts/validate-cursor-plugin.py
 
@@ -392,7 +392,7 @@ jobs:
       (inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.codex_plugin == 'true')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: Check generated plugin files match integrations/plugin-source
         run: python3 scripts/sync-plugins.py --check
       - name: Validate Codex plugin
@@ -414,10 +414,10 @@ jobs:
       CLAUDE_CODE_VERSION: 2.1.284
       PACKAGE_CHANGED: ${{ inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.claude_plugin == 'true' }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: Check repository limits for the Claude directory
         run: python3 scripts/validate-claude-plugin.py --repo-only
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         if: env.PACKAGE_CHANGED == 'true'
         with:
           node-version-file: .node-version
@@ -449,8 +449,8 @@ jobs:
       run:
         working-directory: integrations/oracle/cdp-worker
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version-file: .node-version
       - run: npm install --ignore-scripts --no-package-lock --no-audit --no-fund
@@ -474,8 +474,8 @@ jobs:
       (inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.rust == 'true')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: dtolnay/rust-toolchain@01e2821fc38dbca62c2557c927b33938a2e005fd # 1.98.1
         with:
           components: rustfmt
       - run: cargo fmt --all -- --check
@@ -494,11 +494,11 @@ jobs:
       CARGO_BUILD_JOBS: 2
       CARGO_INCREMENTAL: 1
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: Install system dependencies
         timeout-minutes: 5
         run: bash .github/scripts/install-linux-build-deps.sh
-      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: dtolnay/rust-toolchain@01e2821fc38dbca62c2557c927b33938a2e005fd # 1.98.1
         with:
           components: clippy
       - uses: ./.github/actions/ci-rust-cache
@@ -532,11 +532,11 @@ jobs:
       CARGO_BUILD_JOBS: 1
       CARGO_INCREMENTAL: 1
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: Install system dependencies
         timeout-minutes: 5
         run: bash .github/scripts/install-linux-build-deps.sh
-      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: dtolnay/rust-toolchain@01e2821fc38dbca62c2557c927b33938a2e005fd # 1.98.1
         with:
           components: clippy
       - uses: ./.github/actions/ci-rust-cache
@@ -590,11 +590,11 @@ jobs:
       (inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.backend == 'true')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: Install system dependencies
         timeout-minutes: 5
         run: bash .github/scripts/install-linux-build-deps.sh
-      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: dtolnay/rust-toolchain@01e2821fc38dbca62c2557c927b33938a2e005fd # 1.98.1
       - uses: ./.github/actions/ci-rust-cache
         with:
           backend-reserve: 'true'
@@ -617,7 +617,7 @@ jobs:
       - name: Upload resource samples
         if: always()
         continue-on-error: true
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: resources-backend-image-inputs
           path: ${{ runner.temp }}/nyxid-ci-resources
@@ -634,14 +634,14 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: Prepare backend image memory reserve
         timeout-minutes: 5
         run: bash .github/scripts/prepare-backend-runner.sh
       - name: Ensure Ubuntu archive DNS
         run: bash "$GITHUB_WORKSPACE/.github/scripts/ensure-ubuntu-archive-dns.sh"
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
       - name: Locate published backend build cache
         id: backend-cache
         run: |
@@ -679,10 +679,10 @@ jobs:
     # Cold desktop package downloads can consume the former 45-minute budget.
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: Ensure Ubuntu archive DNS
         run: bash "$GITHUB_WORKSPACE/.github/scripts/ensure-ubuntu-archive-dns.sh"
-      - uses: docker/setup-buildx-action@v4
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
       - name: Locate published machine build cache
         id: machine-cache
         shell: bash
@@ -691,7 +691,7 @@ jobs:
           echo "ref=ghcr.io/${owner}/nyxid/nyxid-node-machine:buildcache-linux-amd64" >> "$GITHUB_OUTPUT"
           echo "updater=ghcr.io/${owner}/nyxid/nyxid-machine-updater:buildcache-linux-amd64" >> "$GITHUB_OUTPUT"
       - name: Build machine image
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: .
           file: cli/Dockerfile.machine
@@ -701,7 +701,7 @@ jobs:
             type=registry,ref=${{ steps.machine-cache.outputs.ref }}
           # Import only: registry publishing retains the full compiler layers.
       - name: Build updater test image
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: .
           file: cli/Dockerfile.machine-updater
@@ -710,7 +710,7 @@ jobs:
           tags: nyxid-machine-updater-e2e:local
           cache-from: type=registry,ref=${{ steps.machine-cache.outputs.updater }}
       - name: Build updater production image
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: .
           file: cli/Dockerfile.machine-updater
@@ -719,7 +719,7 @@ jobs:
           tags: nyxid-machine-updater:production-test
           cache-from: type=registry,ref=${{ steps.machine-cache.outputs.updater }}
       - name: Export updater compiler inputs
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: .
           file: cli/Dockerfile.machine-updater
@@ -743,7 +743,7 @@ jobs:
           MACHINE_TEST_SECCOMP: /tmp/nyxid-machine-deny-mount.json
           UPDATER_E2E_IMAGE: nyxid-machine-updater-e2e:local
         run: sh cli/tests/machine_updater_e2e.sh
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: '24'
       - name: Install command-rendering dependencies
@@ -769,17 +769,17 @@ jobs:
     env:
       CARGO_INCREMENTAL: 1
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: Install system dependencies
         timeout-minutes: 5
         run: bash .github/scripts/install-linux-build-deps.sh
-      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: dtolnay/rust-toolchain@01e2821fc38dbca62c2557c927b33938a2e005fd # 1.98.1
       - uses: ./.github/actions/ci-rust-cache
         with:
           save-if: 'false'
           shared-key: cli-cli-test
           incremental: 'true'
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@073e1fd0bc889c9aee68dbaaa927cde1b5653a83 # v2
         with:
           tool: cargo-nextest@0.9.146
 
@@ -789,7 +789,7 @@ jobs:
           --log-file "$RUNNER_TEMP/cli-build.log" --
           cargo build -p nyxid-cli
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version-file: .node-version
       - name: Test saved-login extension and signed package freshness
@@ -804,14 +804,14 @@ jobs:
         run: cargo nextest run -p nyxid-cli -p nyxid-machine -p nyxid-machine-updater --profile ci
       - name: Publish test summary
         if: always()
-        uses: test-summary/action@v2.6
+        uses: test-summary/action@37b508cfee6d4d080eedd00b5bb240a6a784a6a5 # v2.6
         with:
           paths: target/nextest/ci/junit.xml
           show: fail
 
       - name: Upload CLI test results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: test-results-cli
           path: target/nextest/ci/junit.xml
@@ -838,11 +838,11 @@ jobs:
       matrix:
         variant: [aws-kms, gcp-kms, aws-and-gcp-kms]
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: Install system dependencies
         timeout-minutes: 5
         run: bash .github/scripts/install-linux-build-deps.sh
-      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: dtolnay/rust-toolchain@01e2821fc38dbca62c2557c927b33938a2e005fd # 1.98.1
       - uses: ./.github/actions/ci-rust-cache
         with:
           backend-reserve: 'true'
@@ -862,7 +862,7 @@ jobs:
       - name: Upload resource samples
         if: always()
         continue-on-error: true
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: resources-rust-features-${{ matrix.variant }}
           path: ${{ runner.temp }}/nyxid-ci-resources
@@ -893,8 +893,8 @@ jobs:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version-file: .node-version
           cache: npm
@@ -939,8 +939,8 @@ jobs:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version-file: .node-version
           cache: npm
@@ -983,11 +983,11 @@ jobs:
       run:
         working-directory: mobile
     steps:
-      - uses: actions/checkout@v6
-      - uses: pnpm/action-setup@v4
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
         with:
           version: 10.17.1
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version-file: .node-version
           cache: pnpm
@@ -1036,11 +1036,11 @@ jobs:
     env:
       CARGO_INCREMENTAL: 1
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: Install system dependencies
         timeout-minutes: 5
         run: bash .github/scripts/install-linux-build-deps.sh
-      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: dtolnay/rust-toolchain@01e2821fc38dbca62c2557c927b33938a2e005fd # 1.98.1
       - uses: ./.github/actions/ci-rust-cache
         with:
           shared-key: cli-cli-test
@@ -1068,8 +1068,8 @@ jobs:
       run:
         working-directory: sdk
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version-file: .node-version
           cache: npm
@@ -1136,14 +1136,14 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: Identify coverage measurement inputs
         id: coverage-identity
         run: python3 .github/scripts/coverage_identity.py
       - name: Restore exact base report
         if: steps.coverage-identity.outputs.reusable == 'true'
         id: base-cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: coverage-backend.base.json
           key: coverage-backend-base-v2-${{ github.event.pull_request.base.sha }}-${{ steps.coverage-identity.outputs.fingerprint }}
@@ -1160,7 +1160,7 @@ jobs:
         if: steps.base-run.outputs.run-id != ''
         id: base-download
         continue-on-error: true
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           artifact-ids: ${{ steps.base-run.outputs.artifact-id }}
           merge-multiple: true
@@ -1185,7 +1185,7 @@ jobs:
           >> "$GITHUB_STEP_SUMMARY"
       - name: Upload base report
         if: steps.base-cache.outputs.cache-hit == 'true' || steps.base-artifact.outputs.available == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: backend-base-report
           path: coverage-backend.base.json
@@ -1201,16 +1201,16 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: Download head report
         id: head-report
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: backend-coverage-head
         continue-on-error: true
       - name: Download base report
         if: steps.head-report.outcome == 'success'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: backend-base-report
         continue-on-error: true
@@ -1221,7 +1221,7 @@ jobs:
             coverage-backend.json coverage-backend.base.json
       - name: Upload coverage artifact
         if: steps.head-report.outcome == 'success'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: coverage-backend
           path: |
@@ -1243,13 +1243,13 @@ jobs:
     env:
       CARGO_INCREMENTAL: 1
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           fetch-depth: 0
       - name: Install system dependencies
         timeout-minutes: 5
         run: bash .github/scripts/install-linux-build-deps.sh
-      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: dtolnay/rust-toolchain@01e2821fc38dbca62c2557c927b33938a2e005fd # 1.98.1
         with:
           components: llvm-tools-preview
       - uses: ./.github/actions/ci-rust-cache
@@ -1257,7 +1257,7 @@ jobs:
           save-if: 'false'
           shared-key: coverage-cli-coverage-cli
           incremental: 'true'
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@073e1fd0bc889c9aee68dbaaa927cde1b5653a83 # v2
         with:
           tool: cargo-llvm-cov@0.9.1
 
@@ -1306,7 +1306,7 @@ jobs:
 
       - name: Upload coverage artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: cli-coverage-head
           path: |
@@ -1325,16 +1325,16 @@ jobs:
     env:
       CARGO_INCREMENTAL: 1
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           fetch-depth: 0
       - name: Install system dependencies
         timeout-minutes: 5
         run: bash .github/scripts/install-linux-build-deps.sh
-      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: dtolnay/rust-toolchain@01e2821fc38dbca62c2557c927b33938a2e005fd # 1.98.1
         with:
           components: llvm-tools-preview
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@073e1fd0bc889c9aee68dbaaa927cde1b5653a83 # v2
         with:
           tool: cargo-llvm-cov@0.9.1
       - name: Measure base branch
@@ -1347,7 +1347,7 @@ jobs:
               && cargo llvm-cov report --package nyxid-cli --json --summary-only \
                  --output-path "$GITHUB_WORKSPACE/coverage-cli.base.json" )
       - name: Upload base report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: cli-base-report
           path: coverage-cli.base.json
@@ -1361,16 +1361,16 @@ jobs:
     if: always() && github.event_name == 'pull_request' && needs.changes.outputs.profile != 'dev' && (needs.changes.outputs.ci == 'true' || needs.changes.outputs.cli == 'true')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: Download head report
         id: head-report
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: cli-coverage-head
         continue-on-error: true
       - name: Download base report
         if: steps.head-report.outcome == 'success'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: cli-base-report
         continue-on-error: true
@@ -1381,7 +1381,7 @@ jobs:
             coverage-cli.json coverage-cli.base.json
       - name: Upload coverage artifact
         if: steps.head-report.outcome == 'success'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: coverage-cli
           path: |
@@ -1407,10 +1407,10 @@ jobs:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           fetch-depth: 0
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version-file: .node-version
           cache: npm
@@ -1472,7 +1472,7 @@ jobs:
 
       - name: Upload coverage artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: coverage-frontend
           path: |
@@ -1512,9 +1512,9 @@ jobs:
       # write scopes here -- this job never touches the PR conversation.
       contents: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: Download coverage summaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: coverage-*
           path: coverage-artifacts
@@ -1530,7 +1530,7 @@ jobs:
         run: echo "$PR_NUMBER" > pr-number.txt
       - name: Upload coverage comment payload
         if: hashFiles('coverage-artifacts/coverage-backend.json', 'coverage-artifacts/coverage-cli.json', 'coverage-artifacts/coverage-frontend.json') != ''
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           # Deliberately NOT matching `coverage-*` so the pattern download
           # above never picks this payload up on a re-run.

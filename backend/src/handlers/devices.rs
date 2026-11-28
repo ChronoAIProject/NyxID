@@ -146,6 +146,7 @@ pub async fn request_device_code(
 
     let response = initiate(
         &state.db,
+        state.auth_device_hmac_key.as_slice(),
         DeviceCodeInitiateInput {
             device_pubkey,
             hw_id,
@@ -170,6 +171,7 @@ pub async fn poll_device_code(
     let user_agent = extract_user_agent(&headers);
     let response = match poll(
         &state.db,
+        state.auth_device_hmac_key.as_slice(),
         &state.encryption_keys,
         DeviceCodePollInput {
             device_code: device_code.clone(),
@@ -342,6 +344,7 @@ where
 
     let response = match approve(
         &state.db,
+        state.auth_device_hmac_key.as_slice(),
         &state.encryption_keys,
         &actor_user_id,
         DeviceCodeApproveInput {

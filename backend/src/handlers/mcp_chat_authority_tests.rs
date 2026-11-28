@@ -16,6 +16,11 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
+#[path = "mcp_retry_defensive_tests.rs"]
+mod retry_defensive;
+#[path = "mcp_skill_source_tests.rs"]
+mod skill_source;
+
 // Keep the fixture future's construction outside these test drivers as well as
 // its polling; boxing at an await site still leaves a large debug temporary.
 fn boxed_chat_fixture(name: &'static str) -> futures::future::BoxFuture<'static, Fixture> {

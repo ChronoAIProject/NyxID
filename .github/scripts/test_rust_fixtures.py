@@ -6,7 +6,7 @@ import sys
 import unittest
 from unittest.mock import patch
 
-from ci_gate_reuse import strict_load_workflow
+from workflow_test_helpers import USES_WITH_TAG, load_workflow_with_action_tags
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'scripts'))
@@ -87,8 +87,8 @@ class PrerequisiteTests(unittest.TestCase):
 
 class WorkflowFixtureTests(unittest.TestCase):
     def test_changes_never_compiles_and_each_fixture_has_a_mandatory_caller(self):
-        ci = strict_load_workflow((ROOT / '.github/workflows/ci.yml').read_text())
-        backend = strict_load_workflow((ROOT / '.github/workflows/backend-tests.yml').read_text())
+        ci = load_workflow_with_action_tags(ROOT / '.github/workflows/ci.yml')
+        backend = load_workflow_with_action_tags(ROOT / '.github/workflows/backend-tests.yml')
         changes = ci['jobs']['changes']['steps']
         helpers = next(step for step in changes if step.get('name') == 'Test CI helpers')
         self.assertEqual(helpers['env']['NYXID_SKIP_RUST_FIXTURES'], '1')
@@ -105,7 +105,7 @@ class WorkflowFixtureTests(unittest.TestCase):
             with self.subTest(fixture=filename):
                 steps = job['steps']
                 test = next(step for step in steps if filename in step.get('run', ''))
-                install = next(step for step in steps if step.get('uses') == f'dtolnay/rust-toolchain@{rust_fixture.TOOLCHAIN}')
+                install = next(step for step in steps if step.get(USES_WITH_TAG) == f'dtolnay/rust-toolchain@{rust_fixture.TOOLCHAIN}')
                 self.assertLess(steps.index(install), steps.index(test))
                 self.assertIn(components, install.get('with', {}).get('components', ''))
                 self.assertEqual(test['env']['NYXID_REQUIRE_RUST_FIXTURES'], '1')
@@ -114,7 +114,7 @@ class WorkflowFixtureTests(unittest.TestCase):
                 self.assertFalse(test.get('continue-on-error', False))
                 if filename == 'test_coverage_archive_cache.py':
                     self.assertEqual(test['if'], 'inputs.coverage')
-                    tools = next(step for step in steps if step.get('uses') == 'taiki-e/install-action@v2')
+                    tools = next(step for step in steps if step.get(USES_WITH_TAG) == 'taiki-e/install-action@v2')
                     self.assertLess(steps.index(tools), steps.index(test))
                     self.assertIn('cargo-nextest@0.9.146', tools['with']['tool'])
                     self.assertIn('cargo-llvm-cov@0.9.1', tools['with']['tool'])

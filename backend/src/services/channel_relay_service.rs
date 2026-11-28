@@ -250,6 +250,7 @@ pub(crate) fn inbound_metadata(
             Vec::new()
         },
         guest_transport_audience: None,
+        guest_transport_shared_room_verified: false,
         guest_relay: None,
         hosted_guest_selector_unavailable: false,
         embedded_attachments: inbound.embedded_attachments.clone(),
@@ -392,6 +393,7 @@ pub(crate) async fn store_outbound_with_guest_turn(
         text_completeness: None,
         effective_attachment_filenames: Vec::new(),
         guest_transport_audience: None,
+        guest_transport_shared_room_verified: false,
         guest_relay: guest_turn.cloned(),
         hosted_guest_selector_unavailable: false,
         embedded_attachments: Vec::new(),
@@ -514,6 +516,7 @@ pub async fn store_device_event_message(
         text_completeness: None,
         effective_attachment_filenames: Vec::new(),
         guest_transport_audience: None,
+        guest_transport_shared_room_verified: false,
         guest_relay: None,
         hosted_guest_selector_unavailable: false,
         embedded_attachments: Vec::new(),
@@ -1963,6 +1966,7 @@ mod tests {
             text_completeness: None,
             effective_attachment_filenames: Vec::new(),
             guest_transport_audience: None,
+            guest_transport_shared_room_verified: false,
             guest_relay: None,
             hosted_guest_selector_unavailable: false,
             embedded_attachments: Vec::new(),
@@ -2360,6 +2364,7 @@ mod tests {
         // padded with safe defaults to construct a complete AppConfig.
         crate::config::AppConfig {
             crash_reporting: Default::default(),
+            admin_setup_secret_hash: None,
             auth_device_eight_char_codes: false,
             resource_request_proof_enabled: false,
             port: 0,

@@ -163,6 +163,9 @@ pub fn bind_continuation(
 /// owner's access mode when the card was raised, and which policy asked.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActionConfirmation {
+    /// Server-derived immutable publication preview, retained with the card.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_publication: Option<ImagePublicationReview>,
     /// `read`, `change`, `sensitive` or `destructive`.
     pub risk: String,
     /// The effective access mode for the acting agent; absent when only a
@@ -191,4 +194,18 @@ pub struct AuthoredSkillReview {
     pub proposal_id: String,
     pub revision: i64,
     pub skills_revision: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImagePublicationReview {
+    #[serde(default)]
+    pub company_url: Option<String>,
+    pub draft_id: String,
+    pub company: String,
+    pub caption: String,
+    pub attachment_id: String,
+    pub conversation_id: String,
+    pub content_type: String,
+    pub label: String,
 }

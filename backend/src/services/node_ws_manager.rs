@@ -221,6 +221,7 @@ pub enum WebTerminalChunk {
 }
 
 pub(crate) enum NodeProxyOutcome {
+    DestinationMismatch,
     Response(ProxyResponseType),
     RetryableFailure {
         message: String,
@@ -377,6 +378,24 @@ pub struct NodeRequestSignature {
     pub timestamp: String,
     pub nonce: String,
     pub signature: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    destination_signature: Option<String>,
+}
+
+fn select_destination_signature(
+    mut prepared: Option<NodeRequestSignature>,
+    required: bool,
+) -> Result<Option<NodeRequestSignature>, NodeProxyFailure> {
+    if required {
+        let error = || {
+            NodeProxyFailure::before_dispatch(AppError::Forbidden(
+                "Destination signature required by node".into(),
+            ))
+        };
+        let signed = prepared.as_mut().ok_or_else(error)?;
+        signed.signature = signed.destination_signature.take().ok_or_else(error)?;
+    }
+    Ok(prepared)
 }
 
 impl fmt::Debug for NodeRequestSignature {
@@ -399,6 +418,7 @@ pub(crate) enum NodeOutboundMessage {
 
 /// Handle for sending messages to a connected node.
 struct NodeConnection {
+    destination_binding_v1: bool,
     desktop_streams: DashMap<String, tokio::sync::broadcast::Sender<Arc<Vec<u8>>>>,
     /// UUID for this exact WebSocket. It fences a reconnect handled by the
     /// same process from teardown performed by the older reader task.
@@ -676,6 +696,8 @@ struct WsSshExecCancel {
 
 #[derive(Debug, Serialize)]
 struct WsSshNodeExecOpen {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    signature_version: Option<u8>,
     #[serde(rename = "type")]
     msg_type: &'static str,
     request_id: String,
@@ -1256,6 +1278,7 @@ pub(crate) fn map_retryable_node_failure(message: String, reason: Option<&str>) 
 
 fn map_ssh_exec_result_error(message: String, code: Option<u32>, node_key: bool) -> AppError {
     match code {
+        Some(8014) => AppError::NodeCredentialDestinationMismatch,
         Some(1011) => AppError::SshNodeKeyMissing(message),
         Some(1012) => AppError::SshHostKeyMismatch(message),
         Some(1013) => AppError::SshNodeExecChannelClosed(message),
@@ -1320,6 +1343,16 @@ pub fn compute_http_v2_signature(
     nonce: &str,
     request: &NodeProxyRequest,
 ) -> String {
+    compute_http_destination_signature(secret, timestamp, nonce, request, "nyxid-node-http.v2")
+}
+
+fn compute_http_destination_signature(
+    secret: &[u8],
+    timestamp: &str,
+    nonce: &str,
+    request: &NodeProxyRequest,
+    domain: &str,
+) -> String {
     use base64::Engine;
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
@@ -1331,7 +1364,7 @@ pub fn compute_http_v2_signature(
             .unwrap_or_default(),
     );
     let message = crate::crypto::secret_json::to_secret_string(&[
-        "nyxid-node-http.v2",
+        domain,
         timestamp,
         nonce,
         &request.service_id,
@@ -1366,6 +1399,15 @@ pub fn sign_proxy_request(secret: &[u8], request: &NodeProxyRequest) -> NodeRequ
         )
     };
     NodeRequestSignature {
+        destination_signature: request.target_id.is_none().then(|| {
+            compute_http_destination_signature(
+                secret,
+                &timestamp,
+                &nonce,
+                request,
+                "nyxid-node-http.v3",
+            )
+        }),
         timestamp,
         nonce,
         signature,
@@ -1411,6 +1453,7 @@ pub fn sign_ssh_tunnel_request(
         request.port,
     );
     NodeRequestSignature {
+        destination_signature: None,
         timestamp,
         nonce,
         signature,
@@ -1474,6 +1517,7 @@ pub fn sign_ssh_exec_request(secret: &[u8], request: &NodeSshExecRequest) -> Nod
         },
     );
     NodeRequestSignature {
+        destination_signature: None,
         timestamp,
         nonce,
         signature,
@@ -1521,6 +1565,7 @@ pub fn sign_ssh_node_exec_request(
     secret: &[u8],
     request: &NodeSshNodeKeyExecRequest,
 ) -> NodeRequestSignature {
+    use hmac::Mac;
     let timestamp = chrono::Utc::now().to_rfc3339();
     let nonce = uuid::Uuid::new_v4().to_string();
     let signature = compute_ssh_node_exec_hmac_signature(
@@ -1536,6 +1581,16 @@ pub fn sign_ssh_node_exec_request(
         },
     );
     NodeRequestSignature {
+        destination_signature: Some(hex::encode(
+            nyxid_machine::signing::ssh_destination_mac(
+                secret,
+                &signature,
+                request.target_host.as_deref(),
+                request.target_port,
+            )
+            .finalize()
+            .into_bytes(),
+        )),
         timestamp,
         nonce,
         signature,
@@ -1614,6 +1669,7 @@ pub fn sign_web_terminal_request(
         },
     );
     NodeRequestSignature {
+        destination_signature: None,
         timestamp,
         nonce,
         signature,
@@ -1732,11 +1788,22 @@ impl NodeWsManager {
             .0
     }
 
+    #[cfg(test)]
     pub(crate) fn register_connection_with_id(
         &self,
         node_id: &str,
         connection_id: String,
         tx: mpsc::Sender<NodeOutboundMessage>,
+    ) -> NodeConnectionRegistration {
+        self.register_negotiated_connection(node_id, connection_id, tx, false)
+    }
+
+    pub(crate) fn register_negotiated_connection(
+        &self,
+        node_id: &str,
+        connection_id: String,
+        tx: mpsc::Sender<NodeOutboundMessage>,
+        destination_binding_v1: bool,
     ) -> NodeConnectionRegistration {
         let (close_tx, close_rx) = tokio::sync::watch::channel(None);
         let pending = Arc::new(DashMap::new());
@@ -1750,6 +1817,7 @@ impl NodeWsManager {
         let previous = self.connections.insert(
             node_id.to_string(),
             NodeConnection {
+                destination_binding_v1,
                 desktop_streams: DashMap::new(),
                 connection_id,
                 tx,
@@ -2066,6 +2134,13 @@ impl NodeWsManager {
                     ));
                 }
             }
+            let bound = conn.destination_binding_v1 && request.target_id.is_none();
+            let signature_version = if bound {
+                Some(3)
+            } else {
+                request.target_id.as_ref().map(|_| 2)
+            };
+            let prepared_signature = select_destination_signature(prepared_signature, bound)?;
             let node_body_limit = conn
                 .capabilities
                 .lock()
@@ -2123,7 +2198,7 @@ impl NodeWsManager {
 
             // Build WS message
             let ws_msg = WsProxyRequest {
-                signature_version: request.target_id.as_ref().map(|_| 2),
+                signature_version,
                 target_id: request.target_id,
                 msg_type: "proxy_request",
                 request_id: request_id.clone(),
@@ -2178,6 +2253,9 @@ impl NodeWsManager {
                     cancellation_guard.armed = false;
                     Ok(response)
                 }
+                Ok(Ok(NodeProxyOutcome::DestinationMismatch)) => Err(
+                    NodeProxyFailure::before_dispatch(AppError::NodeCredentialDestinationMismatch),
+                ),
                 Ok(Ok(NodeProxyOutcome::RetryableFailure { message, reason })) => {
                     let error = map_retryable_node_failure(message, reason.as_deref());
                     if matches!(error, AppError::NodeCredentialMissing(_)) {
@@ -2356,6 +2434,7 @@ impl NodeWsManager {
                 Ok(ProxyResponseType::Streaming(receiver.into()))
             }
             Ok(Ok(NodeProxyOutcome::Response(response))) => Ok(response),
+            Ok(Ok(NodeProxyOutcome::DestinationMismatch)) => Err(NodeProxyFailure::before_dispatch(AppError::NodeCredentialDestinationMismatch)),
             Ok(Ok(NodeProxyOutcome::RetryableFailure { message, reason })) => {
                 Err(NodeProxyFailure::after_dispatch(
                     map_retryable_node_failure(message, reason.as_deref()),
@@ -3318,7 +3397,9 @@ impl NodeWsManager {
         {
             match pending {
                 PendingRequest::Awaiting(sender) => {
-                    let outcome = if retryable {
+                    let outcome = if reason == Some("node_credential_destination_mismatch") {
+                        NodeProxyOutcome::DestinationMismatch
+                    } else if retryable {
                         NodeProxyOutcome::RetryableFailure {
                             message: error.to_string(),
                             reason: reason.map(str::to_string),
@@ -3705,6 +3786,8 @@ impl NodeWsManager {
         let conn = self
             .connection_for(node_id, expected_connection_id)
             .map_err(NodeProxyFailure::before_dispatch)?;
+        let bound = conn.destination_binding_v1;
+        let prepared_signature = select_destination_signature(prepared_signature, bound)?;
         let request_id = request.request_id.clone();
 
         let (resp_tx, resp_rx) = oneshot::channel();
@@ -3731,6 +3814,7 @@ impl NodeWsManager {
             .unwrap_or((None, None, None));
 
         let msg = crate::crypto::secret_json::to_secret_string(&WsSshNodeExecOpen {
+            signature_version: bound.then_some(2),
             msg_type: "ssh_node_exec_open",
             request_id: request.request_id,
             service_slug: request.service_slug,
@@ -4671,7 +4755,12 @@ impl NodeWsManager {
         {
             match pending {
                 PendingWsProxy::Awaiting(sender) => {
-                    let _ = sender.send(Err(AppError::WsProxyDownstream(error.to_string())));
+                    let refusal = if error == "node_credential_destination_mismatch" {
+                        AppError::NodeCredentialDestinationMismatch
+                    } else {
+                        AppError::WsProxyDownstream(error.to_string())
+                    };
+                    let _ = sender.send(Err(refusal));
                 }
                 PendingWsProxy::Active(tx) => {
                     let _ = tx.try_send(WsProxyFrame::Error(error.to_string()));
@@ -4727,6 +4816,7 @@ pub fn sign_ws_proxy_request(secret: &[u8], request: &NodeWsProxyRequest) -> Nod
         request.query.as_deref(),
     );
     NodeRequestSignature {
+        destination_signature: None,
         timestamp,
         nonce,
         signature,
@@ -4821,6 +4911,61 @@ mod tests {
             query: None,
             headers: Vec::new().into(),
             body: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn destination_binding_negotiates_per_socket_and_surfaces_refusal() {
+        let key = uuid::Uuid::new_v4();
+        for bound in [false, true] {
+            let manager = NodeWsManager::new(5, 100);
+            let (tx, mut rx) = mpsc::channel(4);
+            manager.register_negotiated_connection("node", "socket".into(), tx, bound);
+            let request = cancellation_request("binding");
+            let send = manager.send_proxy_request_classified(
+                "node",
+                request.clone(),
+                Some(key.as_bytes()),
+                billing_egress_permit(crate::services::billing::BillingIngress::Proxy),
+            );
+            let receive = async {
+                let Some(NodeOutboundMessage::Text(frame)) = rx.recv().await else {
+                    panic!("expected proxy request")
+                };
+                let frame: Value = serde_json::from_str(&frame).unwrap();
+                let signature = frame["signature"].as_str().unwrap();
+                let verify = |message: &Value| {
+                    nyxid_node_proxy_test::verify_request_signature(
+                        message,
+                        &hex::encode(key.as_bytes()),
+                        signature,
+                    )
+                };
+                assert!(verify(&frame));
+                if bound {
+                    assert_eq!(frame["signature_version"], 3);
+                    for field in ["service_id", "service_slug", "base_url", "path", "query"] {
+                        let mut other = frame.clone();
+                        other[field] =
+                            format!("{}-changed", frame[field].as_str().unwrap_or_default()).into();
+                        assert!(!verify(&other), "{field}");
+                    }
+                } else {
+                    assert!(frame.get("signature_version").is_none());
+                }
+                manager.deliver_proxy_error(
+                    "node",
+                    "binding",
+                    "refused",
+                    403,
+                    false,
+                    Some("node_credential_destination_mismatch"),
+                );
+            };
+            let (result, ()) = tokio::join!(send, receive);
+            let error = result.err().unwrap();
+            assert!(!error.dispatched);
+            assert_eq!(error.error.error_code(), 8014);
         }
     }
 

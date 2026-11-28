@@ -393,6 +393,9 @@ fn stored_fixture(collection: &str, row: &Document) -> Result<Document, String> 
         "feature_flag_overrides" => {
             roundtrip::<crate::models::feature_flag_override::FeatureFlagOverride>(row)
         }
+        "image_publications" => {
+            roundtrip::<crate::models::image_publication::ImagePublication>(row)
+        }
         "invite_codes" => roundtrip::<crate::models::invite_code::InviteCode>(row),
         "invocation_diagnostics" => {
             roundtrip::<crate::models::invocation_diagnostic::InvocationDiagnostic>(row)

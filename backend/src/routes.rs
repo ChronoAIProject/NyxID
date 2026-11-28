@@ -1555,6 +1555,15 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         )
         .route("/key-lifecycle", get(handlers::admin_key_lifecycle::status))
         .route(
+            "/key-lifecycle/retirement",
+            get(handlers::admin_key_lifecycle::evaluate_retirement)
+                .post(handlers::admin_key_lifecycle::advance_retirement),
+        )
+        .route(
+            "/key-lifecycle/rotation",
+            post(handlers::admin_key_lifecycle::rotate),
+        )
+        .route(
             "/key-lifecycle/enroll",
             post(handlers::admin_key_lifecycle::enroll),
         )

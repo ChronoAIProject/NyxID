@@ -2016,6 +2016,45 @@
       "updated_by": "fixture-value"
     }
   ],
+  "image_publications": [
+    {
+      "_id": "fixture-value",
+      "key": "fixture-value",
+      "user_id": "fixture-value",
+      "conversation_id": "fixture-value",
+      "connection_id": "fixture-value",
+      "authority": "fixture-value",
+      "contract": "fixture-value",
+      "company": "fixture-value",
+      "caption_sha256": "fixture-value",
+      "wire_caption_sha256": "fixture-value",
+      "attempt": "fixture-value",
+      "lease_until": {
+        "$date": {
+          "$numberLong": "1700000090000"
+        }
+      },
+      "attachment_id": "fixture-value",
+      "content_sha256": "fixture-value",
+      "metadata_identity": "fixture-value",
+      "state": "fixture-value",
+      "image": "fixture-value",
+      "post": "fixture-value",
+      "stage": "fixture-value",
+      "verification": "fixture-value",
+      "http_status": 201,
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000001000"
+        }
+      }
+    }
+  ],
   "invite_codes": [
     {
       "_id": "fixture-value",

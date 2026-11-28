@@ -2014,7 +2014,13 @@ originating admitted guest lane at admission, before the engine and before
 credential dispatch. Its own hidden conversation/key still own setup and
 settlement; source or policy revocation refuses further work. Setup uses the
 same admitted-turn validator as the guest: subscription stop/expiry alone does
-not revoke either already-admitted turn. A failed attempt
+not revoke either already-admitted turn. Enrolled followed turns preserve the
+ordinary child transcript ID while their hosted execution is bound separately
+to the exact source, actor and destination under the
+[channel guest contract](../CHANNEL_BOT_GUEST_ACCESS_SPEC.md#code-and-storage-boundaries).
+Model-setup queue recovery validates the pending hosted source before its turn
+is bound; admitted delivery validation applies after admission.
+A failed attempt
 without model dispatch retries on the next admitted message after the existing
 60-second backoff; dispatched model failures back off up to 3,600 seconds. Setup failures add a closed optional `failure_step`, projected
 as `failure_reason.guest_setup_step`; public failure codes are unchanged.

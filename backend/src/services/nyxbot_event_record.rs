@@ -339,6 +339,7 @@ mod tests {
                 assurance: GuestAssurance::ProviderVerified,
             },
             audience: AnswerAudience::Private,
+            shared_room_verified: false,
             policy_revision: 0,
             activation_epoch: 1,
             bot_revision: 1,

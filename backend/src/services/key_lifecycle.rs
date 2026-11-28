@@ -2,8 +2,11 @@
 //! writes the same singleton and appends its evidence and chained audit atomically.
 mod contract;
 mod inventory;
+mod load_gate;
 mod location;
 mod proof;
+pub(crate) mod retirement;
+pub(crate) mod rotation;
 use super::{
     audit_service::{self, AuditActor},
     hmac_lifecycle_service, transaction_service,
@@ -97,7 +100,9 @@ pub(crate) async fn status(db: &Database, config: &AppConfig) -> AppResult<Optio
     Ok(Some(Status {
         revision: field(&row, "revision")?,
         scope: field(&row, "scope")?,
-        rotation_open: keys.len() > 1,
+        rotation_open: keys.len() > 1
+            || (row.contains_key("published_retirement") && !rotation::closed(&db, &row).await?),
+        rolling: row.get_bool("rolling") == Ok(true),
         restore_required: field(&row, "restore_required")?,
         scope_revision: field(&row, "scope_revision")?,
         keys,
@@ -117,7 +122,10 @@ pub(crate) async fn status(db: &Database, config: &AppConfig) -> AppResult<Optio
 /// An unenrolled installation remains observational until an administrator
 /// enrolls it. Once enrolled, every process must prove the exact persisted
 /// ring and contextual writer policy.
-pub(crate) async fn admit_startup(db: &Database, config: &AppConfig) -> AppResult<()> {
+pub(crate) async fn admit_startup(
+    db: &Database,
+    config: &AppConfig,
+) -> AppResult<Option<retirement::Admission>> {
     let application = transaction_service::durable_database(db);
     let Some(enrollment) = application
         .collection::<Document>(HEAD)
@@ -125,7 +133,7 @@ pub(crate) async fn admit_startup(db: &Database, config: &AppConfig) -> AppResul
         .projection(doc! {"revision": 1})
         .await?
     else {
-        return Ok(());
+        return Ok(None);
     };
     let url = std::env::var("NYXID_BOOTSTRAP_DATABASE_URL")
         .ok()
@@ -136,17 +144,33 @@ pub(crate) async fn admit_startup(db: &Database, config: &AppConfig) -> AppResul
     let bootstrap =
         crate::db::create_connection_with_url(&url, config.database_max_connections).await?;
     let bootstrap = transaction_service::durable_database(&bootstrap);
-    let location = location::identity(&application).await?;
-    if location != location::identity(&bootstrap).await? {
+    let expected = std::env::var("NYXID_DEPLOYMENT_REVISION")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| conflict("Enrolled lifecycle requires a deployment revision"))?;
+    let revision = field(&enrollment, "revision")?;
+    Ok(Some(
+        admit_enrolled(&application, &bootstrap, config, revision, &expected).await?,
+    ))
+}
+
+async fn admit_enrolled(
+    application: &Database,
+    bootstrap: &Database,
+    config: &AppConfig,
+    revision: i64,
+    expected: &str,
+) -> AppResult<retirement::Admission> {
+    let location = location::identity(application).await?;
+    if location != location::identity(bootstrap).await? {
         return Err(conflict(
             "Bootstrap identity points to a different database",
         ));
     }
-    let revision: i64 = field(&enrollment, "revision")?;
     let row = bootstrap
         .collection::<Document>(HEAD)
         .find_one(doc! {"_id": SINGLETON, "revision": revision})
-        .projection(doc! {"scope": 1, "location": 1, "restore_required": 1, "proofs": 1})
+        .projection(doc! {"scope": 1, "location": 1, "restore_required": 1, "proofs": 1, "published_retirement":1, "survivor_proofs":1, "revision":1, "retirement_generation":1,"managed_proofs":1,"rolling":1,"scope_revision":1,"survivor_lineage":1})
         .await?
         .ok_or_else(stale)?;
     if row.get_bool("restore_required") != Ok(false) {
@@ -160,10 +184,6 @@ pub(crate) async fn admit_startup(db: &Database, config: &AppConfig) -> AppResul
         ));
     }
     let scope: Scope = field(&row, "scope")?;
-    let expected = std::env::var("NYXID_DEPLOYMENT_REVISION")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| conflict("Enrolled lifecycle requires a deployment revision"))?;
     if scope.deployment_revision != expected {
         return Err(conflict(
             "Deployment revision is outside the enrolled lifecycle scope",
@@ -174,12 +194,51 @@ pub(crate) async fn admit_startup(db: &Database, config: &AppConfig) -> AppResul
             "Enrolled lifecycle requires contextual record writers",
         ));
     }
-    proof::verify(
-        &scope.deployment_id,
-        &proof::slots(config).await?,
-        &field::<Vec<proof::Proof>>(&row, "proofs")?,
-    )
-    .await
+    let (proofs, pinned) = if row.contains_key("published_retirement") {
+        retirement::admit(bootstrap, config, &row).await?;
+        (field(&row, "survivor_proofs")?, true)
+    } else {
+        let slots = proof::slots(config).await?;
+        let pinned = slots.iter().all(|slot| slot.pinned(config));
+        let proofs = rotation::admitted(&row, &scope, &slots).await?;
+        if row.contains_key("managed_proofs") && (!pinned || config.allow_legacy_record_reads) {
+            return Err(stale());
+        }
+        if row.get_bool("survivor_lineage") == Ok(true) {
+            retirement::survivor_dependencies(bootstrap, config).await?;
+        }
+        (proofs, pinned)
+    };
+    let primary = proofs
+        .iter()
+        .find(|p| p.key.role == "primary")
+        .ok_or_else(stale)?;
+    // A slow provider challenge can straddle publication or restore. Linearize
+    // admission after proof, while the version that supplied the proof is current.
+    bootstrap
+        .collection::<Document>(HEAD)
+        .find_one(doc! {"_id":SINGLETON,"revision":revision,"restore_required":false})
+        .projection(doc! {"_id":1})
+        .await?
+        .ok_or_else(stale)?;
+    let mut layout = doc! {"_id":SINGLETON,"scope":row.get("scope"),"location":row.get("location"),"proofs":row.get("proofs"),"scope_revision":row.get("scope_revision"),"restore_required":false};
+    if let Some(publication) = row.get("published_retirement") {
+        layout.insert("published_retirement", publication);
+    } else {
+        layout.insert("published_retirement", doc! {"$exists":false});
+    }
+    Ok(retirement::Admission {
+        layout,
+        cohort: if pinned && !config.allow_legacy_record_reads {
+            Some(retirement::cohort(
+                &scope,
+                &primary.key.key_ref,
+                load_gate::executable().await?,
+            ))
+        } else {
+            None
+        },
+    })
 }
 
 /// Exceptional writers call this inside their existing transaction before
@@ -192,13 +251,16 @@ pub(crate) async fn invalidate_in_transaction(
     let head = db.collection::<Document>(HEAD);
     let Some(row) = head
         .find_one_and_update(
-            doc! {"_id": SINGLETON, "restore_required": false},
+            doc! {"_id": SINGLETON, "restore_required": false, "published_retirement":{"$exists":false},"survivor_lineage":{"$ne":true}},
             doc! {"$inc": {"revision": 1_i64}, "$set": {"restore_required": true, "current": {}}},
         )
         .projection(doc! {"revision": 1})
         .session(&mut *session)
         .await?
     else {
+        if head.find_one(doc! {"_id": SINGLETON, "$or":[{"published_retirement":{"$exists":true}},{"survivor_lineage":true}]}).projection(doc!{"_id":1}).session(&mut *session).await?.is_some() {
+            return Err(conflict("Published survivor requires isolated recovery"));
+        }
         return Ok(None);
     };
     let key = audit_service::audit_chain_hmac_key().ok_or_else(corrupt)?;
@@ -308,12 +370,7 @@ pub(crate) async fn append(
         if scope != request.scope {
             return Err(stale());
         }
-        proof::verify(
-            &scope.deployment_id,
-            &proof::slots(config).await?,
-            &field::<Vec<proof::Proof>>(&head, "proofs")?,
-        )
-        .await?;
+        active_proofs(&db, config, &head, &scope).await?;
     }
     let location = if matches!(request.change, Change::AdvanceRestoreEpoch) {
         indexes(&db).await?;
@@ -336,6 +393,7 @@ enum Action<'a> {
     Enroll(Document),
     Change(&'a Change, Option<Document>),
     Detected,
+    Rotation(&'a rotation::Edit<'a>),
 }
 struct Mutation<'a> {
     db: &'a Database,
@@ -410,6 +468,10 @@ async fn commit(m: &Mutation<'_>, tx: &mut ClientSession) -> AppResult<Receipt> 
     };
     let assertion = match &m.action {
         Action::Enroll(_) => json!({"kind":"enroll"}),
+        Action::Rotation(edit) => {
+            edit.apply(m.db, tx, &mut receipt).await?;
+            serde_json::to_value(edit.operation).map_err(|_| invalid())?
+        }
         Action::Detected => {
             head.update_one(
                 doc! {"_id": SINGLETON},
@@ -448,6 +510,11 @@ async fn commit(m: &Mutation<'_>, tx: &mut ClientSession) -> AppResult<Receipt> 
     let mut entry = bson::to_document(&evidence).map_err(|_| corrupt())?;
     entry.insert("_id", &receipt.entry_id);
     entry.insert("request_digest", &m.digest);
+    if let Action::Rotation(edit) = &m.action
+        && let Some(proof) = &edit.closed_proof
+    {
+        entry.insert("closed_proof", proof);
+    }
 
     entries.insert_one(entry).session(&mut *tx).await?;
     let metadata = json!({
@@ -540,15 +607,28 @@ pub(crate) struct CensusRing {
     pub proofs: Vec<proof::Proof>,
 }
 
+async fn active_proofs(
+    db: &Database,
+    config: &AppConfig,
+    head: &Document,
+    scope: &Scope,
+) -> AppResult<Vec<proof::Proof>> {
+    if head.contains_key("published_retirement") {
+        retirement::admit(db, config, head).await?;
+        field(head, "survivor_proofs")
+    } else {
+        let slots = proof::slots(config).await?;
+        rotation::admitted(head, scope, &slots).await
+    }
+}
+
 pub(crate) async fn census_ring(db: &Database, config: &AppConfig) -> AppResult<CensusRing> {
-    let slots = proof::slots(config).await?;
     if let Some(row) = location::observed(db).await? {
         if field::<bool>(&row, "restore_required")? {
             return Err(stale());
         }
         let scope: Scope = field(&row, "scope")?;
-        let proofs: Vec<proof::Proof> = field(&row, "proofs")?;
-        proof::verify(&scope.deployment_id, &slots, &proofs).await?;
+        let proofs = active_proofs(db, config, &row, &scope).await?;
         Ok(CensusRing {
             deployment: scope.deployment_id,
             revision: field(&row, "scope_revision")?,
@@ -558,7 +638,7 @@ pub(crate) async fn census_ring(db: &Database, config: &AppConfig) -> AppResult<
         })
     } else {
         let deployment = fresh();
-        let proofs = proof::issue(&deployment, &slots).await?;
+        let proofs = proof::issue(&deployment, &proof::slots(config).await?).await?;
         Ok(CensusRing {
             deployment,
             revision: 0,
@@ -574,3 +654,6 @@ impl CensusRing {
         proof::verify(&self.deployment, &proof::slots(config).await?, &self.proofs).await
     }
 }
+
+#[cfg(test)]
+mod rollout_peer;

@@ -15,6 +15,7 @@ import * as voiceSelection from "./voice/voiceSelection";
 import {
   acknowledgementSchema,
   messageSchema,
+  historySchema,
   type AssistantAcknowledgement,
   type AssistantMessage,
 } from "./assistantTypes";
@@ -149,7 +150,7 @@ function setup(
       messages: [] as AssistantMessage[],
       waiting: [],
       acknowledgements: [] as AssistantAcknowledgement[],
-      approvals: [],
+      approvals: [] as ReturnType<typeof historySchema.parse>["approvals"],
     };
   }
   const assistant = {
@@ -198,6 +199,7 @@ function setup(
     stop: async () => {
       events.push(["stop"]);
     },
+    decideApproval: async (id: string, approved: boolean) => { events.push(["decideApproval", id, approved]); },
   };
   const guidance = {
     canSteer: false,
@@ -3652,4 +3654,33 @@ test("transcript handlers forward frame boundaries while retaining scroll follow
   view.setFocused(false);
   assert.equal(view.nativePerf.frames.at(-1)?.focused, false);
   view.harness.unmount();
+});
+
+test("the real assistant thread passes the decoded proposal and exact path to its approval control", async () => {
+  const x = setup(A);
+  const id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const reviewPath = `/assistant?c=${A}&card=${id}`;
+  const page = historySchema.parse({
+    conversation: { id: A, title: "Review", model: "nyxagent/chat", created_at: "2026-10-28", last_message_at: "2026-10-28", message_count: 0, active_turn: null },
+    messages: [], before_seq: null, approvals: [{
+      id, service_name: "Sheets", summary: "Write cells", expires_at: "2099-01-01", review_path: reviewPath,
+      execution_proposal: { version: 4, state: "pending", supported: true, can_decide: true, review_path: reviewPath },
+    }],
+  });
+  x.assistant.history!.approvals = page.approvals;
+  x.harness.render();
+  const approvalControl = () => elements(expand(x.all().find((node) => node.type === "FlatList")!.props.ListFooterComponent))
+    .find((node) => node.type === "ApprovalCard")!;
+  const card = approvalControl();
+  assert.ok(card);
+  assert.equal(card.props.approval, page.approvals[0]);
+  assert.ok(card.props.approval?.execution_proposal);
+  assert.equal(card.props.approval.execution_proposal.review_path, reviewPath);
+  // Ordinary rows still use the normal chat decision callback.
+  x.assistant.history!.approvals = [{ ...page.approvals[0]!, execution_proposal: undefined }];
+  x.harness.render();
+  const ordinary = approvalControl();
+  await ordinary.props.onDecide(false);
+  assert.deepEqual(x.events.at(-1), ["decideApproval", id, false]);
+  x.harness.unmount();
 });

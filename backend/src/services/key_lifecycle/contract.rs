@@ -123,6 +123,7 @@ pub(crate) enum Review {
 pub(crate) enum Assertion {
     OldWritersWithdrawn,
     DatabaseAccessRevoked,
+    CatalogAccessWithdrawn,
     RestoreContinuity,
     RecoveryDependenciesClosed,
 }
@@ -150,6 +151,12 @@ pub(crate) enum Change {
         assertion: Assertion,
         affirmed: bool,
         valid_until_ms: Option<i64>,
+    },
+    DeclareLoadProtocol {
+        protocol: super::load_gate::Protocol,
+    },
+    RecordLoadResult {
+        result: super::load_gate::Measurement,
     },
     VerifyRing,
     AdvanceRestoreEpoch,
@@ -189,6 +196,8 @@ pub(crate) struct Status {
     pub scope: Scope,
     pub keys: Vec<Key>,
     pub rotation_open: bool,
+    #[serde(default)]
+    pub rolling: bool,
     pub restore_required: bool,
     pub scope_revision: i64,
     pub current: std::collections::BTreeMap<String, std::collections::BTreeMap<String, Current>>,

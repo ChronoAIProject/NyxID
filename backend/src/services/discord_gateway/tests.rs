@@ -147,6 +147,57 @@ fn bot_webhook_system_and_uncorrelated_channel_events_never_enter_chat() {
     }
 }
 
+#[test]
+fn gateway_room_evidence_requires_consistent_message_and_channel_guild() {
+    let bot = bot();
+    for kind in [1, 3] {
+        let mut dm = event("500");
+        dm["d"].as_object_mut().unwrap().remove("guild_id");
+        for guild in [None, Some(Value::Null)] {
+            let mut room = json!({"id":"200","type":kind});
+            if let Some(guild) = guild {
+                room["guild_id"] = guild;
+            }
+            let (inbound, facts) = facts::normalize(&bot, &dm, &room).unwrap().unwrap();
+            assert_eq!(
+                inbound.conversation_type,
+                if kind == 1 { "private" } else { "group" }
+            );
+            assert_eq!(facts.kind, ThreadKind::Unknown);
+            assert!(inbound.thread_id.is_none());
+            for contradiction in [json!("300"), json!(false), json!({"id":"300"})] {
+                let mut bad_room = room.clone();
+                bad_room["guild_id"] = contradiction.clone();
+                assert!(
+                    facts::normalize(&bot, &dm, &bad_room).is_err(),
+                    "{bad_room}"
+                );
+                let mut bad_message = dm.clone();
+                bad_message["d"]["guild_id"] = contradiction;
+                assert!(
+                    facts::normalize(&bot, &bad_message, &room).is_err(),
+                    "{bad_message}"
+                );
+                assert!(facts::normalize(&bot, &bad_message, &bad_room).is_err());
+            }
+        }
+    }
+    for kind in [0, 2, 5, 10, 11, 12, 13] {
+        let room = json!({"id":"200","type":kind,"parent_id":"201","guild_id":"300"});
+        let (inbound, facts) = facts::normalize(&bot, &event("501"), &room)
+            .unwrap()
+            .unwrap();
+        assert_eq!(inbound.conversation_type, "group");
+        assert_eq!(
+            facts.native_thread_id.as_deref(),
+            matches!(kind, 10..=12).then_some("200")
+        );
+        let mut wrong = room.clone();
+        wrong["guild_id"] = json!("301");
+        assert!(facts::normalize(&bot, &event("501"), &wrong).is_err());
+    }
+}
+
 async fn fixture(name: &str) -> (AppState, Fence) {
     let db = crate::test_utils::connect_transaction_test_database(name).await;
     let state = crate::test_utils::test_app_state(db);

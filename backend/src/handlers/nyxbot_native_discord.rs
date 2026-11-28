@@ -6,6 +6,7 @@ pub(super) struct Evidence {
     pub addressed: bool,
     pub source_message: Option<String>,
     pub guest_sender_verified: bool,
+    pub guest_shared_room_verified: bool,
 }
 
 /// Resolve positive private audience evidence against the receiving Discord bot.
@@ -58,6 +59,7 @@ pub(super) async fn private_guest_facts<'a>(
         || !matches!(message["type"].as_u64(), Some(0 | 19))
         || message["content"] != activity["kind"]["text"]
         || !message["edited_timestamp"].is_null()
+        || !message["guild_id"].is_null()
         || channel["id"] != chat
         || channel["type"] != 1
         || !channel["guild_id"].is_null()
@@ -67,6 +69,7 @@ pub(super) async fn private_guest_facts<'a>(
     Ok(TransportFacts {
         sender_id: Some(sender),
         audience: crate::services::channel_guest_access::AnswerAudience::Private,
+        shared_room_verified: false,
     })
 }
 
@@ -85,6 +88,7 @@ pub(super) async fn evidence(
         addressed: mentioned,
         source_message: None,
         guest_sender_verified: false,
+        guest_shared_room_verified: false,
     };
     if activity["conversation"]["kind"] == "private" {
         result.addressed = true;
@@ -144,12 +148,17 @@ pub(super) async fn evidence(
         ) else {
             return Ok(None);
         };
-        if facts.native_thread_id.is_some() == activity["conversation"]["thread_id"].is_null() {
+        if facts.native_thread_id.as_deref() != activity["conversation"]["thread_id"].as_str() {
             return Ok(None);
         }
-        Ok(Some(facts))
+        let shared_room_verified =
+            crate::services::channel_guest_access::transport::discord_shared_room(
+                channel["type"].as_u64(),
+                &channel["guild_id"],
+            );
+        Ok(Some((facts, shared_room_verified)))
     };
-    let facts = match read.await {
+    let (facts, shared_room_verified) = match read.await {
         Ok(Some(facts)) => facts,
         Ok(None) => {
             // Conflicting authenticated platform evidence overrides a gateway
@@ -169,6 +178,7 @@ pub(super) async fn evidence(
     let follow_supported = matches!(facts.kind, ThreadKind::Native | ThreadKind::ReplyChain);
     result.guest_sender_verified = activity["actor"]["kind"] == "human"
         && facts.sender_kind == crate::models::channel_thread::ThreadSenderKind::Human;
+    result.guest_shared_room_verified = result.guest_sender_verified && shared_room_verified;
     let Some(response) = Box::pin(async {
         state
             .db
@@ -188,6 +198,8 @@ pub(super) async fn evidence(
     "platform_message_id":id,"sender_platform_id":activity["actor"]["id"].as_str().unwrap_or_default(),
     "content_type":"text","thread_id":&facts.native_thread_id,"agent_api_key_id":&row.route_api_key_id,
     "thread_context":bson::to_bson(&facts).map_err(|_|AppError::OAuthAuthorityUnavailable)?,
+    "guest_transport_audience":result.guest_sender_verified.then_some("shared"),
+    "guest_transport_shared_room_verified":result.guest_shared_room_verified,
     "native_gateway":true,"created_at":bson::DateTime::now()};
     Box::pin(async {
         state

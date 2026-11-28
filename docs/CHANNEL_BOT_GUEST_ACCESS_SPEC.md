@@ -97,12 +97,62 @@ requires a separate append grant for the named tab. Google's values API uses
 the supplied range to locate a table and chooses the insertion position.
 Setup describes the entire tab as the possible write boundary. A range such
 as `Questions!A:H` alone cannot authorize a bounded write. The shared-room
-append accepts a single row with `RAW` and `INSERT_ROWS`. A private turn
-cannot write its inputs into the shared tab. For both Google Workspace and the
-standalone Sheets catalog, bind each grant to the actual connection, enforce its
+append accepts a single row with `RAW` and `INSERT_ROWS`. Writes require a
+provider-verified sender and positive authenticated evidence of a supported
+shared room. Private, unknown and contradictory room evidence cannot authorize
+an append. A persisted `Shared` audience alone supplies no room proof, including
+legacy records whose sender was verified. Discord interactions bind a guild
+room to matching guild/member evidence, or a group DM to absent guild/member
+evidence. Private room evidence requires a DM channel and absent or null guild
+values in both the message or interaction envelope and the channel facts.
+Private interactions also require absent outer member evidence.
+Native and relay ingress use the same room classification; native
+thread IDs match the bot-authenticated destination exactly. Other transports
+require their explicit supported provider room classification. For both Google
+Workspace and the standalone Sheets catalog, bind each grant to the actual connection, enforce its
 owner's applicable approvals and check the resolved Google destination at send.
 Existing grants alone leave both operations unavailable on enrollment.
 [Reported Discord event workflow](https://github.com/ChronoAIProject/NyxID/issues/2704)
+
+Signed Slack `message` and `app_mention` events identify shared rooms through
+supported C/G channel IDs when `channel_type` is omitted. Explicit `group`
+also accepts C-prefixed private channels; `channel` requires C and `mpim`
+requires G. Private D-prefixed IMs, unknown IDs/types and contradictory facts
+supply no shared-write proof. Authenticated legacy X DM polling identifies a
+shared group by a single numeric conversation ID and a `MessageCreate` event
+(or its supported omitted type). One-to-one IDs must name the exact sender and
+receiving account and supply no shared-write proof. These classifications bind
+the provider's sender, message and destination before discovery or execution.
+
+Hosted guest discovery describes this restricted Sheets contract on both Google
+catalogs. Direct MCP `tools/list` and `nyx__search_tools` publish a bounded,
+tab-qualified read range (at most 32 columns and 2,000 cells), without `FORMULA`
+rendering. Append guidance requires a shared room, a named tab with a column
+range of at most 32 columns, exactly one nonempty row, and exactly one each of
+`valueInputOption=RAW` and `insertDataOption=INSERT_ROWS`. The JSON body is at
+most 16 KiB, contains `values` and optionally `majorDimension=ROWS`, and accepts
+only strings, numbers and booleans as cells, with no more cells than the selected
+columns. `includeValuesInResponse` is omitted or false; response-render options
+and `body.range` are unavailable. The discovery schema narrows these choices
+while preserving the existing `body` argument wrapper. The append root and body
+schemas reject additional properties, including response-render options and
+unsupported arguments. Rendered instructions precede the connection label. Compact search retains the exact authorized read
+range guidance, append requirements and effective approval requirement when it
+omits the schema, including with a 200-character connection label.
+Discovery publishes no workbook, tab or range from the guest data grants, and
+does not establish approval or access to any example resource. Execution checks
+the exact request, live policy, Google destination and applicable approvals.
+Owner, verified-member and non-enrolled discovery keep their ordinary contracts.
+
+Eligible enrolled specialist API chat keys discover `nyxid__read_tool_result`
+in lists and search and can call it directly or through `nyx__call_tool`. Large
+allowed reads retain their complete text; continuation does not truncate the
+answer or repeat the service operation. Each part requires the original live
+turn, exact credential and current guest authority, including the data-policy
+revision. Another sender, destination, turn or revoked authority cannot read
+that snapshot. The owner resource reader and other native tools outside the
+enrolled allowlist remain unavailable in lists, search and calls.
+[Continuation bounds and lifecycle](chat/08-nyxagent-engine.md#tool-images)
 
 ## Code and storage boundaries
 
@@ -158,7 +208,9 @@ An upgraded worker must recognize an add-on callback or retry even
 when the feature is off. Use dedicated work and token formats that legacy
 queues and authenticators exclude. Give add-on turns separate conversation
 rows, active-turn locks and model sessions, keyed by the channel conversation,
-verified actor, audience and activation generation. A new legacy turn in the
+verified actor, audience, shared-room proof and activation generation. Proven
+shared-room turns have a separate hosted history and session scope from
+unproven or legacy `Shared` turns. A new legacy turn in the
 same channel thread can acquire its ordinary conversation while an add-on
 turn is settling. Normal user edits to ordinary bot settings
 remain effective when switching back. No configuration restoration job runs.
@@ -171,6 +223,22 @@ and work identity again at dispatch. An older in-flight call must settle
 against its original reservation. Retain bounded local history only within the
 same bot, verified guest, destination and authority revision. After permissions narrow,
 exclude content admitted under the earlier authority from the next prompt.
+
+Followed children retain their ordinary transcript conversation identifiers.
+Enrolled personal and organization guests execute in separate hosted contexts.
+Admission binds that hosted context to the exact child, source event, retained
+source sender, destination, assignment generations and organization authority.
+Provider-verified actors match the provider sender identity; unverified followed
+actors match their event-scoped identity and retain only the authority
+of that bound event and source. Validation never substitutes another actor's
+ordinary lane or replaces the child's transcript ID.
+
+While an enrolled followed source waits for model setup, recovery validates
+the pending hosted authority against its original queued event and delivery.
+It requires no admitted turn or guest-work row at that stage. Live policy,
+assignment, organization authority, sender and source checks still apply.
+Turn admission then binds guest work and the event atomically; later delivery
+and tool calls require that admitted turn.
 
 Organization specialists enforce current use, maintenance and governance
 rights independently. Changing guest policy or pin authorizations requires

@@ -3762,6 +3762,7 @@ async fn start_chat_turn(
                 source_event_id: event_key,
                 sender_id: facts.sender_id,
                 audience: facts.audience,
+                shared_room_verified: facts.shared_room_verified,
                 meta_grant_id: meta_grant.as_ref().map(|grant| grant.grant_id.as_str()),
             },
             meta_grant.as_ref(),
@@ -3867,7 +3868,21 @@ async fn start_chat_turn(
         (id, exists)
     };
     if origin.thread.is_some() {
-        let follow_conversation = if channel_guest.is_some() && origin.org_execution.is_none() {
+        let org_follow_lane;
+        let follow_conversation = if channel_guest.is_some() && origin.org_execution.is_some() {
+            // Follow metadata owns the ordinary org transcript lane. The
+            // enrolled guest executes in its separately fenced hosted context.
+            org_follow_lane = crate::services::org_channel_service::transcript::lane_for_grant(
+                &state.db,
+                &origin,
+                &actor,
+                &agent_id,
+                meta_grant.as_ref(),
+            )
+            .await?
+            .0;
+            &org_follow_lane
+        } else if channel_guest.is_some() {
             chat.conversation_id
                 .as_deref()
                 .ok_or_else(crate::services::channel_thread_follow_service::not_found)?
@@ -6877,6 +6892,9 @@ async fn gateway_inbound_inner(
         .is_some_and(|evidence| evidence.guest_sender_verified)
     {
         sender.guest_facts.sender_id = Some(sender.id);
+        sender.guest_facts.shared_room_verified = native_evidence
+            .as_ref()
+            .is_some_and(|evidence| evidence.guest_shared_room_verified);
     }
     if row.gateway_source.is_some() && row.platform == "discord" && kind == "private" {
         sender.native_discord_activity = Some(activity);

@@ -454,6 +454,14 @@ Later publications require an explicit scope edit to join a saved selection.
 Existing configuration, guest, sharing, webhook approval and Number rollout
 requirements apply. A webhook card binds the compiled contract digest.
 
+After saving, independently read back the same service with unfiltered
+`get_agent_operations`, following its snapshot to completion. Check the saved
+revision, selected IDs and input limits. Verify a known private skill pin with
+the [targeted live pin reader](AGENT_SKILLS.md#packages-and-disclosure). Recover
+missing read output without issuing setup writes again; incomplete source or
+unverified saved state leaves onboarding explicitly incomplete. A large input
+skill does not expand the authored-draft size or format limits.
+
 For an inventory, pass `effect_class` to `nyxid__get_agent_operations` with
 `read`, `change`, `sensitive` or `destructive`. For service endpoints the
 current classifier emits read, change and destructive. Sensitive can return

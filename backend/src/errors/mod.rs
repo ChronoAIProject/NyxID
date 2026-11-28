@@ -499,6 +499,9 @@ pub enum AppError {
     #[error("Target-selected HTTP requests require a node advertising HTTP signature v2")]
     NodeHttpSignatureUnsupported,
 
+    #[error("Destination refused by node credential binding")]
+    NodeCredentialDestinationMismatch,
+
     #[error(
         "workspace_destinations_not_activated (12300): Google Docs, Sheets, and Slides routing is not activated for this service. Startup reconciliation did not complete for this catalog row; check the server log for 'Google editor destinations were not activated' and the service's policy, destination map, and provider requirement."
     )]
@@ -1040,6 +1043,7 @@ impl AppError {
             Self::NodeRegistrationFailed(_) => StatusCode::BAD_REQUEST,
             Self::NodeCredentialMissing(_) => StatusCode::BAD_GATEWAY,
             Self::NodeHttpSignatureUnsupported => StatusCode::BAD_GATEWAY,
+            Self::NodeCredentialDestinationMismatch => StatusCode::FORBIDDEN,
             Self::WorkspaceDestinationsNotActivated => StatusCode::SERVICE_UNAVAILABLE,
             Self::WsProxyDownstream(_) => StatusCode::BAD_GATEWAY,
             Self::ClientDisconnected => client_closed_request(),
@@ -1305,6 +1309,7 @@ impl AppError {
             Self::WsProxyDownstream(_) => 8005,
             Self::ClientDisconnected => 8012,
             Self::NodeHttpSignatureUnsupported => 8013,
+            Self::NodeCredentialDestinationMismatch => 8014,
             Self::WorkspaceDestinationsNotActivated => 12300,
             Self::PendingCredentialDecryptFailed(_) => PENDING_CREDENTIAL_DECRYPT_FAILED_CODE,
             Self::PendingCredentialVersionUnsupported(_) => {
@@ -1605,6 +1610,7 @@ impl AppError {
             Self::NodeRegistrationFailed(_) => "node_registration_failed",
             Self::NodeCredentialMissing(_) => "node_credential_missing",
             Self::NodeHttpSignatureUnsupported => "node_http_signature_unsupported",
+            Self::NodeCredentialDestinationMismatch => "node_credential_destination_mismatch",
             Self::WorkspaceDestinationsNotActivated => "workspace_destinations_not_activated",
             Self::WsProxyDownstream(_) => "ws_proxy_downstream",
             Self::ClientDisconnected => "client_disconnected",
@@ -1795,7 +1801,7 @@ impl AppError {
         }
         if let Self::SkillRead(reason) = self {
             let mut response = reason.legacy_error().response_body();
-            response.details = Some(serde_json::json!({"reason": reason}));
+            response.details = Some(reason.details());
             return response;
         }
         if let Self::RefreshRefused { source, reason } = self {

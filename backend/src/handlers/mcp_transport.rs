@@ -2,6 +2,8 @@
 mod lark_diagnostics;
 #[path = "mcp_tool_results.rs"]
 mod retained_results;
+#[path = "mcp_retry_identity.rs"]
+mod retry_identity;
 use std::convert::Infallible;
 use std::time::Duration;
 
@@ -2512,6 +2514,19 @@ async fn handle_tools_list(
         tracing::warn!(code = error.error_code(), "Failed to filter guest tools");
         return rpc_error(request.id.clone(), -32603, "Failed to load tools");
     }
+    if let Err(error) = crate::services::image_publication::filter_discovery(
+        &state.db,
+        auth.chat.as_ref(),
+        &mut services,
+    )
+    .await
+    {
+        tracing::warn!(
+            code = error.error_code(),
+            "Failed to filter connector tools"
+        );
+        return rpc_error(request.id.clone(), -32603, "Failed to load tools");
+    }
     crate::services::agent_operation_scope_service::filter_catalog(
         &auth.assistant_operation_scopes,
         &mut services,
@@ -2540,6 +2555,9 @@ async fn handle_tools_list(
         }
         None => mcp_service::generate_tool_definitions(&services, None),
     };
+    if add_on.is_some() {
+        guest_tools::project_sheets_discovery(&services, &mut tool_defs);
+    }
 
     // Scoped API keys do not get SSH meta-tools. SSH invocations would
     // otherwise escape the service/node allow-list entirely.
@@ -2581,6 +2599,8 @@ async fn handle_tools_list(
                     definition.name.as_str(),
                     "nyx__search_tools" | "nyx__call_tool"
                 )
+                || (definition.name == crate::services::assistant_tool_result_service::TOOL_NAME
+                    && retained_results::chat(auth).is_some())
                 || mcp_service::resolve_tool_call(&definition.name, &services).is_some()
         });
         match Box::pin(guest_tools::definitions(
@@ -2663,28 +2683,7 @@ fn audit_chat_tool(name: &str) -> bool {
 }
 
 fn native_activity_names() -> &'static std::collections::HashSet<String> {
-    static NAMES: std::sync::LazyLock<std::collections::HashSet<String>> =
-        std::sync::LazyLock::new(|| {
-            let mut definitions = mcp_service::generate_tool_definitions(&[], None);
-            definitions.extend(crate::services::machine_tools::definitions());
-            definitions.push(crate::services::assistant_resource_service::definition());
-            definitions.push(crate::services::assistant_tool_result_service::definition());
-            definitions.push(crate::services::assistant_upload_service::definition());
-            definitions.push(crate::services::assistant_upload_service::list_definition());
-            definitions
-                .push(crate::services::assistant_nyxagent::conversation_history_definition());
-            let mut names: std::collections::HashSet<String> =
-                definitions.into_iter().map(|tool| tool.name).collect();
-            for name in crate::services::assistant_account_tools::TOOL_NAMES
-                .iter()
-                .chain(crate::services::assistant_team_tools::TOOL_NAMES)
-                .chain(crate::services::assistant_team_tools::AGENT_TOOL_NAMES)
-            {
-                names.insert(format!("nyxid__{name}"));
-            }
-            names
-        });
-    &NAMES
+    crate::services::assistant_continuation::native_activity_names()
 }
 
 async fn update_activity_label(state: &AppState, auth: &McpAuthContext, canonical: &str) {
@@ -2757,7 +2756,7 @@ fn chat_activity_digest(params: &serde_json::Value) -> String {
 
 /// Approval handles, memory recovery links and the universal-tool wrapper do
 /// not change what the tool writes. Keep the exact digest for older replicas.
-fn chat_retry_digest(params: &serde_json::Value) -> String {
+fn legacy_chat_retry_digest(params: &serde_json::Value) -> String {
     let (name, mut arguments) = if params["name"] == "nyx__call_tool" {
         let arguments = params["arguments"]["arguments_json"]
             .as_str()
@@ -2783,6 +2782,25 @@ fn chat_retry_digest(params: &serde_json::Value) -> String {
     chat_activity_digest(params)
 }
 
+fn chat_retry_digest(params: &serde_json::Value) -> String {
+    retry_identity::digest(params)
+}
+
+/// These closed native readers verify saved setup after
+/// Retry. They dispatch through their normal live ACLs and never write setup.
+/// Do not infer safety from downstream names or HTTP methods.
+fn setup_recovery_read(params: &serde_json::Value) -> bool {
+    let name = if params["name"] == "nyx__call_tool" {
+        params["arguments"]["tool_name"].as_str()
+    } else {
+        params["name"].as_str()
+    };
+    matches!(
+        name,
+        Some("nyxid__get_agent_skills" | "nyxid__get_agent_operations")
+    )
+}
+
 /// Refuse a retried turn's repeat of a completed call: an MCP `isError`
 /// result the model can act on, recorded on the live turn (so a retry of this
 /// retry stays fenced) and audited with metadata only.
@@ -2802,6 +2820,8 @@ async fn refuse_retry_duplicate(
         chat.turn_id.as_deref().unwrap_or_default(),
         &label,
         digest,
+        Some(&retry_identity::legacy_writer_digest(params)),
+        Some(&chat_retry_digest(params)),
     )
     .await
     .is_err()
@@ -3084,21 +3104,35 @@ async fn handle_tools_call_inner(
     // before the call counts as continuation progress or is dispatched.
     if let Some(chat) = &auth.chat
         && let Some(params) = request.params.as_ref()
+        && !setup_recovery_read(params)
     {
-        let digest = chat_retry_digest(params);
+        let identity = chat_retry_digest(params);
         let legacy = chat_activity_digest(params);
+        let review_tool = retry_identity::review_tool(params);
         match crate::services::assistant_nyxagent::retry_duplicate_any(
             &state.db,
             &chat.user_id,
             &chat.conversation_id,
             chat.turn_id.as_deref().unwrap_or_default(),
-            &[digest.as_str(), legacy.as_str()],
+            &identity,
+            review_tool,
+            || retry_identity::matching_digests(params),
         )
         .await
         {
             Ok(false) => {}
             Ok(true) => {
                 return refuse_retry_duplicate(state, auth, chat, request, params, &legacy).await;
+            }
+            Err(crate::errors::AppError::Conflict(message)) => {
+                return tool_result(
+                    request.id.clone(),
+                    &serde_json::json!({
+                        "error":"retry_evidence_requires_review", "message":message
+                    })
+                    .to_string(),
+                    true,
+                );
             }
             Err(_) => {
                 return rpc_error(request.id.clone(), -32603, ACTIVITY_RECORDING_RETRY);
@@ -3131,6 +3165,7 @@ async fn handle_tools_call_inner(
                 chat.turn_id.as_deref().unwrap_or_default(),
                 &chat_activity_label(params),
                 Some(&chat_activity_digest(params)),
+                Some(&retry_identity::legacy_writer_digest(params)),
                 Some(&chat_retry_digest(params)),
             )
             .await
@@ -3312,6 +3347,8 @@ async fn dispatch_tools_call(
         }
         if !matches!(tool_name, "nyx__search_tools" | "nyx__call_tool")
             && !guest_sheets_tool_name(tool_name)
+            && !(tool_name == crate::services::assistant_tool_result_service::TOOL_NAME
+                && retained_results::chat(auth).is_some())
         {
             return guest_refused(request.id.clone());
         }
@@ -5777,35 +5814,17 @@ async fn handle_meta_call_tool(
     //   1. { "tool_name": "x", "arguments_json": "{\"foo\":1}" }  -- JSON string (preferred)
     //   2. { "tool_name": "x", "arguments": { "foo": 1 } }       -- nested object (legacy)
     //   3. { "tool_name": "x", "foo": 1 }                         -- flat (fallback)
-    let inner_args =
-        if let Some(json_str) = arguments.get("arguments_json").and_then(|v| v.as_str()) {
-            // Preferred: arguments_json is a JSON string — parse it
-            match serde_json::from_str::<serde_json::Value>(json_str) {
-                Ok(parsed) => parsed,
-                Err(e) => {
-                    tracing::warn!("Invalid MCP tool arguments JSON");
-                    return tool_result(
-                        request_id,
-                        &format!("arguments_json must be a valid JSON string. Parse error: {e}"),
-                        true,
-                    );
-                }
-            }
-        } else if let Some(nested) = arguments.get("arguments") {
-            // Legacy: arguments as a nested object
-            nested.clone()
-        } else {
-            // Flat fallback: collect all keys except "tool_name" and "arguments_json"
-            let mut flat = serde_json::Map::new();
-            if let Some(obj) = arguments.as_object() {
-                for (k, v) in obj {
-                    if k != "tool_name" && k != "arguments_json" && k != "result_query" {
-                        flat.insert(k.clone(), v.clone());
-                    }
-                }
-            }
-            serde_json::Value::Object(flat)
-        };
+    let inner_args = match retry_identity::decode_arguments(arguments) {
+        Ok(args) => args,
+        Err(error) => {
+            tracing::warn!("Invalid MCP tool arguments JSON");
+            return tool_result(
+                request_id,
+                &format!("arguments_json must be a valid JSON string. Parse error: {error}"),
+                true,
+            );
+        }
+    };
 
     if let Some(chat) = auth
         .chat
@@ -5824,7 +5843,9 @@ async fn handle_meta_call_tool(
         {
             return response;
         }
-        if !guest_sheets_tool_name(tool_name) || result_query.is_some() {
+        let retained_read = tool_name == crate::services::assistant_tool_result_service::TOOL_NAME
+            && retained_results::chat(auth).is_some();
+        if (!guest_sheets_tool_name(tool_name) && !retained_read) || result_query.is_some() {
             return guest_refused(request_id);
         }
     }
@@ -6478,17 +6499,33 @@ async fn handle_meta_search(
             .as_ref()
             .is_some_and(|chat| !chat.guest || !chat.is_orchestrator())
         {
-            candidates.push(crate::services::assistant_resource_service::definition());
+            if auth
+                .chat
+                .as_ref()
+                .is_some_and(|chat| chat.channel_guest.is_none())
+            {
+                candidates.push(crate::services::assistant_resource_service::definition());
+            }
             if retained_results::chat(auth).is_some() {
                 candidates.push(crate::services::assistant_tool_result_service::definition());
             }
         }
     }
-    let ranked_candidates = if exact_service_id_query {
+    let mut ranked_candidates = if exact_service_id_query {
         candidates
     } else {
         mcp_service::rank_search_candidates(candidates, query)
     };
+    if auth
+        .chat
+        .as_ref()
+        .is_some_and(|chat| chat.channel_guest.is_some())
+    {
+        crate::services::channel_guest_access::guest_tools::project_sheets_discovery(
+            &services,
+            &mut ranked_candidates,
+        );
+    }
     // Facts only for the services this search returns.
     let mut returned_ids = std::collections::HashSet::new();
     let returned: Vec<&mcp_service::McpToolService> = ranked_candidates
@@ -6645,6 +6682,12 @@ async fn load_all_services_for_meta_tools(
     )
     .await?;
     crate::services::agent_operation_scope_service::filter_guest_catalog(
+        &state.db,
+        auth.chat.as_ref(),
+        &mut services,
+    )
+    .await?;
+    crate::services::image_publication::filter_discovery(
         &state.db,
         auth.chat.as_ref(),
         &mut services,
@@ -13200,7 +13243,8 @@ mod schedule_retry_identity_tests {
         assert_ne!(chat_retry_digest(&direct), chat_retry_digest(&approved));
         let other =
             json!({"name":"service__write", "arguments":{"acknowledgement_id":"provider-field"}});
-        assert_eq!(chat_retry_digest(&other), chat_activity_digest(&other));
+        let changed = json!({"name":"service__write", "arguments":{"acknowledgement_id":"different-provider-field"}});
+        assert_ne!(chat_retry_digest(&other), chat_retry_digest(&changed));
     }
 }
 
@@ -13429,3 +13473,7 @@ mod future_size_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "mcp_image_publication_tests.rs"]
+mod image_publication_tests;

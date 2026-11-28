@@ -286,8 +286,17 @@ approval configuration, the organization's global preference applies. The defaul
 request an owner approval or use an existing one, so a write that still requires
 approval is refused before reaching Google.
 
-A Sheets append with `insertDataOption=INSERT_ROWS` meets the guest `use`
-restriction for an append. If guests should append questions, use an effective
+A Sheets append with `insertDataOption=INSERT_ROWS` meets the ordinary guest `use`
+restriction for an append. Enrolled hosted bots using **Use guest access v1**
+also require exact resource grants and the narrower read and single-row append
+contract in the [channel guest access specification](CHANNEL_BOT_GUEST_ACCESS_SPEC.md#runtime-contract).
+Their tool list and search describe that contract on both Google Workspace and
+standalone Sheets, including when compact search omits the schema. Appends
+require positive authenticated shared-room evidence; a private or unknown room,
+or a legacy persisted shared audience alone, cannot supply it. Large authorized
+reads use the same exact-turn continuation reader as other service results.
+Example ranges in discovery do not identify an authorized workbook or tab. If guests
+should append questions, use an effective
 organization policy that allows that `POST` and path as a write without an
 approval prompt. Keep approval requirements for other writes in place. The
 guest still needs the applicable Grants and Google file access.
@@ -482,8 +491,7 @@ metadata in the existing ephemeral connection-owner record, without migrating no
 credential identity. An incompatible node fails closed with code 8013,
 `node_http_signature_unsupported`. The node executor rejects a missing or empty selected origin with
 HTTP 502 and reason `target_base_url_missing`, before any fallback to a locally configured URL; the
-v2 verifier independently requires a normalized HTTPS origin. Non-target calls retain the legacy
-wire format and signature behavior.
+v2 verifier independently requires a normalized HTTPS origin. Ordinary HTTP uses the signature negotiated on the node connection. For a locally bound Drive or Workspace credential, approve the root API and each editor origin the node serves. See [node-local destination binding](NODE_PROXY_ARCHITECTURE.md#node-local-destination-binding).
 
 Served instance specs rewrite the proxy root and remove nested server overrides. A cycle-safe queue
 follows local Path Item, Callback, Response, and Link references without expansion or external

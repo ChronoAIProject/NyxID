@@ -1000,9 +1000,9 @@ counters are not reset on success. Limits run before password verification.
 
 #### POST /api/v1/auth/setup
 
-One-time bootstrap endpoint to create the initial admin user. Only works when the users collection is completely empty. After the first user is created, this endpoint returns 403 Forbidden.
+One-time bootstrap endpoint to create the initial admin user. Requires an empty users collection and an unused setup credential.
 
-**Auth:** None
+**Auth:** Operator bearer token configured with `NYXID_ADMIN_SETUP_SECRET`.
 
 **Request Body:**
 
@@ -1030,13 +1030,14 @@ One-time bootstrap endpoint to create the initial admin user. Only works when th
 ```
 
 **Errors:**
-- `1002 forbidden` -- Users already exist (setup already completed)
+- `1002 forbidden` -- Setup is disabled, the credential is missing or incorrect, users exist, or setup has completed
 - `1008 validation_error` -- Invalid email format or password length
 
 **Example:**
 
 ```bash
 curl -X POST http://localhost:3001/api/v1/auth/setup \
+  -H "Authorization: Bearer ${NYXID_ADMIN_SETUP_SECRET}" \
   -H "Content-Type: application/json" \
   -d '{
     "email": "admin@example.com",
@@ -8385,7 +8386,10 @@ Service account tokens do **not** include `sid`, `roles`, `groups`, `permissions
 ## Security Rollout Readiness
 
 For the admin endpoints that start and advance an encrypted-record census and
-read its dated report, see [Running a dated census](security/KEY_LIFECYCLE.md#running-a-dated-census).
+read its dated report, see [Running a dated census](security/KEY_LIFECYCLE.md#running-a-dated-census). For retirement evaluation,
+request revisions and approval blockers, see [Evaluating retirement](security/KEY_LIFECYCLE.md#evaluating-retirement).
+
+Full admins change the admitted layout with `POST /api/v1/admin/key-lifecycle/rotation`. For its request fields, transitions and the isolated-rig evidence schema, see [Rolling and closing an enrolled rotation](security/KEY_LIFECYCLE.md#rolling-and-closing-an-enrolled-rotation).
 
 ```
 GET /api/v1/admin/security-readiness

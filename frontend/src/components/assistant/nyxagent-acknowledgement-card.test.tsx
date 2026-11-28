@@ -3,6 +3,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { NyxAgentAcknowledgementCard } from "./nyxagent-acknowledgement-card";
 import { appI18n } from "@/i18n";
 import type { NyxAgentAcknowledgement } from "@/schemas/assistant-nyxagent";
+import * as assistantClient from "@/lib/assistant/assistant-http";
 
 const createConnect = vi.hoisted(() => vi.fn(async () => "/connect/personal"));
 vi.mock("@/hooks/use-connect-links", () => ({
@@ -42,6 +43,48 @@ it("hides a stale owner ask in Full access while keeping specialist requests rou
   view.rerender(<NyxAgentAcknowledgementCard acknowledgement={{ ...acknowledgement, decider: "orchestrator" }} accessMode="autopilot" deciding={false} onDecision={decide} />);
   expect(screen.getByText("Requested from NyxBot")).toBeVisible();
   expect(screen.getByRole("button", { name: "Allow" })).toBeVisible();
+});
+
+it("shows the selected company, caption and private image before a Full access publish decision", async () => {
+  const decide = vi.fn().mockResolvedValue(undefined);
+  const preview = {
+    draft_id: "2ff3ae5a-21ed-4af5-823c-9198b8af0dcf",
+    company: "urn:li:organization:42",
+    caption: "Company update\nSecond paragraph",
+    attachment_id: "201fa540-2e25-45b0-a5ca-dab9073575ff",
+    conversation_id: "thread",
+    content_type: "image/png" as const,
+    label: "announcement.png",
+  };
+  const fetchImage = vi.spyOn(assistantClient, "assistantHttp")
+    .mockResolvedValue(new Response(new Blob(["PNG"], { type: preview.content_type })));
+  vi.stubGlobal("URL", class extends URL {
+    static createObjectURL() { return "blob:publication-review"; }
+    static revokeObjectURL() {}
+  });
+  try {
+    render(<NyxAgentAcknowledgementCard acknowledgement={{
+      ...acknowledgement,
+      kind: "action",
+      summary: "Publish company image",
+      confirmation: { risk: "change", reason: "policy", image_publication: preview },
+    }} accessMode="autopilot" deciding={false} onDecision={decide} />);
+
+    expect(screen.getByText(preview.company)).toBeVisible();
+    expect(screen.getByText("Company update Second paragraph").textContent).toBe(preview.caption);
+    expect(await screen.findByRole("img", { name: "Image from announcement.png" }))
+      .toHaveAttribute("src", "blob:publication-review");
+    expect(fetchImage).toHaveBeenCalledWith(
+      `/assistant/nyxagent/conversations/thread/attachments/${preview.attachment_id}`,
+    );
+    expect(decide).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Allow" }));
+    await waitFor(() => expect(decide).toHaveBeenCalledExactlyOnceWith("allow"));
+  } finally {
+    cleanup();
+    fetchImage.mockRestore();
+    vi.unstubAllGlobals();
+  }
 });
 
 it.each([

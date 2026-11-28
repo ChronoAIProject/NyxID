@@ -8,6 +8,7 @@ import { AuthoredSkillCard } from "./authored-skill-card";
 import { usePinnedDecisionCard } from "./decision-card-presentation";
 import { ownerConfirmationBypassed } from "@/lib/assistant/pending-decisions";
 import { DecisionCardActions } from "./decision-card-actions";
+import { ToolImage } from "./blocks/tool-image";
 import { DecisionReview } from "./decision-review";
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
@@ -98,6 +99,7 @@ export function NyxAgentAcknowledgementCard({
         <p className="type-group-label uppercase tracking-[1.5px] text-text-tertiary">{translateUi("Requested from NyxBot")}</p>
       ) : null}
       <p className="type-card-title text-foreground">{label}</p>
+      {acknowledgement.confirmation?.image_publication ? <PublicationPreview preview={acknowledgement.confirmation.image_publication} /> : null}
       {acknowledgement.confirmation ? (
         <p className="text-13 text-muted-foreground">
           <span
@@ -176,4 +178,13 @@ function ConnectOwnAction({ slug }: { readonly slug: string }) {
     {error ? <p role="alert" className="text-14 text-destructive">{translateUi(error)}</p> : null}
     <AssistantLinkModal href={href} onClose={() => setHref(null)} />
   </>;
+}
+
+function PublicationPreview({ preview }: { readonly preview: NonNullable<NonNullable<NyxAgentAcknowledgement["confirmation"]>["image_publication"]> }) {
+  const endpoint = `/assistant/nyxagent/conversations/${encodeURIComponent(preview.conversation_id)}/attachments/${encodeURIComponent(preview.attachment_id)}`;
+  return <div className="space-y-3">
+    <p className="break-words font-medium">{preview.company_url ? <a href={preview.company_url} target="_blank" rel="noopener noreferrer" className="underline">{preview.company}</a> : preview.company}</p>
+    <p className="whitespace-pre-wrap break-words">{preview.caption}</p>
+    <ToolImage key={preview.attachment_id} image={{ id: preview.attachment_id, endpoint, contentType: preview.content_type, label: preview.label, origin: "user_upload" }} />
+  </div>;
 }
