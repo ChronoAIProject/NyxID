@@ -65,6 +65,7 @@ export function ChannelConnectLinkContent({
             connectionId: link.status.data.connection_id ?? undefined,
             recoveryUnavailable: link.recoveryUnavailable,
             isRecoveryCurrent: link.isRecoveryCurrent,
+            getRecoveryGeneration: link.getRecoveryGeneration,
             refresh: link.refresh,
           }}
         >

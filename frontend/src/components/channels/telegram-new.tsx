@@ -55,7 +55,7 @@ export function TelegramNew({
   readonly onConnected: (id: string, username?: string | null) => void;
 }) {
   useUiTranslation();
-  const { configuration, begin, launch, creationLink, regenerateUsername, cancel, connect, getCurrentConfiguration } =
+  const { configuration, begin, launch, creationLink, regenerateUsername, cancel, connect, getCurrentConfiguration, getRecoveryGeneration } =
     useTelegramNew(requestId);
   const link = useChannelConnectLinkContext();
   const actor = useAuthStore((state) => state.user?.id);
@@ -82,8 +82,9 @@ export function TelegramNew({
     return () => window.clearTimeout(timer);
   }, [requestExpiresAt, canOpenCreationForm]);
   const recoveryUnexpired = Boolean(request && Date.parse(request.expires_at) > now);
-  const [recovery, setRecovery] = useState<{ actor: string; requestId?: string; linkId?: string; id: string; revision: number; username?: string; url: string } | null>(null);
-  const currentRecoveryUrl = recovery && recoveryReadsReady ? creationUrlForManager(recovery.url, managerUsername) : undefined;
+  const [recovery, setRecovery] = useState<{ actor: string; requestId?: string; linkId?: string; id: string; revision: number; generation: string; username?: string; url: string } | null>(null);
+  const currentRecoveryUrl = recovery && recoveryReadsReady && recovery.generation === getRecoveryGeneration()
+    ? creationUrlForManager(recovery.url, managerUsername) : undefined;
   const recoveryMatchesRequest = recovery && request && currentRecoveryUrl
     && recovery.actor === actor && recovery.requestId === requestId && recovery.linkId === link?.id
     && recovery.id === request.id && recovery.revision === request.revision
@@ -186,6 +187,7 @@ export function TelegramNew({
       || pending || !actor || !recoveryReadsReady || !managerUsername || !(Date.parse(request.expires_at) > Date.now())) return;
     const captured = request;
     const context = recoveryContext.current;
+    const generation = getRecoveryGeneration();
     const tab = window.open("about:blank", "_blank");
     if (tab) tab.opener = null;
     creationLink.reset();
@@ -196,6 +198,7 @@ export function TelegramNew({
       const latest = latestConfig?.request;
       const checkedAt = Date.now();
       if (!active.current || currentActor.current !== actor || recoveryContext.current !== context
+        || getRecoveryGeneration() !== generation
         || !matchesLiveCreationRequest(latest, captured, checkedAt)
         || !matchesLiveCreationRequest(result.request, captured, checkedAt)) {
         tab?.close();
@@ -213,7 +216,7 @@ export function TelegramNew({
         tab?.close();
         return;
       }
-      setRecovery({ actor, requestId, linkId: link?.id, id: captured.id, revision: captured.revision, username: choice?.username, url });
+      setRecovery({ actor, requestId, linkId: link?.id, id: captured.id, revision: captured.revision, generation, username: choice?.username, url });
       if (tab && !tab.closed) tab.location.replace(url);
     } catch {
       tab?.close();

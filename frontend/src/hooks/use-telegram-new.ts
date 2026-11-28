@@ -114,6 +114,9 @@ export function useTelegramNew(requestId?: string) {
     },
   });
   return { configuration, begin, launch, creationLink, regenerateUsername, cancel, connect,
+    // Error counts survive successful refetches. Read the live cache so even a
+    // failure and recovery between renders permanently fence an older issuance.
+    getRecoveryGeneration: () => `${client.getQueryState(["telegram-new", actor, requestId, link?.id])?.errorUpdateCount ?? 0}:${link?.getRecoveryGeneration?.() ?? 0}`,
     getCurrentConfiguration: () => {
       const current = client.getQueryState<{ available: boolean; request: TelegramNewRequest | null; manager_username: string | null }>(["telegram-new", actor, requestId, link?.id]);
       if (current?.status !== "success" || current.isInvalidated || !current.data?.available) return undefined;

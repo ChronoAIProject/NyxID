@@ -10,6 +10,7 @@ export const ChannelConnectLinkContext = createContext<{
   connectionId?: string;
   recoveryUnavailable?: boolean;
   isRecoveryCurrent?: (requestId: string, requestUpdatedAt: number) => boolean;
+  getRecoveryGeneration?: () => number;
   refresh: () => Promise<string | null | void>;
 } | null>(null);
 
@@ -66,6 +67,7 @@ export function useChannelConnectLink(token: string, actor?: string) {
     onSuccess: (data) => client.setQueryData(key, data),
   });
   return { preview, status, action, refresh, isRecoveryCurrent,
+    getRecoveryGeneration: () => client.getQueryState(key)?.errorUpdateCount ?? 0,
     recoveryUnavailable: !status.isSuccess || status.data.status !== "pending" || Boolean(status.data.telegram_requires_original_actor),
   };
 }
