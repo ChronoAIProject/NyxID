@@ -864,6 +864,7 @@ mod tests {
             admin_setup_secret_hash: None,
             auth_device_eight_char_codes: false,
             resource_request_proof_enabled: false,
+            github_oauth_scope_response_enabled: false,
             base_url: "http://localhost:3001".to_string(),
             chrono_probe_url: None,
             invocation_diagnostics_enabled: false,

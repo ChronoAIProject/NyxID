@@ -15,6 +15,10 @@ use axum::{
     response::Response,
 };
 use futures::StreamExt;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 
@@ -42,6 +46,15 @@ pub(crate) fn relay_response<'a>(
     context: HttpResponseContext,
     downstream_response: reqwest::Response,
 ) -> futures::future::BoxFuture<'a, AppResult<Response>> {
+    relay_response_observing_completion(state, context, downstream_response, None)
+}
+
+pub(crate) fn relay_response_observing_completion<'a>(
+    state: &'a AppState,
+    context: HttpResponseContext,
+    downstream_response: reqwest::Response,
+    stream_completed: Option<Arc<AtomicBool>>,
+) -> futures::future::BoxFuture<'a, AppResult<Response>> {
     if context
         .model_request
         .as_ref()
@@ -57,13 +70,24 @@ pub(crate) fn relay_response<'a>(
         context.should_stream = context.is_sse;
         Box::pin(async move {
             crate::turn_trace::spawn_cleanup(async move {
-                Box::pin(relay_response_inner(&state, context, downstream_response)).await
+                Box::pin(relay_response_inner(
+                    &state,
+                    context,
+                    downstream_response,
+                    stream_completed,
+                ))
+                .await
             })
             .await
             .map_err(|_| AppError::Internal("Assistant setup response task failed".into()))?
         })
     } else {
-        Box::pin(relay_response_inner(state, context, downstream_response))
+        Box::pin(relay_response_inner(
+            state,
+            context,
+            downstream_response,
+            stream_completed,
+        ))
     }
 }
 
@@ -71,6 +95,7 @@ async fn relay_response_inner(
     state: &AppState,
     context: HttpResponseContext,
     downstream_response: reqwest::Response,
+    stream_completed: Option<Arc<AtomicBool>>,
 ) -> AppResult<Response> {
     let HttpResponseContext {
         service_id,
@@ -422,6 +447,9 @@ async fn relay_response_inner(
                             break;
                         }
                         Ok(None) => {
+                            if let Some(completed) = &stream_completed {
+                                completed.store(true, Ordering::Relaxed);
+                            }
                             exchange_diagnostics.finish("completed");
                             break;
                         }

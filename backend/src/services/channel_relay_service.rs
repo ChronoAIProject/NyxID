@@ -2363,6 +2363,7 @@ mod tests {
             admin_setup_secret_hash: None,
             auth_device_eight_char_codes: false,
             resource_request_proof_enabled: false,
+            github_oauth_scope_response_enabled: false,
             port: 0,
             shutdown_drain_timeout_secs: crate::config::DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_SECS,
             base_url: "http://localhost".to_string(),
