@@ -114,7 +114,7 @@ nyxid node rotate-token <id>       # rotate auth token + signing secret (server 
 nyxid node delete <id>             # deregister
 ```
 
-After a server-side rotation, update the running agent with the new values: `nyxid node rekey --auth-token nyx_nauth_... --signing-secret <hex>`.
+After a server-side rotation, update the running agent with the new values: `nyxid node rekey`.
 
 ## Next
 

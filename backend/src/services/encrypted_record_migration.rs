@@ -546,6 +546,17 @@ async fn verify_generation(keys: &EncryptionKeys, row: &Document) -> AppResult<(
     .await
 }
 
+pub(super) async fn survivor_checkpoint(db: &Database, keys: &EncryptionKeys) -> AppResult<()> {
+    if let Some(row) = db
+        .collection::<Document>(RUNS)
+        .find_one(doc! {"_id":RUN_ID})
+        .await?
+    {
+        verify_generation(keys, &row).await?;
+    }
+    Ok(())
+}
+
 pub async fn status(db: &Database, keys: &EncryptionKeys) -> AppResult<Option<Report>> {
     let db = super::transaction_service::durable_database(db);
     let Some(row) = db

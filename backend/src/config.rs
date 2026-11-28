@@ -343,6 +343,8 @@ pub struct AppConfig {
     pub domain_aliases: domain_aliases::DomainAliases,
     /// Frontend URL for CORS and redirects (e.g. https://nyxid.dev)
     pub frontend_url: String,
+    /// Digest of the operator credential for initial administrator setup.
+    pub admin_setup_secret_hash: Option<String>,
     /// Eight-character public codes; false retains the old v2 marker for rollout rollback.
     pub auth_device_eight_char_codes: bool,
     /// Opt-in request-bound read identity proofs for registered resource servers.
@@ -1358,6 +1360,10 @@ impl AppConfig {
             crash_reporting: CrashReportingConfig::load(|key| env::var(key))
                 .unwrap_or_else(|message| panic!("{message}")),
             resource_request_proof_enabled: parse_bool_env("NYXID_RESOURCE_REQUEST_PROOF_ENABLED", false),
+            admin_setup_secret_hash: env::var("NYXID_ADMIN_SETUP_SECRET").ok()
+                .map(zeroize::Zeroizing::new)
+                .filter(|secret| !secret.trim().is_empty())
+                .map(|secret| crate::crypto::token::hash_token(&secret)),
             auth_device_eight_char_codes: env::var("AUTH_DEVICE_EIGHT_CHAR_CODES")
                 .map(|v| v.parse::<bool>().expect("AUTH_DEVICE_EIGHT_CHAR_CODES must be true or false"))
                 .unwrap_or(true),
@@ -2321,6 +2327,7 @@ mod tests {
             crash_reporting: CrashReportingConfig::default(),
             port: 3001,
             shutdown_drain_timeout_secs: crate::config::DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_SECS,
+            admin_setup_secret_hash: None,
             auth_device_eight_char_codes: true,
             resource_request_proof_enabled: false,
             base_url: base_url.to_string(),

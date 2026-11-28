@@ -70,3 +70,33 @@ pub async fn append(
         .await?,
     ))
 }
+
+pub async fn evaluate_retirement(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Query(target): Query<lifecycle::retirement::Target>,
+) -> AppResult<Json<lifecycle::retirement::Evaluation>> {
+    require_first_party_human(&auth)?;
+    require_admin_or_operator(&state, &auth, "admin.key_lifecycle.retirement").await?;
+    Ok(Json(
+        lifecycle::retirement::evaluate(&state.db, &state.config, &target).await?,
+    ))
+}
+
+pub async fn advance_retirement(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Json(request): Json<lifecycle::retirement::Request>,
+) -> AppResult<Json<lifecycle::retirement::Progress>> {
+    require_first_party_human(&auth)?;
+    require_admin(&state, &auth).await?;
+    Ok(Json(
+        lifecycle::retirement::advance(
+            &state.db,
+            &state.config,
+            &AuditActor::from_auth_user(&auth),
+            &request,
+        )
+        .await?,
+    ))
+}

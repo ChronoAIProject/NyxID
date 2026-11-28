@@ -132,7 +132,18 @@ pub async fn claim_lockout_notification(
         return Ok(None);
     };
 
-    let lockout = db
+    let (count, until) = if row.last_poll_timestamp.is_none() {
+        let claimed = db.collection::<DeviceCode>(DEVICE_CODES).find_one_and_update(
+            doc! {"_id": &row.id, "last_poll_timestamp": bson::Bson::Null, "lock_alert_sent_at": bson::Bson::Null,
+                "locked_until": {"$gt": bson::DateTime::from_chrono(now)},
+                "failed_poll_count": {"$gte": i64::from(DEVICE_CODE_SIGNATURE_FAILURE_LOCK_THRESHOLD)}},
+            doc! {"$set": {"lock_alert_sent_at": bson::DateTime::from_chrono(now)}}).await?;
+        let Some(claimed) = claimed else {
+            return Ok(None);
+        };
+        (claimed.failed_poll_count, claimed.locked_until)
+    } else {
+        let lockout = db
         .collection::<DevicePubkeyLockout>(DEVICE_PUBKEY_LOCKOUTS)
         .find_one_and_update(
             doc! {
@@ -148,20 +159,22 @@ pub async fn claim_lockout_notification(
         )
         .return_document(ReturnDocument::After)
         .await?;
-    let Some(lockout) = lockout else {
+        let Some(lockout) = lockout else {
+            return Ok(None);
+        };
+
+        db.collection::<DeviceCode>(DEVICE_CODES)
+            .update_one(
+                doc! { "_id": &row.id },
+                doc! { "$set": { "lock_alert_sent_at": bson::DateTime::from_chrono(now) } },
+            )
+            .await?;
+
+        (lockout.failed_poll_count, lockout.locked_until)
+    };
+    let Some(locked_until) = until else {
         return Ok(None);
     };
-    let Some(locked_until) = lockout.locked_until else {
-        return Ok(None);
-    };
-
-    db.collection::<DeviceCode>(DEVICE_CODES)
-        .update_one(
-            doc! { "_id": &row.id },
-            doc! { "$set": { "lock_alert_sent_at": bson::DateTime::from_chrono(now) } },
-        )
-        .await?;
-
     let recipients = lockout_notification_recipients(db, &row).await?;
     let device_label = choose_device_label(&row, None)?;
     Ok(Some(DeviceCodeLockoutNotification {
@@ -170,7 +183,7 @@ pub async fn claim_lockout_notification(
         hw_id: row.hw_id,
         node_id: row.issued_node_id,
         device_pubkey_fingerprint: device_pubkey_fingerprint(&row.device_pubkey),
-        failed_poll_count: lockout.failed_poll_count,
+        failed_poll_count: count,
         locked_until,
     }))
 }
@@ -206,6 +219,7 @@ fn device_pubkey_fingerprint(pubkey: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::device_code_service::tests_support::hmac_key;
     use crate::services::device_code_service::tests_support::{setup_pending_row, sign_poll};
     use crate::services::device_code_service::{DeviceCodePollInput, poll};
     use crate::test_utils::test_encryption_keys;
@@ -342,6 +356,7 @@ mod tests {
         let encryption_keys = test_encryption_keys();
         poll(
             &db,
+            &hmac_key(),
             &encryption_keys,
             DeviceCodePollInput {
                 device_code: response.device_code.clone(),

@@ -4486,7 +4486,7 @@ fn is_duplicate_key_error_including_commands(error: &mongodb::error::Error) -> b
 
 /// Name of the `schema_migrations` collection used to track one-off
 /// data migrations that are too expensive to replay on every boot.
-const SCHEMA_MIGRATIONS: &str = "schema_migrations";
+pub(crate) const SCHEMA_MIGRATIONS: &str = "schema_migrations";
 
 /// Migration marker id for `purge_legacy_channel_message_content`.
 const PURGE_CHANNEL_MESSAGE_CONTENT_MIGRATION: &str = "purge_channel_message_content_v1";

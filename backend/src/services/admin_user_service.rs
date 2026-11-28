@@ -139,9 +139,6 @@ async fn create_user_with_actor(
         ));
     }
 
-    let password_hash = password::hash_password(password_raw)?;
-    let now = Utc::now();
-    let user_id = Uuid::new_v4().to_string();
     let platform_role = match role {
         "admin" => PlatformRole::Admin,
         "operator" => PlatformRole::Operator,
@@ -152,6 +149,39 @@ async fn create_user_with_actor(
             ));
         }
     };
+    let new_user = prepare_user(db, normalized, password_raw, display_name, platform_role).await?;
+    let intent = audit::intent(
+        actor,
+        "admin.user.created",
+        serde_json::json!({
+            "target_user_id": required::text(TextField::Identifier, &new_user.id),
+            "target_email": required::text(TextField::Email, &new_user.email),
+            "role": platform_role.as_str(),
+        }),
+    )?;
+    audit::insert_user(db, &new_user, intent).await?;
+    super::billing::schedules::eligibility::after_user_created(
+        db,
+        &new_user.id,
+        new_user.created_at,
+    )
+    .await;
+
+    tracing::info!(user_id = %new_user.id, is_admin = %new_user.is_admin, is_operator = %new_user.is_operator, "Admin created user");
+
+    Ok(new_user)
+}
+
+async fn prepare_user(
+    db: &mongodb::Database,
+    normalized: String,
+    password_raw: &str,
+    display_name: Option<&str>,
+    platform_role: PlatformRole,
+) -> AppResult<User> {
+    let password_hash = password::hash_password(password_raw)?;
+    let now = Utc::now();
+    let user_id = Uuid::new_v4().to_string();
     let (is_admin, is_operator) = platform_role.legacy_flags();
 
     // Auto-assign default roles to new admin-created users
@@ -159,9 +189,9 @@ async fn create_user_with_actor(
     let platform_role_ids = role_service::get_platform_role_ids(db).await?;
     role_service::add_platform_role_id(&mut role_ids, platform_role, &platform_role_ids);
 
-    let new_user = User {
+    Ok(User {
         execution_permission_enrollment: None,
-        id: user_id.clone(),
+        id: user_id,
         email: normalized,
         password_hash: Some(password_hash),
         display_name: display_name.map(String::from),
@@ -187,23 +217,70 @@ async fn create_user_with_actor(
         updated_at: now,
         last_login_at: None,
         profile_config: Default::default(),
-    };
+    })
+}
 
-    let intent = audit::intent(
-        actor,
-        "admin.user.created",
-        serde_json::json!({
-            "target_user_id": required::text(TextField::Identifier, &new_user.id),
-            "target_email": required::text(TextField::Email, &new_user.email),
-            "role": platform_role.as_str(),
-        }),
-    )?;
-    audit::insert_user(db, &new_user, intent).await?;
-    super::billing::schedules::eligibility::after_user_created(db, &new_user.id, now).await;
-
-    tracing::info!(user_id = %user_id, is_admin = %is_admin, is_operator = %is_operator, "Admin created user");
-
-    Ok(new_user)
+pub async fn bootstrap_admin(
+    db: &mongodb::Database,
+    email: &str,
+    password_raw: &str,
+    display_name: Option<&str>,
+) -> AppResult<String> {
+    fn completed() -> AppError {
+        AppError::Forbidden("Initial admin setup is closed".into())
+    }
+    let users = db.collection::<User>(USERS);
+    if users.count_documents(doc! {}).limit(1).await? > 0 {
+        return Err(completed());
+    }
+    if password_raw.len() > MAX_PASSWORD_LENGTH {
+        return Err(AppError::ValidationError(
+            "Password exceeds 128 bytes".into(),
+        ));
+    }
+    let user = prepare_user(
+        db,
+        email.to_lowercase(),
+        password_raw,
+        display_name,
+        PlatformRole::Admin,
+    )
+    .await?;
+    let context = (db, &user);
+    super::transaction_service::run_db_only(db, &context, |session, &(db, user)| {
+        Box::pin(async move {
+            let users = db.collection::<User>(USERS);
+            if users
+                .count_documents(doc! {})
+                .limit(1)
+                .session(&mut *session)
+                .await?
+                > 0
+            {
+                return Err(completed());
+            }
+            let markers = db.collection::<bson::Document>(crate::db::SCHEMA_MIGRATIONS);
+            let claim = markers
+                .insert_one(doc! {
+                    "_id": "initial-admin-setup-v1",
+                    "completed_at": bson::DateTime::from_chrono(user.created_at)
+                })
+                .session(&mut *session)
+                .await;
+            match claim {
+                Ok(_) => {}
+                Err(error) if super::service_pool_service::is_duplicate_key(&error) => {
+                    return Err(completed());
+                }
+                Err(error) => return Err(error.into()),
+            }
+            users.insert_one(user).session(session).await?;
+            Ok(())
+        })
+    })
+    .await?;
+    super::billing::schedules::eligibility::after_user_created(db, &user.id, user.created_at).await;
+    Ok(user.id)
 }
 
 /// Update a user's profile fields (admin action).
