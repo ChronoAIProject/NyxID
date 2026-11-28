@@ -158,6 +158,14 @@ conversation and message fences. Tool files use `tool_image_days` retention,
 including its conversation-lifetime default, and the existing conversation,
 group and owner purge paths remove roots and all their chunks.
 
+## Publishing image attachments to LinkedIn company pages
+
+NyxBot uses the managed connector in the same conversation for image preview,
+caption edits, cancellation, explicit per-post approval and verified receipts.
+The original upload is reused across caption edits. See
+[Connector image publication](../API_DISCOVERY.md#connector-image-publication)
+for eligibility, immutable drafts, outcome recovery and provider egress.
+
 ## Raw file uploads from attachments
 
 Eligible live, non-guest owner chat keys see both `attachment_id` and the original

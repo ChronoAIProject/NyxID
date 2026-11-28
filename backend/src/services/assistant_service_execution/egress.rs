@@ -34,6 +34,7 @@ struct AttachmentEgress<'a> {
 }
 
 enum EgressAuthority<'a> {
+    ImagePublication(&'a crate::services::image_publication::transport::Effect<'a>),
     Lark {
         guard: &'a super::LarkManagedGuard<'a>,
         row: &'a crate::models::lark_base_write::LarkBaseWrite,
@@ -334,6 +335,17 @@ impl<'a> HttpEgressGuard<'a> {
         }
     }
 
+    pub(crate) fn for_image_publication(
+        guard: &'a crate::services::image_publication::transport::Effect<'a>,
+    ) -> Self {
+        Self {
+            attachment: None,
+            skill_read: None,
+            guest_data: None,
+            model_request: None,
+            authority: EgressAuthority::ImagePublication(guard),
+        }
+    }
     pub(super) fn for_lark(
         guard: &'a super::LarkManagedGuard<'a>,
         row: &'a crate::models::lark_base_write::LarkBaseWrite,
@@ -527,6 +539,7 @@ impl<'a> HttpEgressGuard<'a> {
     pub(crate) fn revalidate(&self) -> futures::future::BoxFuture<'_, AppResult<()>> {
         Box::pin(async move {
             match &self.authority {
+                EgressAuthority::ImagePublication(guard) => guard.revalidate().await,
                 EgressAuthority::Lark { guard, row, phase } => {
                     guard.revalidate_effect(row, *phase).await
                 }

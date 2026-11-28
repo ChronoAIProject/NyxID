@@ -258,6 +258,98 @@ file/document IDs or tokens, not multi-segment path parameters.
 
 The spec is fetched through a hardened path with DNS pinning, 5MB response size limit, redirect policy, and 60-second caching. Specs may be JSON or YAML: JSON is parsed first and behaves as before; any other body is read as a single YAML 1.2 document (`yes`/`no` stay strings, integer response codes become string keys, anchors, aliases and `<<` merge keys expand) and must be a mapping with an `openapi`, `swagger`, or `asyncapi` field, so text or HTML pages are never taken for a spec. Expanded YAML is bounded separately from the response size (1,000,000 nodes, 10 MiB of text, 64 levels of nesting), which rejects alias bombs. At most four YAML documents are parsed at once per server; a request that waits more than 10 seconds for a slot is answered with 429, while JSON specs never wait. Failures report `Spec was not valid JSON or YAML: <reason>`. The manual `POST /services/{id}/discover-endpoints` route uses the same parser.
 
+### Connector image publication
+
+The compiled LinkedIn connector exposes `publish_image_attachment` to live,
+non-guest owner chat keys on a SYSTEM `api-linkedin` catalog connection. It
+requires the published, unmodified hosted operation, a server-held connection
+credential and the trusted LinkedIn API destination. Custom services cannot
+opt in by naming an operation. A mounted instance specification retains its
+operations; NyxID adds this catalog-managed operation alongside them, without
+replacing text publishing or analytics. Existing operations on independently
+managed provider media retain their contracts. A ready preview includes the
+draft ID and the authenticated original image. Status returns the draft receipt.
+The provider image ID stays private until creation has a usable post receipt.
+The chat operation is excluded from config, exact, background and ordinary
+external MCP execution.
+
+Use this tool in the originating NyxBot conversation. `preview` accepts a PNG
+or JPEG `attachment_id`, an organization URN, the full literal caption and a
+UUID `request_id`. Use one request ID for retries of the same revision, including
+lost responses and pending processing. A deliberate new revision uses a new
+request ID. An edit also supplies the prior `draft_id`; replacing that draft
+expires its pending/allowed publication cards and contends with its dispatch
+barrier. Other drafts are independent. Reuse the original attachment when editing
+the caption. The request ID binds exact attachment identity, content, authority
+and contract; changing any requires a new revision. A cancelled revision stays
+cancelled on replay, and a deliberate new revision can reuse its content.
+
+Preparation applies the existing file-egress confirmation policy separately:
+Auto and Ask every time require a card; Full access retains its automatic
+receipt. It initializes, transfers and verifies readiness before returning a
+ready immutable `draft_id`. Image processing is polled for up to 12 reads with
+two-second intervals inside a 75-second preparation budget. Pending processing
+can resume with the same request ID or `status` without reuploading. A failed
+upload can retry before publication. The ready preview and the publication card
+show the exact company page, full caption and authenticated original image;
+card metadata persists across reload. `cancel` closes an unsubmitted draft.
+`publish` supplies
+the same inputs and draft ID and always requires a one-use human decision in
+that chat, including Full access. An approval binds the exact connection,
+authority, page, caption, file identity and plaintext digest. A new payload or
+changed authority requires a new preview and approval. No cross-thread file
+handoff is implied by specialist delegation.
+
+The backend owns temporary upload URLs and never exposes them to model
+arguments or routine logs. The LinkedIn adapter initializes an organization
+image and uploads original bytes to the exact HTTPS URL on the compiled LinkedIn
+recipient set with redirects disabled. The Images upload receives only the selected
+connection's OAuth bearer and the original MIME; proxy identity, delegation,
+catalog-default and caller headers are omitted. The adapter explicitly selects
+upload credential mode and required headers; no adapter inherits another's bearer
+policy. Readiness is checked again after publication approval.
+Only `AVAILABLE` for the selected organization permits post creation. Upload
+expiry limits byte transfer; it does not invalidate an already ready image.
+Provider calls reuse connection credential resolution, billing, audit and
+live egress fences. Publication has a durable dispatch barrier; a repeated
+approval cannot submit again. A timeout, lost response, missing receipt ID or
+process interruption after that barrier retains an unknown or unverified
+outcome. Creation status and a usable ID are persisted immediately on receipt of
+headers, without reading the unused create body. A 201 without a usable ID remains
+created but unverified. Proven pre-dispatch refusal can return to ready for a new
+human decision. `status` needs only a draft ID, can read back a known post ID after
+reconnect or attachment expiry, and never recreates the post. A stored digest of
+the adapter's wire caption supports verification without retaining another copy
+of the caption in the publication ledger. LinkedIn little-text characters are
+escaped to preserve the literal visible caption. A verified receipt matches author,
+caption, image and returned post identity (when present), and includes the
+validated `x-restli-id` post URN and derived feed link. Creation evidence and
+current readback status are separate facts, with creation, latest check and last
+verified timestamps. Error responses never derive a feed link. Known provider
+validation, authentication, unsupported method/media and throttling refusals are
+failed tool results. Timeouts, conflicts and 5xx create responses remain
+ambiguous and cannot be resent. A known creation remains successful when optional
+readback fails. Receipt replays and local cancellation release unused billing
+reservations; they cannot record a successful provider operation. Audit metadata
+distinguishes provider effects, the logical result and verification. Failure stages, fixed codes and HTTP status are reported without provider
+bodies, tokens, temporary URLs or arbitrary internal error strings.
+
+LinkedIn company publication uses a BYO connection with the organization's
+`w_organization_social` permission and the appropriate LinkedIn app approval.
+Post readback additionally requires `r_organization_social`; lack of that optional
+read permission preserves creation evidence and reports unverified status.
+NyxID's deliberately restricted first-party LinkedIn OAuth scope allowlist does
+not acquire these permissions. Existing member text and analytics contracts are
+preserved. The metadata-only ledger has unique request keys and owner/thread
+indexes, remains for the conversation lifetime to retain dispatch barriers, and
+is deleted with the conversation or owner erasure. It does not delete LinkedIn
+posts or uploaded images.
+
+The provider wire contract lives in `service-adapters::image_publication`;
+NyxID owns attachment authorization, immutable drafts, approval and dispatch
+persistence. A fixture adapter exercises reuse without another production
+connector.
+
 ### Rich catalog metadata
 
 Catalog entries can include metadata to help AI agents understand what a service is and how it works:

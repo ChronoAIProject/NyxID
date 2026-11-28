@@ -439,6 +439,9 @@ async fn check_inner(
             },
         )
         .await?;
+        let gate = super::image_publication::publication_gate(
+            operation, gate, facts, instruction_required,
+        );
         let gate = super::execution_permission_dispatch::risk_gate(chat, connection_id, gate);
         if let Some(need) = gate.ask() {
             let args = json!({"connection_id": connection_id, "execution_binding": approval,
@@ -889,6 +892,9 @@ async fn check_inner(
             (org && !model_consent && !instruction_covered && !org_guest_setup)
                 || operation.get("attachment_upload").is_some(),
             if instruction_required { acks::OrgInstructionRequirement::Required } else { acks::OrgInstructionRequirement::None }).await? };
+        let gate = super::image_publication::publication_gate(
+            operation, gate, facts, instruction_required,
+        );
         let gate = super::execution_permission_dispatch::risk_gate(chat, connection_id, gate);
         if gate.ask().is_some() {
             // Legacy idle calls can retain their existing automatic behavior, but
