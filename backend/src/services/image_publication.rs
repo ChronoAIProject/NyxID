@@ -437,29 +437,28 @@ pub(crate) async fn prepare(
         request_id,
         transfer: action == "preview",
     };
-    if action == "preview" {
-        if let Some(existing) = db
+    if action == "preview"
+        && let Some(existing) = db
             .collection::<ImagePublication>(COLLECTION_NAME)
             .find_one(doc! {"key":preview_key(chat,&service.service_id,&prepared.request_id)})
             .await?
+    {
+        if existing.company != prepared.company
+            || existing.caption_sha256 != hash(prepared.caption.as_bytes())
+            || existing.attachment_id != prepared.attachment
+            || existing.authority != prepared.authority
+            || existing.contract != prepared.contract
         {
-            if existing.company != prepared.company
-                || existing.caption_sha256 != hash(prepared.caption.as_bytes())
-                || existing.attachment_id != prepared.attachment
-                || existing.authority != prepared.authority
-                || existing.contract != prepared.contract
-            {
-                return Err(refused("request_id_payload_changed"));
-            }
-            // Retrying an already-uploaded/preparing revision is a state read.
-            // A consumed file-egress card cannot block recovery of its receipt.
-            if existing.state != "upload_failed"
-                && !(existing.state == "preparing" && existing.lease_until <= Utc::now())
-            {
-                prepared.transfer = false;
-                prepared.sha256 = existing.content_sha256;
-                prepared.identity = existing.metadata_identity;
-            }
+            return Err(refused("request_id_payload_changed"));
+        }
+        // Retrying an already-uploaded/preparing revision is a state read.
+        // A consumed file-egress card cannot block recovery of its receipt.
+        if existing.state != "upload_failed"
+            && !(existing.state == "preparing" && existing.lease_until <= Utc::now())
+        {
+            prepared.transfer = false;
+            prepared.sha256 = existing.content_sha256;
+            prepared.identity = existing.metadata_identity;
         }
     }
     if prepared.upload()

@@ -6645,17 +6645,16 @@ async fn execute_tool_resolved_inner(
         }
         super::lark_attachment_tool::validate_binding(db, service, endpoint, binding).await?;
     }
-    if let Some(publication) = &prepared.image_publication {
-        if exec_ctx.api_key_id != Some(publication.chat.api_key_id.as_str())
+    if let Some(publication) = &prepared.image_publication
+        && (exec_ctx.api_key_id != Some(publication.chat.api_key_id.as_str())
             || publication.chat.user_id != user_id
             || node_route.is_some()
             || prepared.async_submission.is_some()
-            || prepared.async_continuation.is_some()
-        {
-            return Err(super::image_publication::refused(
-                "live_hosted_chat_required",
-            ));
-        }
+            || prepared.async_continuation.is_some())
+    {
+        return Err(super::image_publication::refused(
+            "live_hosted_chat_required",
+        ));
     }
     if let Some(base) = &prepared.managed_base {
         use super::lark_attachment_tool::eligibility::Reason;
