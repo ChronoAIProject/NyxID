@@ -142,6 +142,12 @@ export function WorkspacePushShell(props: Props) {
   );
   const layout = workspaceSidebarLayout(width);
   const persistent = props.enabled && layout.persistent;
+  const sidebarRequested = persistent || props.presented || props.visible;
+  const sidebarWasMounted = useRef(false);
+  useLayoutEffect(() => {
+    if (!props.enabled) sidebarWasMounted.current = false;
+    else if (sidebarRequested) sidebarWasMounted.current = true;
+  }, [props.enabled, sidebarRequested]);
   const persistentNow = useRef(persistent);
   persistentNow.current = persistent;
   const openWidth = layout.sidebarWidth;
@@ -544,7 +550,8 @@ export function WorkspacePushShell(props: Props) {
               : undefined,
           ]}
         >
-          {props.sidebar}
+          {/* Mount on the first reveal and retain the drawer's scroll position on close. */}
+          {sidebarRequested || sidebarWasMounted.current ? props.sidebar : null}
         </View>
       ) : null}
       <Animated.View

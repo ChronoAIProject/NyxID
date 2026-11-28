@@ -1,10 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readFileSync } from "node:fs";
 import { URL, fileURLToPath } from "node:url";
 import { hookHarness } from "../features/assistant/assistantHookTestHarness";
 import * as model from "./agentAvatarModel";
-import { nyxidIconXml } from "./brand/brandVectors";
 
 type Element = { type: unknown; props: Record<string, any> };
 function setup() {
@@ -16,9 +14,10 @@ function setup() {
     "react-native": {
       View: "View",
       Text: "Text",
+      Image: "Image",
       StyleSheet: { create: (value: unknown) => value },
     },
-    "react-native-svg": { SvgXml: "SvgXml" },
+    "react-native-svg": {},
     "../theme/ThemeContext": {
       useTheme: () => ({
         mode: "dark",
@@ -31,7 +30,7 @@ function setup() {
     },
     "../theme/designTokens": { fonts: { bodySemi: "semibold" } },
     "./agentAvatarModel": model,
-    "./brand/brandVectors": { nyxidIconXml },
+    "../../assets/brand/nyxbot-avatar.png": "bundledNyxbotAvatar",
     // Flag off: today's avatar (the blob renderers are covered by Jest).
     "../lib/avatars/agentAvatarsFlag": { useAgentAvatarsEnabled: () => false },
     "./avatar/AvatarArt": { AvatarAnimated: "AvatarAnimated", AvatarStill: "AvatarStill" },
@@ -76,15 +75,13 @@ test("agent identity uses display initials, exact mark, sizes and decorative sem
   assert.equal(named.props.accessibilityRole, "image");
   assert.equal(named.props.children.props.children, "RN");
   const nyxbot = AgentAvatar({ agent: { ...agent, kind: "nyxbot" } });
-  assert.equal(nyxbot.props.children.type, "SvgXml");
-  assert.equal(nyxbot.props.children.props.width, "70%");
-  assert.equal(
-    nyxbot.props.children.props.xml,
-    readFileSync(
-      new URL("../../assets/brand/nyxid-coloured-icon.svg", import.meta.url),
-      "utf8",
-    ),
+  assert.equal(nyxbot.props.children.type, "Image");
+  assert.equal(nyxbot.props.children.props.source, "bundledNyxbotAvatar");
+  assert.deepEqual(
+    { ...nyxbot.props.children.props.style },
+    { width: "70%", height: "70%" },
   );
+  assert.equal(nyxbot.props.children.props.accessible, false);
 });
 test("crew stacks cap real members and show the remaining count", () => {
   const { AgentAvatarStack } = setup();

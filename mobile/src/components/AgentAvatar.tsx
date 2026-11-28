@@ -1,12 +1,13 @@
 import type { SharedValue } from "react-native-reanimated";
 import {
+  Image,
   StyleSheet,
   Text,
   View,
   type StyleProp,
   type ViewStyle,
 } from "react-native";
-import Svg, { Circle, Path, SvgXml } from "react-native-svg";
+import Svg, { Circle, Path } from "react-native-svg";
 import { useMemo } from "react";
 import { processState } from "../../../shared/agent-avatars/model";
 import {
@@ -18,7 +19,6 @@ import { useTheme } from "../theme/ThemeContext";
 import { fonts } from "../theme/designTokens";
 import { useAgentAvatarsEnabled } from "../lib/avatars/agentAvatarsFlag";
 import { resolveAvatar, type AvatarMood } from "../lib/avatars/agentAvatars";
-import { nyxidIconXml } from "./brand/brandVectors";
 import { AvatarAnimated, AvatarStill } from "./avatar/AvatarArt";
 import {
   AGENT_AVATAR_SIZES,
@@ -244,7 +244,13 @@ function LegacyAgentAvatar({
       ]}
     >
       {agent.kind === "nyxbot" ? (
-        <SvgXml xml={nyxidIconXml} width="70%" height="70%" />
+        <Image
+          source={require("../../assets/brand/nyxbot-avatar.png")}
+          style={styles.nyxbotMark}
+          resizeMode="contain"
+          accessible={false}
+          fadeDuration={0}
+        />
       ) : (
         <Text
           allowFontScaling={false}
@@ -350,6 +356,7 @@ export function AgentAvatarStack({
 }
 
 const styles = StyleSheet.create({
+  nyxbotMark: { width: "70%", height: "70%" },
   circle: {
     flexShrink: 0,
     borderWidth: 1,

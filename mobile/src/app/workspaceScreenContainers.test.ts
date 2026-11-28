@@ -3,6 +3,7 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import test from "node:test";
 import { fileURLToPath, URL } from "node:url";
+import { loadTestModule } from "../lib/api/apiUrlTestHarness";
 
 /*
  * The folded Duo's floating rail keeps readable content clear through one
@@ -87,27 +88,39 @@ test("every workspace content page renders inside a container that keeps text cl
   const navigator = join(SRC, "app/AppNavigator.tsx");
   const source = readFileSync(navigator, "utf8");
   const workspace = componentBody(source, "WorkspaceNavigator")!;
+  const imports = namedImports(source, navigator);
+  const requests: string[] = [];
+  const { screenModules } = loadTestModule<{ screenModules: Record<string, () => string> }>(
+    "../../app/screenModules.ts",
+    {
+      require: (spec: string) => {
+        requests.push(spec);
+        const file = resolveModule(navigator, spec);
+        assert.ok(file, `deferred module ${spec} resolves`);
+        return file;
+      },
+    },
+  );
+  assert.deepEqual(requests, [], "registering the loaders must not load any screens");
   const screens = [
     ...workspace.matchAll(
-      /<ContentStack\.Screen\s+name="(\w+)"\s+component=\{(\w+)\}/g,
+      /<ContentStack\.Screen\s+name="(\w+)"\s+(?:component=\{(\w+)\}|getComponent=\{\(\) => screenModules\.(\w+)\(\)\.(\w+)\})/g,
     ),
-  ].map(([, route, component]) => ({ route: route!, component: component! }));
+  ].map(([, route, direct, loader, exported]) => ({
+    route: route!,
+    component: (direct ?? exported)!,
+    file: loader ? screenModules[loader]!() : imports.get(direct!) ?? navigator,
+  }));
   // The parser saw every content route (none written in another shape).
   assert.equal(
     screens.length,
     source.match(/<ContentStack\.Screen\b/g)!.length,
-    "every ContentStack.Screen is declared as name=… component={…}",
+    "every ContentStack.Screen has a known component or loader",
   );
   assert.ok(screens.length >= 40, `found ${screens.length} content routes`);
   assert.ok(screens.some((s) => s.route === "Assistant"));
   assert.ok(screens.some((s) => s.route === "Notifications"));
-  const imports = namedImports(source, navigator);
-  const missing = screens.filter(({ component }) => {
-    const file =
-      imports.get(component) ??
-      (componentBody(source, component) ? navigator : null);
-    return !file || !containerPath(component, file, 3);
-  });
+  const missing = screens.filter(({ component, file }) => !containerPath(component, file, 3));
   assert.deepEqual(
     missing.map((s) => `${s.route} (${s.component})`),
     [],

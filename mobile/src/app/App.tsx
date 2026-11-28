@@ -69,19 +69,7 @@ import {
   PartialState,
   useNavigationContainerRef,
 } from "@react-navigation/native";
-import { useFonts } from "expo-font";
-import {
-  Manrope_400Regular,
-  Manrope_500Medium,
-  Manrope_600SemiBold,
-  Manrope_700Bold,
-} from "@expo-google-fonts/manrope";
-import {
-  SpaceGrotesk_500Medium,
-  SpaceGrotesk_600SemiBold,
-  SpaceGrotesk_700Bold,
-} from "@expo-google-fonts/space-grotesk";
-import { JetBrainsMono_400Regular } from "@expo-google-fonts/jetbrains-mono";
+import { useStartupFonts } from "./useStartupFonts";
 import { AppErrorBoundary } from "./AppErrorBoundary";
 import { AppNavigator, RootStackParamList } from "./AppNavigator";
 import { appLinking, notificationLinkConfig } from "./linking";
@@ -263,27 +251,7 @@ function AppContent() {
     [openNotification],
   );
 
-  const [fontsLoaded] = useFonts({
-    Manrope_400Regular,
-    Manrope_500Medium,
-    Manrope_600SemiBold,
-    Manrope_700Bold,
-    SpaceGrotesk_500Medium,
-    SpaceGrotesk_600SemiBold,
-    SpaceGrotesk_700Bold,
-    JetBrainsMono_400Regular,
-  });
-  const [fontLoadTimeout, setFontLoadTimeout] = useState(false);
-
-  useEffect(() => {
-    const t = setTimeout(() => setFontLoadTimeout(true), 8000);
-    return () => clearTimeout(t);
-  }, []);
-
-  // Hide the native splash once we have enough state to render the UI.
-  // expo-splash-screen plugin disables the auto-hide, so without this
-  // call the splash never goes away.
-  const ready = fontsLoaded || fontLoadTimeout;
+  const ready = useStartupFonts();
   useEffect(() => {
     if (ready) {
       SplashScreen.hideAsync().then(launchSplashHidden).catch(() => {
@@ -422,8 +390,7 @@ function AppContent() {
     };
   }, []);
 
-  const canShowApp = fontsLoaded || fontLoadTimeout;
-  if (!canShowApp) {
+  if (!ready) {
     return (
       <View style={appLoadingStyles.container}>
         <StatusBar style="light" />
