@@ -41,7 +41,7 @@ jobs:
     # archive and inventory are packaged and uploaded.
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install system dependencies
         # A healthy but slow Ubuntu mirror can take over five minutes for indexes.
         timeout-minutes: 10
@@ -130,7 +130,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Prepare backend memory reserve
         run: bash .github/scripts/prepare-backend-runner.sh
       - name: Install system dependencies
@@ -177,7 +177,7 @@ jobs:
         # Must agree with SHARD_COUNT; partitioning and verification share it.
         shard: [1, 2, 3, 4, 5, 6, 7, 8]
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install system dependencies
         # A healthy but slow Ubuntu mirror can take over five minutes for indexes.
         timeout-minutes: 10
@@ -262,7 +262,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: ${{ inputs.coverage && 'backend-coverage-build' || 'backend-test-build' }}-inventory

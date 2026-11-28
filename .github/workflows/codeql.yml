@@ -27,7 +27,7 @@ jobs:
     outputs:
       languages: ${{ steps.matrix.outputs.languages }}
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # The merge commit and both parents normally supply the complete diff.
           # paths-filter fetches the base SHA if it is not already available.
@@ -73,7 +73,7 @@ jobs:
         language: ${{ fromJSON(needs.changes.outputs.languages || '["actions","javascript-typescript","python","rust"]') }}
     steps:
       - name: Checkout
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Prepare Rust scope
         if: matrix.language == 'rust'

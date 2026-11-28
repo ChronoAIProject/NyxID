@@ -51,7 +51,7 @@ jobs:
       jobs: ${{ steps.decide.outputs.jobs }}
       coverage: ${{ steps.decide.outputs.coverage }}
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
@@ -131,7 +131,7 @@ jobs:
     outputs:
       artifact_id: ${{ steps.identity.outputs.artifact_id }}
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Derive one UUID for both frontend architectures
         id: identity
         run: echo "artifact_id=$(python3 .github/scripts/crash-artifact-id.py)" >> "$GITHUB_OUTPUT"
@@ -179,7 +179,7 @@ jobs:
             context: .
             file: cli/Dockerfile.machine-updater
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Verify packaged PDF renderer on native architecture
         if: matrix.component == 'backend'
@@ -408,7 +408,7 @@ jobs:
       queue: max
     timeout-minutes: 65
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           sparse-checkout: .github/scripts
