@@ -22,13 +22,14 @@ use super::{
 
 pub async fn poll(
     db: &Database,
+    hmac_key: &[u8],
     encryption_keys: &EncryptionKeys,
     input: DeviceCodePollInput,
 ) -> AppResult<DeviceCodePoll> {
     // A storage-only rewrap may win the claim's exact-source comparison.
     // Recheck the signed request and deadline against the winning row.
     for _ in 0..3 {
-        if let Some(result) = poll_once(db, encryption_keys, &input).await? {
+        if let Some(result) = poll_once(db, encryption_keys, hmac_key, &input).await? {
             return Ok(result);
         }
     }
@@ -38,6 +39,7 @@ pub async fn poll(
 async fn poll_once(
     db: &Database,
     encryption_keys: &EncryptionKeys,
+    hmac_key: &[u8],
     input: &DeviceCodePollInput,
 ) -> AppResult<Option<DeviceCodePoll>> {
     let now = Utc::now();
@@ -70,7 +72,7 @@ async fn poll_once(
         .try_into()
         .map_err(|_| AppError::Internal("stored device_pubkey is not 32 bytes".to_string()))?;
 
-    if is_pubkey_locked(db, &pubkey, now).await? {
+    if is_locked(row.locked_until, now) || is_pubkey_locked(db, &pubkey, now).await? {
         return Err(AppError::DeviceCodeLocked);
     }
 
@@ -82,9 +84,14 @@ async fn poll_once(
         input.timestamp,
         &input.signature,
     ) {
-        record_signature_failure(&collection, &row.id, now).await?;
-        let pubkey_lockout = record_pubkey_signature_failure(db, &pubkey, now).await?;
-        if is_locked(pubkey_lockout.locked_until, now) {
+        let row_locked = record_signature_failure(&collection, &row.id, now).await?;
+        if row.last_poll_timestamp.is_some() {
+            let lockout = record_pubkey_signature_failure(db, &pubkey, now).await?;
+            if is_locked(lockout.locked_until, now) {
+                return Err(AppError::DeviceCodeLocked);
+            }
+        }
+        if row_locked {
             return Err(AppError::DeviceCodeLocked);
         }
         return Err(error);
@@ -98,7 +105,26 @@ async fn poll_once(
 
     match row.status {
         DeviceCodeStatus::Pending => {
-            let current_user_code = rotate_and_persist_pending_poll(db, &mut row, now).await?;
+            let format = if row
+                .user_code_history
+                .first()
+                .is_some_and(|g| g.display_nonce.is_some())
+            {
+                super::rotation::CodeFormat::Hmac {
+                    key: hmac_key,
+                    device_code: &input.device_code,
+                }
+            } else {
+                super::rotation::CodeFormat::Legacy
+            };
+            let current_user_code = rotate_and_persist_pending_poll_with_generator(
+                db,
+                &mut row,
+                now,
+                format,
+                generate_user_code,
+            )
+            .await?;
             Ok(Some(DeviceCodePoll::Pending {
                 current_user_code,
                 interval: DEVICE_CODE_POLL_INTERVAL_SECS,
@@ -161,33 +187,29 @@ fn verify_poll_timestamp(row: &DeviceCode, timestamp: i64, now: DateTime<Utc>) -
     Ok(())
 }
 
-async fn rotate_and_persist_pending_poll(
-    db: &Database,
-    row: &mut DeviceCode,
-    now: DateTime<Utc>,
-) -> AppResult<String> {
-    rotate_and_persist_pending_poll_with_generator(db, row, now, generate_user_code).await
-}
-
 async fn rotate_and_persist_pending_poll_with_generator<F>(
     db: &Database,
     row: &mut DeviceCode,
     now: DateTime<Utc>,
+    format: super::rotation::CodeFormat<'_>,
     mut user_code_generator: F,
 ) -> AppResult<String>
 where
     F: FnMut() -> String,
 {
     let original_history = row.user_code_history.clone();
+    let previous = original_history
+        .first()
+        .ok_or_else(|| AppError::Internal("device code has no user code history".to_owned()))?;
     let original_last_rotated_at = row.last_rotated_at;
 
     for attempt in 0..=DEVICE_CODE_USER_CODE_WRITE_RETRIES {
         row.user_code_history = original_history.clone();
         row.last_rotated_at = original_last_rotated_at;
         let current_user_code =
-            rotate_user_code_if_needed_with_generator(row, now, &mut user_code_generator)?;
+            rotate_user_code_if_needed_with_generator(row, now, format, &mut user_code_generator)?;
 
-        match persist_successful_poll(db, row).await {
+        match persist_successful_poll(db, row, &previous.code).await {
             Ok(()) => return Ok(current_user_code),
             Err(AppError::DatabaseError(error))
                 if is_duplicate_key_error(&error)
@@ -279,7 +301,11 @@ async fn claim_approved_delivery(
     Ok(claimed.matched_count == 1)
 }
 
-async fn persist_successful_poll(db: &Database, row: &DeviceCode) -> AppResult<()> {
+async fn persist_successful_poll(
+    db: &Database,
+    row: &DeviceCode,
+    previous_code: &str,
+) -> AppResult<()> {
     let set_doc = doc! {
         "failed_poll_count": 0_i64,
         "lock_alert_sent_at": bson::Bson::Null,
@@ -290,9 +316,18 @@ async fn persist_successful_poll(db: &Database, row: &DeviceCode) -> AppResult<(
         "last_rotated_at": bson::DateTime::from_chrono(row.last_rotated_at),
     };
 
-    db.collection::<DeviceCode>(DEVICE_CODES)
-        .update_one(doc! { "_id": &row.id }, doc! { "$set": set_doc })
+    let timestamp = row.last_poll_timestamp.expect("set before persist");
+    let result = db.collection::<DeviceCode>(DEVICE_CODES)
+        .update_one(doc! { "_id": &row.id, "status": "pending", "user_code_history.0.code": previous_code,
+            "$and": [
+                {"$or": [{"last_poll_timestamp": bson::Bson::Null}, {"last_poll_timestamp": {"$lt": timestamp}}]},
+                {"$or": [{"locked_until": bson::Bson::Null}, {"locked_until": {"$lte": bson::DateTime::now()}}]}
+            ],
+        }, doc! { "$set": set_doc })
         .await?;
+    if result.matched_count == 0 {
+        return Err(AppError::DeviceCodeSlowDown);
+    }
     Ok(())
 }
 
@@ -304,6 +339,7 @@ mod tests {
         COLLECTION_NAME as DEVICE_PUBKEY_LOCKOUTS, DevicePubkeyLockout,
     };
     use crate::services::device_code_service::DEVICE_CODE_ROTATE_SECS;
+    use crate::services::device_code_service::tests_support::hmac_key;
     use crate::services::device_code_service::tests_support::{setup_pending_row, sign_poll};
     use crate::test_utils::test_encryption_keys;
     use chrono::Duration;
@@ -339,8 +375,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn poll_wrong_signature_increments_and_locks_at_threshold() {
-        let Some((db, response, _key)) = setup_pending_row("device_code_poll_wrong_sig").await
+    async fn unproven_session_locks_only_its_issued_code() {
+        let Some((db, response, key)) = setup_pending_row("device_code_poll_wrong_sig").await
         else {
             return;
         };
@@ -374,6 +410,24 @@ mod tests {
             .unwrap();
         assert_eq!(row.failed_poll_count, 3);
         assert!(row.locked_until.is_some());
+        assert_eq!(
+            db.collection::<DevicePubkeyLockout>(DEVICE_PUBKEY_LOCKOUTS)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        let timestamp = Utc::now().timestamp();
+        let result = poll_for_test(
+            &db,
+            DeviceCodePollInput {
+                device_code: response.device_code.clone(),
+                timestamp,
+                signature: sign_poll(&response.device_code, timestamp, &key),
+            },
+        )
+        .await;
+        assert!(matches!(result, Err(AppError::DeviceCodeLocked)));
     }
 
     #[tokio::test]
@@ -437,6 +491,7 @@ mod tests {
         };
         let second_response = crate::services::device_code_service::initiate(
             &db,
+            &hmac_key(),
             crate::services::device_code_service::DeviceCodeInitiateInput {
                 device_pubkey: key.verifying_key().to_bytes(),
                 hw_id: "esp32-p4-cam-2".to_string(),
@@ -449,6 +504,19 @@ mod tests {
         let wrong_key = SigningKey::from_bytes(&[88u8; 32]);
         let base_timestamp = Utc::now().timestamp();
 
+        for response in [&first_response, &second_response] {
+            let timestamp = base_timestamp - 1;
+            poll_for_test(
+                &db,
+                DeviceCodePollInput {
+                    device_code: response.device_code.clone(),
+                    timestamp,
+                    signature: sign_poll(&response.device_code, timestamp, &key),
+                },
+            )
+            .await
+            .unwrap();
+        }
         for attempt in 0..2 {
             let timestamp = base_timestamp + attempt;
             let error = poll_for_test(
@@ -652,6 +720,7 @@ mod tests {
             device_code_hash: "cafebabe".repeat(8),
             hw_id: "esp32-holder".to_string(),
             user_code_history: vec![UserCodeGen {
+                display_nonce: None,
                 code: duplicate_code.clone(),
                 generated_at: now,
             }],
@@ -666,14 +735,20 @@ mod tests {
         row.last_polled_at = Some(now);
         row.last_poll_timestamp = Some(now.timestamp());
         let mut calls = 0;
-        let current = rotate_and_persist_pending_poll_with_generator(&db, &mut row, now, || {
-            calls += 1;
-            if calls == 1 {
-                duplicate_code.clone()
-            } else {
-                unique_code.clone()
-            }
-        })
+        let current = rotate_and_persist_pending_poll_with_generator(
+            &db,
+            &mut row,
+            now,
+            super::super::rotation::CodeFormat::Legacy,
+            || {
+                calls += 1;
+                if calls == 1 {
+                    duplicate_code.clone()
+                } else {
+                    unique_code.clone()
+                }
+            },
+        )
         .await
         .expect("retry duplicate rotation");
 
@@ -824,7 +899,7 @@ mod tests {
 
     async fn poll_for_test(db: &Database, input: DeviceCodePollInput) -> AppResult<DeviceCodePoll> {
         let encryption_keys = test_encryption_keys();
-        poll(db, &encryption_keys, input).await
+        poll(db, &hmac_key(), &encryption_keys, input).await
     }
 
     async fn approve_for_test(db: &Database, code: &str) {

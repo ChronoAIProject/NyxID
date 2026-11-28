@@ -1,4 +1,5 @@
 //! This fixture drives both revisions' approval and signed poll entry points.
+use super::tests_support::hmac_key;
 use super::*;
 use crate::{
     crypto::{aes::EncryptionKeys, token::hash_token},
@@ -68,6 +69,7 @@ async fn issue(db: &Database, keys: &EncryptionKeys) -> Vec<Request> {
     for organization in [false, true] {
         let pending = initiate(
             db,
+            &hmac_key(),
             DeviceCodeInitiateInput {
                 device_pubkey: signer(organization).verifying_key().to_bytes(),
                 hw_id: "unit-test-node".into(),
@@ -79,6 +81,7 @@ async fn issue(db: &Database, keys: &EncryptionKeys) -> Vec<Request> {
         .unwrap();
         let approval = approve(
             db,
+            &hmac_key(),
             keys,
             &actor,
             DeviceCodeApproveInput {
@@ -160,7 +163,7 @@ async fn restore(db: &Database, file: &Path) -> Vec<Request> {
 async fn inspect(db: &Database, keys: &EncryptionKeys, requests: &[Request], step: &str) {
     let docs = db.collection::<Document>(COLLECTION_NAME);
     for request in requests {
-        let result = poll(db, keys, request.signed()).await;
+        let result = poll(db, &hmac_key(), keys, request.signed()).await;
         if step == "reject" || step == "legacy-claim-error" {
             assert!(result.is_err());
         } else {
@@ -199,7 +202,7 @@ async fn inspect(db: &Database, keys: &EncryptionKeys, requests: &[Request], ste
                 assert!(!row.contains_key("delivery_context_version"));
             }
             assert!(matches!(
-                poll(db, keys, request.signed()).await,
+                poll(db, &hmac_key(), keys, request.signed()).await,
                 Err(AppError::DeviceCodeAlreadyDelivered)
             ));
         }
@@ -297,7 +300,11 @@ async fn migrate_signed_deliveries_from_the_base_writer() {
         let mut swapped = after.clone();
         swapped.insert(record::API_KEY, after.get(record::REFRESH).unwrap().clone());
         docs.replace_one(request.filter(), &swapped).await.unwrap();
-        assert!(poll(&db, &keys, request.signed()).await.is_err());
+        assert!(
+            poll(&db, &hmac_key(), &keys, request.signed())
+                .await
+                .is_err()
+        );
         assert!(docs.find_one(request.filter()).await.unwrap().unwrap() == swapped);
         docs.replace_one(request.filter(), after).await.unwrap();
     }
@@ -342,7 +349,7 @@ async fn legacy_terminal_marker_clears_without_reissuing() {
         assert!(after == expected);
         record::verify(&keys, &after).await.unwrap();
         assert!(matches!(
-            poll(&db, &keys, request.signed()).await,
+            poll(&db, &hmac_key(), &keys, request.signed()).await,
             Err(AppError::DeviceCodeAlreadyDelivered)
         ));
     }
@@ -366,7 +373,7 @@ async fn signed_claim_expiry_and_ttl_fence_storage() {
             .await
             .unwrap();
             assert!(matches!(
-                poll(&db, &keys, request.signed()).await,
+                poll(&db, &hmac_key(), &keys, request.signed()).await,
                 Err(AppError::DeviceCodeExpired)
             ));
             let expired = docs.find_one(request.filter()).await.unwrap().unwrap();
@@ -387,14 +394,15 @@ async fn signed_claim_expiry_and_ttl_fence_storage() {
                 ..request.signed()
             };
             assert!(matches!(
-                poll(&db, &keys, wrong).await,
+                poll(&db, &hmac_key(), &keys, wrong).await,
                 Err(AppError::DevicePollSignatureInvalid(_))
             ));
             let sealed = docs.find_one(request.filter()).await.unwrap().unwrap();
             record::verify(&keys, &sealed).await.unwrap();
+            let approval_key = hmac_key();
             let (a, b) = tokio::join!(
-                poll(&db, &keys, request.signed()),
-                poll(&db, &keys, request.signed())
+                poll(&db, &approval_key, &keys, request.signed()),
+                poll(&db, &approval_key, &keys, request.signed())
             );
             let results = [a, b];
             assert_eq!(
@@ -571,7 +579,8 @@ async fn signed_poll_rechecks_the_winning_rewrap_or_expiry() {
             }
             provider.resume.notify_one();
         };
-        let (result, ()) = tokio::join!(poll(&db, &keys, request.signed()), change);
+        let approval_key = hmac_key();
+        let (result, ()) = tokio::join!(poll(&db, &approval_key, &keys, request.signed()), change);
         let after = docs.find_one(request.filter()).await.unwrap().unwrap();
         if request.org {
             assert!(matches!(result, Err(AppError::DeviceCodeExpired)));
