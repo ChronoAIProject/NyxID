@@ -7655,9 +7655,20 @@ pub async fn retry_duplicate(
     digest: &str,
 ) -> AppResult<bool> {
     retry_duplicate_any(db, user_id, conversation_id, turn_id, digest, None, || {
-        vec![digest.to_owned()]
+        RetryDigestCandidates {
+            conclusive: vec![digest.to_owned()],
+            lossy: vec![],
+        }
     })
     .await
+}
+
+/// Runtime derivations, never persisted as proof of a completed effect.
+/// Lossy legacy hashes preserve refusal safety without inventing v2 evidence.
+#[derive(Default)]
+pub struct RetryDigestCandidates {
+    pub conclusive: Vec<String>,
+    pub lossy: Vec<String>,
 }
 
 pub async fn retry_duplicate_any(
@@ -7667,7 +7678,7 @@ pub async fn retry_duplicate_any(
     turn_id: &str,
     identity: &str,
     review_tool: Option<&str>,
-    historical: impl FnOnce() -> Vec<String>,
+    historical: impl FnOnce() -> RetryDigestCandidates,
 ) -> AppResult<bool> {
     let row = db
         .collection::<bson::Document>(CONVERSATIONS)
@@ -7718,13 +7729,19 @@ pub async fn retry_duplicate_any(
     if identities.iter().any(|value| value == identity) {
         return Ok(true);
     }
+    let mut lossy_match = false;
     if !old.is_empty() {
         let candidates = historical();
-        if candidates.iter().any(|value| old.contains(value)) {
+        if candidates
+            .conclusive
+            .iter()
+            .any(|value| old.contains(value))
+        {
             return Ok(true);
         }
+        lossy_match = candidates.lossy.iter().any(|value| old.contains(value));
     }
-    if review_tool.is_some() && review {
+    if lossy_match || (review_tool.is_some() && review) {
         return Err(AppError::Conflict("Historical completed effects cannot be distinguished from this request. Review completed actions before starting new work; no call was dispatched.".into()));
     }
     Ok(false)

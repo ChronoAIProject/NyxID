@@ -198,7 +198,7 @@ async fn retry_provider_wrappers_do_not_repeat_completed_effects() {
         );
         for form in 0..4 {
             let response = result(invoke(&f, invocation(tool, &args, form)).await, true).await;
-            let expected = if legacy && first_form == 4 {
+            let expected = if legacy && matches!(first_form, 1 | 4) {
                 "retry_evidence_requires_review"
             } else {
                 "retry_duplicate_action"
@@ -251,28 +251,7 @@ async fn retry_provider_wrappers_do_not_repeat_completed_effects() {
     }
 }
 
-#[tokio::test]
-async fn retry_provider_literal_argument_types_survive_activity_finalization() {
-    let f = orchestrator_fixture("retry_provider_literal_types").await;
-    assert!(
-        !engine::retry_duplicate_any(
-            &f.state.db,
-            &f.owner,
-            &f.row.id,
-            f.chat.turn_id.as_deref().unwrap(),
-            "v2:unused",
-            Some("nyx-typed__write"),
-            || panic!("ordinary turn must not expand legacy hashes")
-        )
-        .await
-        .unwrap()
-    );
-    let server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/typed"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"saved":true})))
-        .mount(&server)
-        .await;
+async fn typed_provider(f: &Fixture, server: &MockServer) -> &'static str {
     let mut catalog = crate::test_utils::test_auto_connected_catalog_service();
     catalog.slug = "nyx-typed".into();
     catalog.name = "Synthetic typed provider".into();
@@ -323,11 +302,11 @@ async fn retry_provider_literal_argument_types_survive_activity_finalization() {
             "request_body_schema":{"type":"object","properties":{"arguments_json":{}},"required":["arguments_json"]},
             "created_at":now,"updated_at":now}).await.unwrap();
     let tool = "nyx-typed__write";
-    let schema = discovered_tool(&f, &service, tool).await;
+    let schema = discovered_tool(f, &service, tool).await;
     assert_eq!(schema["required"], json!(["arguments_json"]));
     assert_eq!(schema["properties"]["arguments_json"], json!({}));
     assert!(schema["properties"].get("body").is_none());
-    let auth = authenticate(&f).await;
+    let auth = authenticate(f).await;
     let loaded = load_all_services_for_meta_tools(&f.state, &auth)
         .await
         .unwrap();
@@ -337,6 +316,32 @@ async fn retry_provider_literal_argument_types_survive_activity_finalization() {
         user_service_id, catalog_service_id: Some(id), ..
     } if user_service_id == &service && id == &catalog.id)
     );
+    tool
+}
+
+#[tokio::test]
+async fn retry_provider_literal_argument_types_survive_activity_finalization() {
+    let f = orchestrator_fixture("retry_provider_literal_types").await;
+    assert!(
+        !engine::retry_duplicate_any(
+            &f.state.db,
+            &f.owner,
+            &f.row.id,
+            f.chat.turn_id.as_deref().unwrap(),
+            "v2:unused",
+            Some("nyx-typed__write"),
+            || panic!("ordinary turn must not expand legacy hashes")
+        )
+        .await
+        .unwrap()
+    );
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/typed"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"saved":true})))
+        .mount(&server)
+        .await;
+    let tool = typed_provider(&f, &server).await;
     let string = json!({"arguments_json":"{\"value\":1}"});
     let object = json!({"arguments_json":{"value":1}});
     let original = invocation(tool, &string, 0);
@@ -703,9 +708,9 @@ async fn retry_new_native_writer_preserves_base_reader_fences() {
             retry_current(&f).await;
             let old = base_admission_digests(&f, &old_turn).await;
             assert!(old.contains(&expected));
-            // A base replica admits only these existing fields. Modern
-            // transport then consumes that base-admitted Retry without an
-            // additive retry_match, using the same frozen base candidates.
+            // Simulate base admission using only its projected fields. The
+            // current transport consumes that simulated Retry without additive
+            // retry_match, using the independent frozen base candidates.
             f.state
                 .db
                 .collection::<bson::Document>(
@@ -855,7 +860,7 @@ async fn retry_old_native_writer_requires_review_for_retired_handles() {
                 "retry_evidence_requires_review"
             );
             // Native reads remain available; the exact setup reader exception
-            // may run repeatedly, even on a Retry admitted by a base replica.
+            // may run repeatedly with the simulated base-admission metadata.
             for name in [
                 "nyxid__list_schedules",
                 "nyxid__get_agent_skills",
@@ -918,7 +923,7 @@ async fn retry_old_normalized_native_writer_keeps_known_duplicate_fences() {
             activity.insert("digest", exact);
             activity.insert("retry_identity", normalized);
             activity.remove("business_identity");
-            // Faithful base writer layout, independent of current normalization.
+            // Simulate the base writer layout with independent frozen hashes.
             f.state
                 .db
                 .collection::<bson::Document>(
@@ -949,6 +954,23 @@ async fn retry_old_normalized_native_writer_keeps_known_duplicate_fences() {
     }
 }
 
+async fn assert_pending_schedule_run(f: &Fixture, trigger: &str, run: &str) {
+    let runs = f
+        .state
+        .db
+        .collection::<bson::Document>(crate::models::trigger_run::COLLECTION_NAME);
+    assert_eq!(
+        runs.count_documents(doc! {"trigger_id":trigger})
+            .await
+            .unwrap(),
+        1
+    );
+    let saved = runs.find_one(doc! {"_id":run}).await.unwrap().unwrap();
+    assert_eq!(saved.get_str("trigger_id").unwrap(), trigger);
+    assert_eq!(saved.get_str("user_id").unwrap(), f.owner);
+    assert_eq!(saved.get_str("outcome").unwrap(), "pending");
+}
+
 #[tokio::test]
 async fn retry_decorated_legacy_run_schedule_now_does_not_enqueue_again() {
     let f = orchestrator_fixture("retry_legacy_run_schedule_now").await;
@@ -963,31 +985,38 @@ async fn retry_decorated_legacy_run_schedule_now_does_not_enqueue_again() {
         0
     );
     let args = json!({"id":id});
-    let decorated = invocation("nyxid__run_schedule_now", &args, 4);
+    // A nested wrapper preserves the input type in its historical hash. The
+    // ignored decoration prevents reconstruction from ordinary invocation
+    // forms, but the exact historical request can still prove this effect.
+    let decorated = json!({"name":"nyx__call_tool","arguments":{
+        "tool_name":"nyxid__run_schedule_now","arguments":args,
+        "id":"ignored-outer-selector","decoration":"historical"}});
+    let expected_identity = format!(
+        "v2:{}",
+        crate::services::assistant_continuation::canonical_digest(
+            &json!({"name":"nyxid__run_schedule_now","arguments":{"id":id}})
+        )
+    );
+    assert_eq!(chat_retry_digest(&decorated), expected_identity);
+    let historical = base_exact(&decorated);
+    let candidates = retry_identity::matching_digests(&decorated);
+    assert!(candidates.conclusive.contains(&historical));
+    assert!(!candidates.lossy.contains(&historical));
     let queued = result(invoke(&f, decorated.clone()).await, false).await;
     let run = queued["run"]["id"].as_str().unwrap();
-    assert_eq!(
-        runs.count_documents(doc! {"trigger_id":id}).await.unwrap(),
-        1
-    );
-    assert_eq!(
-        runs.find_one(doc! {"_id":run})
-            .await
-            .unwrap()
-            .unwrap()
-            .get_str("outcome")
-            .unwrap(),
-        "pending"
-    );
+    assert_pending_schedule_run(&f, id, run).await;
     let row = engine::get(&f.state.db, &f.owner, &f.row.id).await.unwrap();
     let activities = &row.active_turn.as_ref().unwrap().activities;
     let last = activities.last().unwrap();
     assert_eq!(last.label, "nyxid__run_schedule_now");
     assert_eq!(last.status, "completed");
+    assert_eq!(last.digest.as_deref(), Some(historical.as_str()));
     assert_eq!(
-        last.digest.as_deref(),
-        Some(base_exact(&decorated).as_str())
+        last.business_identity.as_deref(),
+        Some(expected_identity.as_str())
     );
+    // The effect above uses the current dispatcher. Removing additive evidence
+    // simulates a base-writer snapshot; no old server binary executes here.
     let index = activities.len() - 1;
     f.state
         .db
@@ -1000,68 +1029,121 @@ async fn retry_decorated_legacy_run_schedule_now_does_not_enqueue_again() {
         )
         .await
         .unwrap();
-    let retry = retry_current(&f).await;
-    assert!(
-        retry
+    let mut retry = retry_current(&f).await;
+    for phase in 0..2 {
+        let evidence = retry
             .active_turn
             .as_ref()
             .unwrap()
             .retry_match
             .as_ref()
-            .unwrap()
-            .historical_native_tools
-            .contains(&"nyxid__run_schedule_now".to_string())
-    );
-    for form in 0..4 {
-        let refused = result(
-            invoke(&f, invocation("nyxid__run_schedule_now", &args, form)).await,
-            true,
-        )
-        .await;
-        assert_eq!(
-            refused["error"], "retry_evidence_requires_review",
-            "{refused}"
+            .unwrap();
+        assert!(
+            evidence
+                .historical_native_tools
+                .contains(&"nyxid__run_schedule_now".to_string())
         );
-        assert_eq!(
-            refused["message"],
-            "Historical completed effects cannot be distinguished from this request. Review completed actions before starting new work; no call was dispatched."
-        );
+        assert!(evidence.historical_digests.contains(&historical));
+        assert!(!evidence.identities.contains(&expected_identity));
+        for form in 0..4 {
+            assert_review_without_activity(&f, invocation("nyxid__run_schedule_now", &args, form))
+                .await;
+        }
+        assert_pending_schedule_run(&f, id, run).await;
+        if phase == 0 {
+            // Review-only refusals persist through Retry without inventing a
+            // completed action or its v2 identity.
+            let prior = retry.active_turn.as_ref().unwrap().turn_id.clone();
+            retry = retry_current(&f).await;
+            assert_eq!(
+                retry.active_turn.as_ref().unwrap().retry_of.as_deref(),
+                Some(prior.as_str())
+            );
+            let saved = f
+                .state
+                .db
+                .collection::<bson::Document>(crate::models::assistant_message::COLLECTION_NAME)
+                .find_one(doc! {"conversation_id":&f.row.id,"turn_id":&prior,"role":"assistant"})
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(saved.get_array("activities").unwrap().is_empty());
+            assert_eq!(saved.get_i64("activity_count").unwrap(), 0);
+        }
     }
-    let row = engine::get(&f.state.db, &f.owner, &f.row.id).await.unwrap();
-    assert!(row.active_turn.as_ref().unwrap().activities.is_empty());
-    // Actual closed reads and a provably different native write remain usable.
+    // Closed reads and a provably different native write remain usable before
+    // the conclusive match; neither supplies run_schedule_now evidence.
     result(
         invoke(&f, invocation("nyxid__list_schedules", &json!({}), 2)).await,
         false,
     )
     .await;
     native_effect(&f, "nyxid__remember", 0).await;
+    let row = engine::get(&f.state.db, &f.owner, &f.row.id).await.unwrap();
+    let before_proof = row.active_turn.as_ref().unwrap().activities.len();
+    assert_eq!(before_proof, 2);
+    let duplicate_wire = json!({"error":"retry_duplicate_action",
+        "message":"This exact call already completed in the failed turn this turn retries. Use that result instead of repeating it; change the arguments only if a different action is intended."});
     assert_eq!(
-        result(invoke(&f, decorated).await, true).await["error"],
+        result(invoke(&f, decorated).await, true).await,
+        duplicate_wire
+    );
+    assert_pending_schedule_run(&f, id, run).await;
+    let row = engine::get(&f.state.db, &f.owner, &f.row.id).await.unwrap();
+    let turn = row.active_turn.as_ref().unwrap();
+    assert_eq!(turn.activities.len(), before_proof + 1);
+    let proof = turn.activities.last().unwrap();
+    assert_eq!(proof.label, "nyxid__run_schedule_now");
+    assert_eq!(proof.status, "completed");
+    assert_eq!(
+        proof.failure.as_ref().unwrap().kind,
         "retry_duplicate_action"
     );
-    retry_current(&f).await;
+    assert_eq!(proof.digest.as_deref(), Some(historical.as_str()));
+    assert_eq!(proof.retry_identity.as_deref(), Some(historical.as_str()));
     assert_eq!(
-        result(
-            invoke(&f, invocation("nyxid__run_schedule_now", &args, 0)).await,
-            true
-        )
-        .await["error"],
-        "retry_evidence_requires_review"
+        proof.business_identity.as_deref(),
+        Some(expected_identity.as_str())
     );
-    assert_eq!(
-        runs.count_documents(doc! {"trigger_id":id}).await.unwrap(),
-        1
-    );
-    assert_eq!(
-        runs.find_one(doc! {"_id":run})
-            .await
+    let proof_turn = turn.turn_id.clone();
+    let retry = retry_current(&f).await;
+    let turn = retry.active_turn.as_ref().unwrap();
+    assert_eq!(turn.retry_of.as_deref(), Some(proof_turn.as_str()));
+    assert!(
+        turn.retry_match
+            .as_ref()
             .unwrap()
-            .unwrap()
-            .get_str("outcome")
-            .unwrap(),
-        "pending"
+            .identities
+            .contains(&expected_identity)
     );
+    // Genuine historical proof has established this precise semantic identity.
+    // Later Retry refuses each equivalent form as a proven duplicate.
+    for form in 0..4 {
+        assert_eq!(
+            result(
+                invoke(&f, invocation("nyxid__run_schedule_now", &args, form)).await,
+                true
+            )
+            .await,
+            duplicate_wire
+        );
+    }
+    let row = engine::get(&f.state.db, &f.owner, &f.row.id).await.unwrap();
+    let turn = row.active_turn.as_ref().unwrap();
+    assert_eq!(turn.activities.len(), 4);
+    for proof in &turn.activities {
+        assert_eq!(proof.label, "nyxid__run_schedule_now");
+        assert_eq!(proof.status, "completed");
+        assert_eq!(
+            proof.failure.as_ref().unwrap().kind,
+            "retry_duplicate_action"
+        );
+        assert_eq!(
+            proof.business_identity.as_deref(),
+            Some(expected_identity.as_str())
+        );
+    }
+    assert_pending_schedule_run(&f, id, run).await;
     f.state.db.drop().await.unwrap();
 }
 
@@ -1135,4 +1217,221 @@ async fn retry_new_memory_recovery_writer_preserves_base_reader_fences() {
     }
     assert_native_effect_count(&f, "nyxid__remember").await;
     f.state.db.drop().await.unwrap();
+}
+
+async fn retain_base_provider_evidence(f: &Fixture, original: &Value) {
+    let row = engine::get(&f.state.db, &f.owner, &f.row.id).await.unwrap();
+    let activities = &row.active_turn.as_ref().unwrap().activities;
+    let last = activities.last().unwrap();
+    assert_eq!(last.status, "completed");
+    assert_eq!(last.label, "nyx-typed__write");
+    assert_eq!(last.digest.as_deref(), Some(base_exact(original).as_str()));
+    let index = activities.len() - 1;
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&f.row.id},
+            doc! {"$unset":{
+            format!("active_turn.activities.{index}.business_identity"):""},
+            "$set":{format!("active_turn.activities.{index}.retry_identity"):base_exact(original)}},
+        )
+        .await
+        .unwrap();
+}
+
+async fn assert_review_without_activity(f: &Fixture, params: Value) {
+    let response = result(invoke(f, params).await, true).await;
+    assert_eq!(
+        response["error"], "retry_evidence_requires_review",
+        "{response}"
+    );
+    assert_eq!(
+        response["message"],
+        "Historical completed effects cannot be distinguished from this request. Review completed actions before starting new work; no call was dispatched."
+    );
+    let row = engine::get(&f.state.db, &f.owner, &f.row.id).await.unwrap();
+    let turn = row.active_turn.as_ref().unwrap();
+    assert!(
+        turn.activities.is_empty(),
+        "ambiguous hashes cannot create completed v2 evidence"
+    );
+    assert_eq!(turn.activity_count, Some(0));
+}
+
+#[tokio::test]
+async fn retry_legacy_provider_lossy_hashes_never_create_completed_business_evidence() {
+    let compact = json!("{\"value\":1}");
+    let spaced = json!(" { \"value\" : 1 } ");
+    let object = json!({"value":1});
+    let literal = json!("literal");
+    let quoted = json!("\"literal\"");
+    for (before, after) in [
+        (compact.clone(), object.clone()),
+        (object.clone(), compact.clone()),
+        (spaced.clone(), object.clone()),
+        (object.clone(), spaced.clone()),
+        (compact.clone(), spaced.clone()),
+        (spaced.clone(), compact.clone()),
+        (literal.clone(), quoted.clone()),
+        (quoted, literal),
+    ] {
+        assert_ne!(before, after);
+        let f = orchestrator_fixture("retry_legacy_lossy_provider").await;
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/typed"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"saved":true})))
+            .mount(&server)
+            .await;
+        let tool = typed_provider(&f, &server).await;
+        let before = json!({"arguments_json":before});
+        let after = json!({"arguments_json":after});
+        let original = invocation(tool, &before, 0);
+        let next = invocation(tool, &after, 0);
+        assert_eq!(base_exact(&original), base_exact(&next));
+        assert_ne!(chat_retry_digest(&original), chat_retry_digest(&next));
+        assert_provider_success(&f, original.clone()).await;
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].body_json::<Value>().unwrap(), before);
+        retain_base_provider_evidence(&f, &original).await;
+        retry_current(&f).await;
+        for _ in 0..2 {
+            for args in [&after, &before] {
+                for form in [0, 1, 2] {
+                    let params = invocation(tool, args, form);
+                    let candidates = retry_identity::matching_digests(&params);
+                    let historical = base_exact(&original);
+                    assert!(candidates.lossy.contains(&historical));
+                    assert!(!candidates.conclusive.contains(&historical));
+                    assert_review_without_activity(&f, params).await;
+                }
+            }
+            let row = engine::get(&f.state.db, &f.owner, &f.row.id).await.unwrap();
+            let previous = row.active_turn.as_ref().unwrap().turn_id.clone();
+            retry_current(&f).await;
+            let settled = f
+                .state
+                .db
+                .collection::<bson::Document>(crate::models::assistant_message::COLLECTION_NAME)
+                .find_one(doc! {"conversation_id":&f.row.id,"turn_id":&previous,"role":"assistant"})
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(settled.get_array("activities").unwrap().is_empty());
+            assert_eq!(settled.get_i64("activity_count").unwrap(), 0);
+            assert_eq!(server.received_requests().await.unwrap().len(), 1);
+        }
+        assert_review_without_activity(&f, invocation(tool, &after, 2)).await;
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+        f.state.db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn retry_legacy_provider_type_faithful_hashes_keep_truthful_duplicate_fences() {
+    for value in [
+        json!("{\"value\":1}"),
+        json!(" { \"value\" : 1 } "),
+        json!({"value":1}),
+    ] {
+        for same_fallback in [false, true] {
+            let f = orchestrator_fixture("retry_legacy_conclusive_provider").await;
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/typed"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({"saved":true})))
+                .mount(&server)
+                .await;
+            let tool = typed_provider(&f, &server).await;
+            let args = json!({"arguments_json":value});
+            let original = if same_fallback {
+                // Both historical JSON decoding and non-string fallback bind
+                // this identical input, so this exact hash remains conclusive.
+                json!({"name":"nyx__call_tool","arguments":{"tool_name":tool,
+                    "arguments_json":args.to_string(),"arguments":args}})
+            } else {
+                invocation(tool, &args, 2)
+            };
+            let candidates = retry_identity::matching_digests(&original);
+            assert!(candidates.conclusive.contains(&base_exact(&original)));
+            assert_provider_success(&f, original.clone()).await;
+            retain_base_provider_evidence(&f, &original).await;
+            retry_current(&f).await;
+            let mut changed = args.clone();
+            changed["arguments_json"] = json!({"value":"different"});
+            assert_review_without_activity(&f, invocation(tool, &changed, 0)).await;
+            let mut requests = vec![original.clone()];
+            if !same_fallback {
+                requests.extend((0..3).map(|form| invocation(tool, &args, form)));
+            }
+            for params in requests {
+                assert_eq!(
+                    result(invoke(&f, params).await, true).await["error"],
+                    "retry_duplicate_action"
+                );
+            }
+            let row = engine::get(&f.state.db, &f.owner, &f.row.id).await.unwrap();
+            for activity in &row.active_turn.as_ref().unwrap().activities {
+                assert_eq!(
+                    activity.failure.as_ref().unwrap().kind,
+                    "retry_duplicate_action"
+                );
+                assert_eq!(
+                    activity.business_identity.as_deref(),
+                    Some(chat_retry_digest(&original).as_str())
+                );
+            }
+            retry_current(&f).await;
+            assert_eq!(
+                result(invoke(&f, invocation(tool, &args, 0)).await, true).await["error"],
+                "retry_duplicate_action"
+            );
+            let requests = server.received_requests().await.unwrap();
+            assert_eq!(requests.len(), 1);
+            assert_eq!(requests[0].body_json::<Value>().unwrap(), args);
+            f.state.db.drop().await.unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn retry_legacy_wrapper_precedence_collisions_do_not_invent_completed_effects() {
+    for first_json in [false, true] {
+        let f = orchestrator_fixture("retry_legacy_wrapper_collision").await;
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/typed"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"saved":true})))
+            .mount(&server)
+            .await;
+        let tool = typed_provider(&f, &server).await;
+        let decoded = json!({"arguments_json":{"value":1}});
+        let fallback = json!({"arguments_json":{"value":2}});
+        let json_form = json!({"name":"nyx__call_tool","arguments":{
+            "tool_name":tool,"arguments_json":decoded.to_string(),"arguments":fallback}});
+        let mut object_form = json_form.clone();
+        object_form["arguments"]["arguments_json"] = decoded.clone();
+        let (original, next, expected) = if first_json {
+            (&json_form, &object_form, &decoded)
+        } else {
+            (&object_form, &json_form, &fallback)
+        };
+        assert_eq!(base_exact(original), base_exact(next));
+        assert_ne!(chat_retry_digest(original), chat_retry_digest(next));
+        assert_provider_success(&f, original.clone()).await;
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(&requests[0].body_json::<Value>().unwrap(), expected);
+        retain_base_provider_evidence(&f, original).await;
+        retry_current(&f).await;
+        for _ in 0..2 {
+            assert_review_without_activity(&f, next.clone()).await;
+            assert_review_without_activity(&f, original.clone()).await;
+            retry_current(&f).await;
+        }
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+        f.state.db.drop().await.unwrap();
+    }
 }

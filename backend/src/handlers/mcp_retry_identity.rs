@@ -113,24 +113,90 @@ pub(super) fn review_tool(params: &Value) -> Option<&str> {
     .then_some(name)
 }
 
-/// Old persisted activities retain their exact digests. Match the supplied form
-/// and standard historical direct/JSON/nested/flat encodings in either direction.
-/// Ignored arbitrary wrapper extras cannot be reconstructed from an old hash.
-pub(super) fn matching_digests(params: &Value) -> Vec<String> {
-    let mut values = vec![
-        digest(params),
-        super::chat_activity_digest(params),
-        super::legacy_chat_retry_digest(params),
-    ];
+/// Can the legacy hash prove the decoded business identity? Its parser replaces
+/// a top-level arguments_json string with JSON, including literal provider
+/// fields. Every direct field value has another possible string preimage.
+fn conclusive_exact(params: &Value) -> bool {
+    let Some(raw) = params["arguments"].get("arguments_json") else {
+        return true;
+    };
+    if params["name"] != "nyx__call_tool" || business_call(params).is_none() {
+        return false;
+    }
+    let parsed = raw
+        .as_str()
+        .and_then(|s| serde_json::from_str::<Value>(s).ok());
+    let normalized = parsed.as_ref().unwrap_or(raw);
+    let identity = digest(params);
+    // Both possible preimages must select the same business input: a JSON
+    // string (decoded first), and its parsed value (nested/flat fallback).
+    let mut alternate = params.clone();
+    alternate["arguments"]["arguments_json"] = json!(normalized.to_string());
+    if digest(&alternate) != identity {
+        return false;
+    }
+    alternate["arguments"]["arguments_json"] = normalized.clone();
+    // A string that parses again is not an unchanged preimage of this hash.
+    super::chat_activity_digest(&alternate) != super::chat_activity_digest(params)
+        || business_call(&alternate).is_none()
+        || digest(&alternate) == identity
+}
+
+fn historical_representation(
+    values: &mut crate::services::assistant_nyxagent::RetryDigestCandidates,
+    params: &Value,
+) {
+    let exact = super::chat_activity_digest(params);
+    let legacy = super::legacy_chat_retry_digest(params);
+    if conclusive_exact(params) {
+        values.conclusive.push(exact.clone());
+    } else {
+        values.lossy.push(exact.clone());
+    }
+    if legacy != exact {
+        // Only the closed schedule/memory normalization creates a different
+        // legacy digest. Classify its actual direct representation as well.
+        let Some(mut normalized) = business_call(params) else {
+            values.lossy.push(legacy);
+            return;
+        };
+        let field = match normalized["name"].as_str() {
+            Some("nyxid__create_schedule") => "acknowledgement_id",
+            Some("nyxid__remember") => "recovery",
+            _ => {
+                values.lossy.push(legacy);
+                return;
+            }
+        };
+        if let Some(args) = normalized["arguments"].as_object_mut() {
+            args.remove(field);
+        }
+        if conclusive_exact(&normalized) {
+            values.conclusive.push(legacy);
+        } else {
+            values.lossy.push(legacy);
+        }
+    }
+}
+
+/// Historical matching retains the proof quality of every derivation. A hash
+/// that erased provider types or wrapper precedence can only require review;
+/// it must never create completed v2 evidence for the requested business call.
+pub(super) fn matching_digests(
+    params: &Value,
+) -> crate::services::assistant_nyxagent::RetryDigestCandidates {
+    let mut values = crate::services::assistant_nyxagent::RetryDigestCandidates {
+        conclusive: vec![digest(params)],
+        lossy: vec![],
+    };
+    historical_representation(&mut values, params);
     if let Some(call) = business_call(params) {
         let name = &call["name"];
         let args = &call["arguments"];
         if call.get("result_query").is_none() {
-            let direct = json!({"name":name,"arguments":args});
-            values.push(super::chat_activity_digest(&direct));
-            values.push(super::legacy_chat_retry_digest(&direct));
+            historical_representation(&mut values, &json!({"name":name,"arguments":args}));
             if args == &json!({}) {
-                values.push(super::chat_activity_digest(&json!({"name":name})));
+                historical_representation(&mut values, &json!({"name":name}));
             }
         }
         let mut wrappers = vec![
@@ -150,19 +216,78 @@ pub(super) fn matching_digests(params: &Value) -> Vec<String> {
             if let Some(query) = call.get("result_query") {
                 wrapper["result_query"] = query.clone();
             }
-            let wrapped = json!({"name":"nyx__call_tool","arguments":wrapper});
-            values.push(super::chat_activity_digest(&wrapped));
-            values.push(super::legacy_chat_retry_digest(&wrapped));
+            historical_representation(
+                &mut values,
+                &json!({"name":"nyx__call_tool","arguments":wrapper}),
+            );
         }
     }
-    values.sort();
-    values.dedup();
+    values.conclusive.sort();
+    values.conclusive.dedup();
+    values.lossy.sort();
+    values.lossy.dedup();
     values
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retry_legacy_hash_derivations_distinguish_conclusive_and_lossy_inputs() {
+        for value in [
+            json!({"value":1}),
+            json!([1]),
+            json!(true),
+            Value::Null,
+            json!(1),
+            json!("literal"),
+            json!("\"literal\""),
+            json!("{\"value\":1}"),
+            json!(" { \"value\" : 1 } "),
+        ] {
+            let args = json!({"arguments_json":value});
+            let direct = json!({"name":"nyx-vendor__write","arguments":args});
+            let nested = json!({"name":"nyx__call_tool","arguments":{
+                "tool_name":"nyx-vendor__write","arguments":args}});
+            let historical = super::super::chat_activity_digest(&direct);
+            let candidates = matching_digests(&nested);
+            assert!(candidates.lossy.contains(&historical));
+            assert!(!candidates.conclusive.contains(&historical));
+            assert!(!conclusive_exact(&direct));
+            assert!(conclusive_exact(&nested));
+            let faithful = super::super::chat_activity_digest(&nested);
+            assert!(candidates.conclusive.contains(&faithful));
+        }
+        let decoded = json!({"arguments_json":" { \"value\" : 1 } "});
+        let fallback = json!({"arguments_json":{"value":2}});
+        let json_form = json!({"name":"nyx__call_tool","arguments":{
+            "tool_name":"nyx-vendor__write","arguments_json":decoded.to_string(),"arguments":fallback}});
+        let mut object_form = json_form.clone();
+        object_form["arguments"]["arguments_json"] = decoded.clone();
+        assert_eq!(
+            super::super::chat_activity_digest(&json_form),
+            super::super::chat_activity_digest(&object_form)
+        );
+        assert_ne!(digest(&json_form), digest(&object_form));
+        assert!(!conclusive_exact(&json_form));
+        assert!(!conclusive_exact(&object_form));
+        let mut safe = json_form.clone();
+        safe["arguments"]["arguments"] = decoded;
+        assert!(conclusive_exact(&safe));
+        // A malformed unchanged string cannot be a completed alternate
+        // preimage; JSON strings that decode scalar strings remain provable.
+        for scalar in [json!("literal"), json!("{}"), json!(" { \"value\" : 1 } ")] {
+            let wrapped = json!({"name":"nyx__call_tool","arguments":{
+                "tool_name":"nyx-vendor__write","arguments_json":scalar.to_string()}});
+            assert!(conclusive_exact(&wrapped));
+        }
+        for query in [Value::Null, json!({"invalid":true})] {
+            let malformed = json!({"name":"nyx__call_tool","arguments":{
+                "tool_name":"nyxid__create_schedule","arguments_json":"{}","result_query":query}});
+            matching_digests(&malformed); // Malformed calls refuse without panics.
+        }
+    }
 
     #[test]
     fn retry_historical_review_exceptions_require_closed_reads() {

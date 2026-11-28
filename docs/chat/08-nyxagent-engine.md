@@ -212,8 +212,16 @@ Additive `retry_match` separates v2 identities from historical hashes, so modern
 matching preserves input distinctions that legacy parsing erased. It is built
 from the bounded ancestry during Retry admission; the existing point lookup
 checks it without an additional database call. Ordinary turns do not expand
-historical wrapper hashes. Exact historical hashes and standard direct/JSON/
-nested/flat representations fence provable completed calls in both directions.
+historical wrapper hashes. Historical derivations distinguish conclusive hashes
+from lossy ones. A direct provider field named `arguments_json` has ambiguous
+legacy preimages for every value type, including literal strings and their
+whitespace. A universal wrapper is conclusive only when the legacy parser's
+possible successful JSON-string and nested/flat interpretations bind the same
+business input. Type-faithful direct, nested and flat representations still fence
+proven completed calls across invocation forms. Solely lossy hash matches return
+`retry_evidence_requires_review`; they never create a completed v2 identity or
+an activity in the current turn. Later Retry retains the original ambiguous
+ancestor, including when the refused request changes type or literal bytes.
 Ignored historical wrapper decorations and retired handles in raw nested/flat
 native hashes cannot be reconstructed. Every historical native label retains
 ambiguity evidence, including `run_schedule_now` and tools whose effects depend
@@ -237,7 +245,10 @@ Refused proven duplicates retain all three identities through activity
 finalization and chained Retry, with `retry_duplicate_action` metadata so the
 outcome does not claim a second creation. An ambiguous refusal creates no
 completed or unknown-effect activity and retains its historical ancestor's
-review requirement through later Retry.
+review requirement through later Retry. A later conclusive match can establish
+a truthful v2 identity for that completed effect. Subsequent Retry of that same
+semantic call returns `retry_duplicate_action`, even while ambiguous historical
+evidence remains in its ancestry.
 
 Normative NyxID 0.24.0 contract, verified against the read-only NxyAgent clone
 at commit `58f647e4`. The retained design records are
