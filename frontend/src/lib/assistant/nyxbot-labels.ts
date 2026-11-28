@@ -392,10 +392,9 @@ export const ACCESS_MODE_LABEL = {
 
 /** What each access mode asks before, in one line. */
 export const ACCESS_MODE_DESCRIPTION = {
-  autopilot:
-    "Never asks. Every action, including automation, machine, saved-login and service-approval confirmations, runs on its own and the chat records what was allowed automatically.",
-  nyxmode: "Acts on its own; asks before sensitive or destructive actions.",
-  ask_every_time: "Asks before every action that changes something. Reading never asks.",
+  get autopilot() { return translateUi("Automatically approves actions within the agent's existing permissions and records them in chat. Protected organization connections can still require your instruction or approval."); },
+  get nyxmode() { return translateUi("Acts on its own; asks before sensitive or destructive actions."); },
+  get ask_every_time() { return translateUi("Asks before every action that changes something. Reading never asks."); },
 } as const satisfies Record<NyxAgentAccessMode, string>;
 
 /** The mode that governs an agent: its own override, else the workspace mode. */

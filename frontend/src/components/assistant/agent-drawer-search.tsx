@@ -16,6 +16,7 @@ import { createPortal } from "react-dom";
 import { Search, X } from "lucide-react";
 import {
   DrawerSearchContext,
+  DrawerNavigationContext,
   DRAWER_SEARCH_TABS,
   drawerMatchRanges,
   matchDrawerEntries,
@@ -41,6 +42,8 @@ export function DrawerSearchProvider({
     ReadonlyMap<string, readonly DrawerSearchEntry[]>
   >(new Map());
   const pages = useRef(new Map<string, DrawerSearchPage>());
+  const navigation = useRef<((id: string) => Promise<void>) | null>(null);
+  const navigate = useCallback(async (id: string) => { await navigation.current?.(id); }, []);
   const register = useCallback(
     (id: string, value: readonly DrawerSearchEntry[]) =>
       setEntries((current) => new Map(current).set(id, value)),
@@ -72,9 +75,11 @@ export function DrawerSearchProvider({
       }}
     >
       <DrawerSearchResultsContext.Provider
-        value={{ entries: [...entries.values()].flat(), pages }}
+        value={{ entries: [...entries.values()].flat(), pages, navigation }}
       >
+        <DrawerNavigationContext value={navigate}>
         {children}
+        </DrawerNavigationContext>
       </DrawerSearchResultsContext.Provider>
     </DrawerSearchContext.Provider>
   );
@@ -82,6 +87,7 @@ export function DrawerSearchProvider({
 const DrawerSearchResultsContext = createContext<{
   entries: DrawerSearchEntry[];
   pages: RefObject<Map<string, DrawerSearchPage>>;
+  navigation: RefObject<((id: string) => Promise<void>) | null>;
 } | null>(null);
 function Match({
   text,
@@ -254,6 +260,13 @@ export function AgentDrawerSearch({
       setOpening(false);
     }
   }
+  useLayoutEffect(() => {
+    context.navigation.current = async (id) => {
+      const entry = context.entries.find((candidate) => candidate.id === id);
+      if (entry) await reveal(entry);
+    };
+    return () => { context.navigation.current = null; };
+  });
   function move(event: React.KeyboardEvent, id?: string) {
     if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
     if (!ordered.length) return;
@@ -334,8 +347,8 @@ export function AgentDrawerSearch({
             </p>
           ) : (
             groups.map(({ label, rows }) => (
-              <GroupedList key={label} title={label}>
-                <ul aria-label={translateUi("{{value1}} search results", { value1: label })}>
+              <GroupedList key={label} title={translateUi(label)}>
+                <ul aria-label={translateUi("{{value1}} search results", { value1: translateUi(label) })}>
                   {rows.map((entry) => (
                     <GroupedRow
                       key={entry.id}

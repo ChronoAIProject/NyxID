@@ -31,6 +31,8 @@ const data = vi.hoisted(() => ({
   link: vi.fn(),
   retryGateway: vi.fn(),
   pending: false,
+  refetchBots: vi.fn(),
+  setupProps: undefined as Record<string, unknown> | undefined,
 }));
 vi.mock("@/hooks/use-nyxbot-agents", () => ({
   nyxBotOf: (agents: AssistantAgent[]) => agents.find((agent) => agent.kind === "nyxbot"),
@@ -42,7 +44,7 @@ vi.mock("@/hooks/use-nyxbot-agents", () => ({
   useRetryNyxBotChannelGateway: () => ({ isPending: false, mutateAsync: data.retryGateway }),
 }));
 vi.mock("@/hooks/use-channel-bots", () => ({
-  useChannelBots: () => ({ data: data.bots, isPending: false }),
+  useChannelBots: () => ({ data: data.bots, isPending: false, refetch: data.refetchBots }),
 }));
 vi.mock("@/hooks/use-orgs", () => ({ useOrgs: () => ({ data: data.orgs }) }));
 vi.mock("@/hooks/use-feature-flag", () => ({
@@ -66,6 +68,12 @@ vi.mock("./nyxbot-channel-chats", () => ({
       {agents.map((agent) => <span key={agent.id}>{agent.name}</span>)}
     </div>
   ),
+}));
+vi.mock("@/components/channels/channel-bot-setup", () => ({
+  ChannelBotSetup: (props: { onOpenChange: (open: boolean) => void; onContinue: () => Promise<void>; continueLabel: string }) => {
+    data.setupProps = props;
+    return <section aria-label="Registration"><button onClick={() => props.onOpenChange(false)}>Cancel registration</button><button onClick={() => void props.onContinue()}>{props.continueLabel}</button></section>;
+  },
 }));
 beforeEach(() => {
   data.channels = [];
@@ -568,4 +576,29 @@ it("renders the Discord release safety explanation in Chinese without a retry bu
     expect(screen.getByText(zh["Discord intake is paused while the retained gateway release and safety drain are checked. NyxID keeps checking; retrying activation cannot bypass this safety check."]!)).toBeVisible();
     expect(screen.queryByRole("button", { name: /重试|Retry native/ })).not.toBeInTheDocument();
   } finally { await act(() => appI18n.changeLanguage("en")); }
+});
+
+it.each([false, true])("returns registration to connection setup for the intended agent (org: %s)", async (org) => {
+  const orgId = "12345678-1234-4123-8123-123456789012";
+  const specialist = assistantAgentSchema.parse({ id: "specialist", name: "Research", kind: "specialist", status: "idle", owner_kind: org ? "org" : "person", owner_id: org ? orgId : "owner", can_maintain: true, created_at: "2026-10-01T00:00:00Z", last_active_at: "2026-10-01T00:00:00Z" });
+  if (org) { data.orgChannels = true; data.orgs = [{ id: orgId, your_role: "admin" }]; }
+  const view = render(<ChannelBotsManager agent={specialist} agents={[specialist]} />);
+  await userEvent.click(screen.getByRole("button", { name: "Register a bot" }));
+  expect(data.setupProps).toMatchObject({ defaultOrgId: org ? orgId : null, lockOrgScope: org, stayInPlace: true });
+  data.bots = [{ id: "new-bot", label: "New helper", platform: "telegram", user_id: org ? orgId : "owner" }];
+  await userEvent.click(screen.getByRole("button", { name: "Continue to connection setup" }));
+  view.rerender(<ChannelBotsManager agent={specialist} agents={[specialist]} />);
+  expect(data.refetchBots).toHaveBeenCalledOnce();
+  expect(screen.queryByRole("region", { name: "Registration" })).toBeNull();
+  expect(screen.getByText("Registered; not connected", { exact: false })).toBeVisible();
+  await userEvent.click(screen.getByRole("button", { name: "Connect New helper to Research" }));
+  expect(data.connect).toHaveBeenCalledWith({ botId: "new-bot", agentId: "specialist" });
+});
+
+it("cancels contextual registration without changing any connection", async () => {
+  render(<ChannelBotsManager agents={[]} />);
+  await userEvent.click(screen.getByRole("button", { name: "Register a bot" }));
+  await userEvent.click(screen.getByRole("button", { name: "Cancel registration" }));
+  expect(screen.getByRole("button", { name: "Connect another bot" })).toBeVisible();
+  expect(data.connect).not.toHaveBeenCalled();
 });

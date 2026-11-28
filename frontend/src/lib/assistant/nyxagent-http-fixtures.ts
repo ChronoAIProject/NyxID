@@ -2,7 +2,7 @@ import type { AssistantHttpMockHandler } from "@/lib/assistant/assistant-http";
 import type { NotificationReadRequest } from "@/schemas/assistant-notifications";
 import { isValidAvatar, type AvatarConfig } from "@/lib/assistant/agent-avatar-model";
 import { mentionedNames } from "@/lib/assistant/nyxbot-mentions";
-import { createMockConnectReply, mockCreatedBotCount } from "@/lib/assistant/mock-setup-journeys";
+import { createMockConnectReply, mockCreatedBotCount, mockCreatedBots } from "@/lib/assistant/mock-setup-journeys";
 import {
   ASSISTANT_AGENT_DISPLAY_NAME_MAX,
   ASSISTANT_AGENT_NAME,
@@ -11,6 +11,7 @@ import {
   ASSISTANT_GROUP_NAME_MAX,
   type AssistantAgent,
   type AssistantAgentKind,
+  type NyxAgentAccessMode,
   type AssistantAgentMemoryNote,
   type AssistantGroup,
   type AssistantGroupMessage,
@@ -79,6 +80,9 @@ interface AgentRecord {
   /** Dev fixture: the chosen avatar (absent derives the default). */
   avatar?: AvatarConfig | null;
   persona?: string | null;
+  voice_instructions?: string | null;
+  access_mode_override?: NyxAgentAccessMode | null;
+  channel_checking_notice?: boolean;
   description: string;
   created_by: "user" | "nyxbot";
   services: string[];
@@ -408,6 +412,9 @@ export class NyxAgentHttpFixtures {
       display_name: agent.display_name ?? null,
       avatar: agent.avatar ?? null,
       persona: agent.persona ?? null,
+      voice_instructions: agent.voice_instructions ?? null,
+      access_mode_override: agent.access_mode_override ?? null,
+      channel_checking_notice: agent.channel_checking_notice ?? false,
       description: agent.description,
       specialty: null,
       created_by: agent.created_by,
@@ -843,6 +850,9 @@ export class NyxAgentHttpFixtures {
         display_name?: string;
         persona?: string;
         avatar?: AvatarConfig | null;
+        voice_instructions?: string;
+        access_mode_override?: NyxAgentAccessMode | null;
+        channel_checking_notice?: boolean;
       };
       if (update.avatar !== undefined && update.avatar !== null && !isValidAvatar(update.avatar)) {
         return failure(400, "Choose every avatar part and colour from the avatar catalogue");
@@ -860,6 +870,9 @@ export class NyxAgentHttpFixtures {
       if (update.display_name !== undefined) agent.display_name = update.display_name.trim() || null;
       if (update.persona !== undefined) agent.persona = update.persona.trim() || null;
       if (update.avatar !== undefined) agent.avatar = update.avatar;
+      if (update.voice_instructions !== undefined) agent.voice_instructions = update.voice_instructions.trim() || null;
+      if (update.access_mode_override !== undefined) agent.access_mode_override = update.access_mode_override;
+      if (update.channel_checking_notice !== undefined) agent.channel_checking_notice = update.channel_checking_notice;
       this.save();
       return json({
         id: agent.id,
@@ -1049,7 +1062,8 @@ export class NyxAgentHttpFixtures {
   }
 
   private connectChannel(botId: string, agentId: string | undefined) {
-    const bot = FIXTURE_BOTS[botId];
+    const registered = mockCreatedBots().find((bot) => bot.id === botId);
+    const bot = FIXTURE_BOTS[botId] ?? (registered ? { platform: registered.platform, label: registered.label ?? registered.platform_bot_username, username: registered.platform_bot_username } : undefined);
     if (!bot) return failure(404, "Channel bot not found");
     const agent = agentId ? this.agents.find((candidate) => candidate.id === agentId) : undefined;
     if (agentId && !agent) return failure(404, "Agent not found");

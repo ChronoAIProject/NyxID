@@ -1,11 +1,19 @@
 import { createContext } from "react";
+import { translateUi } from "@/i18n/use-ui-translation";
 
 /** Explicit drawer copy; dynamic service, chat and skill headings supply their own context. */
 export const DRAWER_SECTION_INFO: Readonly<Record<string, string>> = {
-  Overview: "Profile, ownership and lifecycle settings for this agent. Search results open the matching setting.",
+  Overview: "Identity, working instructions, tone, ownership and lifecycle settings for this agent. Search results open the matching setting.",
   Channels: "Messaging bots and chats connected to this agent. Search results open the matching connection or chat.",
-  Profile: "The name, role and personality people see when talking to this agent. Model and access settings control how it responds and when it asks first.",
-  "Profile and persona": "The shared agent’s display name, description and personality. Changes apply to everyone who uses it.",
+  Profile: "Identity, purpose and working instructions. Tone and style shapes communication; Memory keeps facts and Skills provide reusable procedures.",
+  Instructions: "Define the agent’s purpose and working behavior. These instructions do not grant permissions. Memory retains facts and preferences; Skills provide reusable procedures.",
+  "Tone and style": "Set communication style and personality without changing permissions.",
+  "Call instructions": "Voice and phone guidance for new calls using this agent’s existing permissions. Optional Device voice setup is in Access.",
+  "Approval behavior": "Choose when the agent asks before acting within existing permissions. Inherit the workspace setting or set an agent override; protected organization connections can still require your instruction or approval.",
+  "Channel progress reply": "An agent-wide short reply while external checks take time, followed by the completed answer in the same chat. This applies across the agent’s channels.",
+  "Device voice": "Optional device integration. Create a voice connection, then check the device Agent Key’s existing service policy. All-services Keys may already permit it; creation alone does not prove device readiness.",
+  "Access grants": "Services and account permissions granted to this agent. Approval behavior controls when it asks before acting within those limits.",
+  "Shared profile": "The shared agent’s display name, description and personality. Changes apply to everyone who uses it.",
   Ownership: "Who owns this agent and who may maintain it. Organization roles and sharing roles determine the actions available to you.",
   Sharing: "Choose who can use this agent and which of its granted services they may use. Sharing never gives others your credentials.",
   "People and organizations": "Choose the people and organizations that may use this shared agent.",
@@ -13,7 +21,7 @@ export const DRAWER_SECTION_INFO: Readonly<Record<string, string>> = {
   Automations: "Scheduled and event-driven tasks that run for this agent. Open Automations to manage their timing and delivery.",
   "Danger zone": "Destroying stops this specialist. Deleting removes its record; each action requires confirmation.",
   Lifecycle: "Destroying stops this specialist. Deleting removes its record; each action requires confirmation.",
-  Access: "NyxBot can use your connected services and account. Machine capabilities are granted separately, and its access mode controls confirmation.",
+  Access: "Service and machine permissions determine what this agent can use. Approval behavior controls when it asks before acting within those permissions.",
   Services: "Choose which connected services this specialist may call. Operation and guest permissions can narrow that access further.",
   Account: "Allow this specialist to read account information. This does not grant additional service or machine access.",
   Machines: "Choose the machines this specialist may use. Each machine’s capability and workspace settings still apply.",
@@ -38,7 +46,7 @@ export const DRAWER_SECTION_INFO: Readonly<Record<string, string>> = {
   Activity: "Changes to this agent’s attached skills, shown newest first.",
   Draft: "Edit a private copy of this skill. The attached version stays active until the draft is published and attached.",
   "Preload settings": "Include selected skill files in every owner chat turn. Guest chats do not receive preloaded files.",
-  "Learning proposals": "Review skill suggestions based on this agent’s work. Proposals remain private drafts until you approve publication.",
+  "Learning proposals": "Analysis of eligible conversations may produce a private proposal or none. Requesting publication can publish and attach immediately in the approving chat’s Full access mode; otherwise a confirmation card is returned.",
   Proposal: "Review the suggested skill, its evidence and publication status before deciding what to do.",
   Memory: "Notes this agent can remember across chats. Shared and organization memory follows the permissions shown here.",
   Notes: "Notes this agent can remember across chats. The ownership and sharing rules shown here determine who can change them.",
@@ -53,7 +61,7 @@ export const DRAWER_SECTION_INFO: Readonly<Record<string, string>> = {
   "Available bots": "Choose one of your available messaging bots to connect to this agent.",
   "Connect another bot": "Choose an available messaging bot and connect it to this agent.",
   "Connection status": "The current state of this agent’s messaging connections. Errors here may prevent messages from reaching it.",
-  "Who can talk to this bot": "Choose the bot’s private-chat audience or organization guest access. Personal guests use the owner’s billing; organization guests require an admin-set daily budget and service access.",
+  "Who can talk to this bot": "Choose the bot’s private-chat audience or organization guest access. Personal guests use the owner’s billing; organization guests follow the displayed service and wallet prerequisites.",
   "Chats and posting": "Manage posting and the bot’s behavior in each connected chat. Bot-wide guest access is in Who can talk to this bot.",
   "Private chats": "Allow posts in new private chats, or explicitly apply the setting to existing chats. This does not change who can talk to the bot.",
   Threads: "Choose which conversation threads this bot follows. Thread replies still use this chat’s reply and participant settings.",
@@ -62,5 +70,14 @@ export const DRAWER_SECTION_INFO: Readonly<Record<string, string>> = {
 };
 export const DrawerSectionInfoContext = createContext(false);
 export function drawerSectionInfo(title: string): string | undefined {
-  return DRAWER_SECTION_INFO[title] ?? (title.startsWith("Rule ") ? "An exact method and path allowed by this operation scope. Removing a rule removes that permission." : title.startsWith("Preloaded ·") ? DRAWER_SECTION_INFO["Preload settings"] : undefined);
+  // Group headings already carry their localized display title. Resolve that
+  // title for help only; operational IDs and search targets stay unchanged.
+  const localizedTitles = new Map(Object.keys(DRAWER_SECTION_INFO).map((key) => [translateUi(key), key]));
+  const key = Object.hasOwn(DRAWER_SECTION_INFO, title) ? title : localizedTitles.get(title);
+  const matches = (template: string) => {
+    const [before, after] = translateUi(template, { value1: "__value__" }).split("__value__");
+    return after !== undefined && title.startsWith(before!) && title.endsWith(after);
+  };
+  const help = (key ? DRAWER_SECTION_INFO[key] : undefined) ?? (matches("Rule {{value1}}") ? "An exact method and path allowed by this operation scope. Removing a rule removes that permission." : matches("Preloaded · {{value1}} bytes") ? DRAWER_SECTION_INFO["Preload settings"] : undefined);
+  return help ? translateUi(help) : undefined;
 }

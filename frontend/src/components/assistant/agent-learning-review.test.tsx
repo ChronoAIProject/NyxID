@@ -90,13 +90,13 @@ describe("AgentLearningReview", () => {
     render(<AgentLearningReview agentId="agent" />);
     expect(screen.getByRole("region", { name: "Learning" })).toBeInTheDocument();
     expect(screen.getByRole("switch")).toBeChecked();
-    expect(screen.getByRole("spinbutton", { name: "Learning threshold" })).toHaveValue(15);
+    expect(screen.getByRole("spinbutton", { name: "Eligible conversations before analysis" })).toHaveValue(15);
     fireEvent.click(screen.getByRole("button", { name: "Review draft" }));
     expect(screen.getByRole("textbox", { name: "Skill draft" })).toHaveValue(
       "# Do not execute this as markup",
     );
     expect(screen.getByText("Review before use")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Publish & request confirmation" }));
+    fireEvent.click(screen.getByRole("button", { name: "Publish & attach" }));
     await waitFor(() => expect(mocks.approve).toHaveBeenCalledWith({ proposalId: "proposal", acknowledgementId: undefined }));
     expect(await screen.findByText(/Confirming this exact card/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Confirm publish & attach" })).toBeInTheDocument();
@@ -145,6 +145,18 @@ describe("AgentLearningReview", () => {
     expect(screen.getByText(/no owner binding.*only the bound owner can publish/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("switch", { name: /consent to learning/i }));
     expect(mocks.consent).toHaveBeenCalledWith(true);
+  });
+
+  it("does not announce stale consent success after a learning configuration failure", () => {
+    mocks.feature.mockReturnValue(true);
+    const review = mocks.review();
+    mocks.review.mockReturnValue({ ...review, consent: { ...review.consent, isSuccess: true } });
+    const view = render(<AgentLearningReview agentId="agent" />);
+    expect(screen.getByText("Learning settings saved.")).toBeVisible();
+    mocks.review.mockReturnValue({ ...review, consent: { ...review.consent, isSuccess: true }, configure: { ...review.configure, error: new Error("Configuration was not saved") } });
+    view.rerender(<AgentLearningReview agentId="agent" />);
+    expect(screen.getByText("Configuration was not saved")).toBeVisible();
+    expect(screen.queryByText("Learning settings saved.")).toBeNull();
   });
 
   it("renders validation diagnostics at their field and line", async () => {
@@ -200,7 +212,7 @@ describe("AgentLearningReview", () => {
     });
     render(<AgentLearningReview agentId="agent" />);
     expect(screen.getByText(/Confirm this authored skill from its conversation card/)).toBeVisible();
-    expect(screen.queryByRole("button", { name: "Publish & request confirmation" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Publish & attach" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Confirm publish & attach" })).not.toBeInTheDocument();
   });
 
@@ -219,7 +231,7 @@ describe("AgentLearningReview", () => {
     expect(screen.getByText(/it will\s+not attach it to the agent/)).toBeVisible();
     expect(screen.getByText(/verified this private version in Ornn but did not attach it/)).toBeVisible();
     expect(screen.queryByRole("button", { name: "Check publication" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Publish & request confirmation" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Publish & attach" })).not.toBeInTheDocument();
     expect(mocks.approve).not.toHaveBeenCalled();
   });
 
@@ -235,7 +247,7 @@ describe("AgentLearningReview", () => {
       run: { mutate: mocks.run, isPending: false },
     });
     render(<AgentLearningReview agentId="agent" />);
-    expect(screen.queryByRole("button", { name: "Publish & request confirmation" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Publish & attach" })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Check publication" }));
     await waitFor(() => expect(mocks.approve).toHaveBeenCalledWith({ proposalId: "proposal", acknowledgementId: undefined }));
     expect(await screen.findByRole("button", { name: "Confirm check" })).toBeVisible();
@@ -272,7 +284,7 @@ describe("AgentLearningReview", () => {
     expect(screen.getByRole("link", { name: "Open the confirmation card" })).toHaveAttribute("href", "/assistant?c=conversation-1&card=12345678-1234-4123-8123-123456789012");
     expect(screen.getByText(/cannot yet confirm whether Ornn published this version/)).toBeVisible();
     expect(screen.getByText("publication failed")).toBeVisible();
-    expect(screen.queryByRole("button", { name: "Publish & request confirmation" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Publish & attach" })).not.toBeInTheDocument();
   });
 
   it("shows a refused learned confirmation instead of failing silently", async () => {
@@ -280,9 +292,17 @@ describe("AgentLearningReview", () => {
     mocks.approve.mockRejectedValue(new Error("Learning approval card is missing, expired, used or stale"));
     render(<AgentLearningReview agentId="agent" />);
     expect(screen.getByText(/This version exists with different content/)).toBeVisible();
-    fireEvent.click(screen.getByRole("button", { name: "Publish & request confirmation" }));
+    fireEvent.click(screen.getByRole("button", { name: "Publish & attach" }));
     expect(await screen.findByText("Learning approval card is missing, expired, used or stale")).toBeVisible();
     expect(screen.queryByRole("button", { name: "Confirm publish & attach" })).not.toBeInTheDocument();
+  });
+
+  it("labels a returned retry confirmation as the exact publish-and-attach approval", async () => {
+    withProposals([{ ...proposal, status: "publication_failed", failure_code: "version_conflict" }]);
+    render(<AgentLearningReview agentId="agent" />);
+    fireEvent.click(screen.getByRole("button", { name: "Retry publication" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Confirm publish & attach" }));
+    await waitFor(() => expect(mocks.approve).toHaveBeenLastCalledWith({ proposalId: "proposal", acknowledgementId: "card" }));
   });
 
   it("explains a verified learned version that was not attached", () => {

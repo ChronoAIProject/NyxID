@@ -36,6 +36,7 @@ import { useAgentSharing, useSaveAgentSharing, useSharedNotes, useSaveSharedNote
 import { sharingFormSchema, type Sharing, type SharingForm, type SharedNotes } from "@/schemas/assistant-sharing";
 import type { AssistantAgent } from "@/schemas/assistant-nyxagent";
 import { useUpdateNyxBotAgent } from "@/hooks/use-nyxbot-agents";
+import { useOrgs } from "@/hooks/use-orgs";
 
 export function ShareAgentDialog({
   agent,
@@ -50,7 +51,7 @@ export function ShareAgentDialog({
   return (
     <>
       <GroupedList title={translateUi("Sharing")}>
-        <GroupedDisclosure search={{ id: "share-agent", title: "Share agent", breadcrumb: "Overview › Sharing" }} onClick={() => setOpen(true)}>{translateUi("Share agent")}</GroupedDisclosure>
+        <GroupedDisclosure search={{ id: "share-agent", title: translateUi("Share agent"), breadcrumb: "Overview › Sharing" }} onClick={() => setOpen(true)}>{translateUi("Share agent")}</GroupedDisclosure>
       </GroupedList>
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent className="max-h-[85vh] overflow-y-auto bg-background">
@@ -92,6 +93,7 @@ function SharingEditor({
 }) {
   useUiTranslation();
   const save = useSaveAgentSharing(id);
+  const orgs = useOrgs();
   const form = useAppForm<SharingForm>({ mode: "onChange", resolver: zodResolver(sharingFormSchema), defaultValues: {
     enabled: policy.enabled,
     audience: policy.audience.map(({ subject_kind, subject_id, role }) => ({ subject_kind, subject_id, role })),
@@ -101,17 +103,23 @@ function SharingEditor({
   const levels = form.watch("shared_access");
   const [subject, setSubject] = useState("");
   const [kind, setKind] = useState<"person" | "org">("person");
+  const [organization, setOrganization] = useState("");
   const [role, setRole] = useState<"user" | "manager">("user");
-  const normalizedSubject = subject.trim().toLowerCase();
+  const normalizedSubject = kind === "org" ? organization : subject.trim().toLowerCase();
   const validSubject = kind === "person"
     ? z.email().safeParse(normalizedSubject).success
       && !audience.some((a) => a.email === normalizedSubject || a.subject_id === normalizedSubject)
     : z.uuid().safeParse(normalizedSubject).success
+      && !orgs.isPending && !orgs.error
+      && Boolean(orgs.data?.some((org) => org.id === normalizedSubject))
       && !audience.some((a) => a.subject_id === normalizedSubject);
   const audienceLabel = (entry: SharingForm["audience"][number]) => {
     const view = policy.audience.find((candidate) => candidate.subject_id === entry.subject_id);
     if (entry.email) return entry.email;
-    if (entry.subject_kind === "org") return [view?.slug, view?.name].filter(Boolean).join(" · ") || entry.subject_id;
+    if (entry.subject_kind === "org") {
+      const org = orgs.data?.find((candidate) => candidate.id === entry.subject_id);
+      return [org?.display_name ?? view?.name, org?.slug ?? view?.slug].filter(Boolean).join(" · ") || entry.subject_id;
+    }
     return view?.email || entry.subject_id;
   };
   const submit = form.handleSubmit(async (values) => {
@@ -151,7 +159,7 @@ function SharingEditor({
         </GroupedList>
         <GroupedList
           title={translateUi("People and organizations")}
-          footer={translateUi("Users can chat. Managers can also edit the profile, persona and published team memory. Organization access applies to active Admins and Members.")}
+          footer={translateUi("Users can chat. Managers can also edit the profile, tone and published team memory. Organization access applies to active Admins and Members.")}
         >
           {audience.map((entry, index) => (
             <GroupedRow key={entry.subject_id ?? entry.email ?? index}>
@@ -203,19 +211,31 @@ function SharingEditor({
               </SelectContent>
             </Select>
           </GroupedRow>
-          <GroupedRow asChild className="grouped-field">
+          {kind === "org" ? (
+            <>
+              <GroupedRow title={translateUi("Organization")} accessory={
+                <Select value={organization} onValueChange={setOrganization} disabled={orgs.isPending || Boolean(orgs.error) || !orgs.data?.length}>
+                  <GroupedSelectTrigger aria-label={translateUi("Organization")}>
+                    <SelectValue placeholder={translateUi("Select an organization")} />
+                  </GroupedSelectTrigger>
+                  <SelectContent>
+                    {orgs.data?.map((org) => <SelectItem key={org.id} value={org.id} disabled={audience.some((entry) => entry.subject_kind === "org" && entry.subject_id === org.id)}>{org.display_name && org.display_name !== org.slug ? `${org.display_name} · ${org.slug}` : org.slug}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+              } />
+              {orgs.isPending ? <GroupedRow><p role="status">{translateUi("Loading organizations…")}</p></GroupedRow> : orgs.error ? <GroupedRow><ErrorBanner message={translateUi("Could not load organizations. Existing audience entries are kept.")} onRetry={() => void orgs.refetch()} /></GroupedRow> : !orgs.data?.length ? <GroupedRow title={translateUi("No organizations available")} description={translateUi("You can share with organizations you belong to. Existing audience entries are kept.")} /> : null}
+            </>
+          ) : <GroupedRow asChild className="grouped-field">
             <Label className="block space-y-1">
-              <span>{kind === "org" ? translateUi("Organization ID") : translateUi("Person email")}</span>
+              <span>{translateUi("Person email")}</span>
               <GroupedInput
                 value={subject}
                 onChange={(e) => setSubject(e.target.value)}
-                placeholder={
-                  kind === "org" ? translateUi("Organization UUID") : translateUi("person@example.com")
-                }
-                type={kind === "person" ? "email" : "text"}
+                placeholder={translateUi("person@example.com")}
+                type="email"
               />
             </Label>
-          </GroupedRow>
+          </GroupedRow>}
           <GroupedRow>
             <Button
               type="button"
@@ -233,6 +253,7 @@ function SharingEditor({
                       },
                 ]);
                 setSubject("");
+                setOrganization("");
               }}
             >{translateUi("Add to audience")}</Button>
           </GroupedRow>
@@ -295,6 +316,7 @@ export function SharedAgentMemory({
   useUiTranslation();
   return (
     <div className="space-y-5">
+      <p className="px-4 type-secondary text-text-tertiary">{translateUi("Memory keeps facts and preferences across chats. Use Instructions for working behavior and Skills for reusable procedures.")}</p>
       <Notes
         id={agent.id}
         kind="private-notes"
@@ -566,9 +588,9 @@ const profileSchema = z.object({
 });
 const PROFILE_FIELDS = [
   { key: "display_name", label: "Display name" },
-  { key: "description", label: "Description" },
-  { key: "persona", label: "Persona" },
-  { key: "voice_instructions", label: "Voice instructions" },
+  { key: "description", label: "Instructions" },
+  { key: "persona", label: "Tone and style" },
+  { key: "voice_instructions", label: "Call instructions" },
 ] as const;
 export function SharedAgentProfile({
   agent,
@@ -589,10 +611,10 @@ export function SharedAgentProfile({
   });
   if (agent.share_role !== "manager" || agent.status === "destroyed")
     return (
-      <GroupedList title={translateUi("Profile")}>
-        <GroupedRow search={{ id: "shared-description", title: "Description", keywords: agent.description }} title={translateUi("Description")} description={agent.description} />
-        <GroupedRow search={{ id: "shared-persona", title: "Persona", keywords: agent.persona ?? "" }} title={translateUi("Persona")} description={agent.persona} />
-        <GroupedRow search={{ id: "shared-voice-instructions", title: "Voice instructions", keywords: agent.voice_instructions ?? "" }} title={translateUi("Voice instructions")} description={agent.voice_instructions} />
+      <GroupedList title={translateUi("Shared profile")}>
+        <GroupedRow search={{ id: "shared-description", title: translateUi("Instructions"), keywords: `Role purpose ${agent.description}` }} title={translateUi("Instructions")} description={agent.description} />
+        <GroupedRow search={{ id: "shared-persona", title: translateUi("Tone and style"), keywords: `Persona ${agent.persona ?? ""}` }} title={translateUi("Tone and style")} description={agent.persona} />
+        <GroupedRow search={{ id: "shared-voice-instructions", title: translateUi("Call instructions"), keywords: `Voice phone ${agent.voice_instructions ?? ""}` }} title={translateUi("Call instructions")} description={agent.voice_instructions} />
       </GroupedList>
     );
   const submit = form.handleSubmit(async (values) => {
@@ -607,9 +629,10 @@ export function SharedAgentProfile({
     <Form {...form}>
       <form className="space-y-3" onSubmit={submit}>
         <GroupedList
-          title={translateUi("Profile and persona")}
+          title={translateUi("Shared profile")}
           footer={
             <>
+              <p>{translateUi("Changes to this shared profile apply to everyone who uses this agent.")}</p>
               {update.error ? (
                 <p role="alert" className="text-destructive">
                   {update.error.message}
@@ -627,10 +650,10 @@ export function SharedAgentProfile({
         >
           {PROFILE_FIELDS.map(
             ({ key: field, label }) => (
-              <GroupedRow search={{ id: `shared-profile-${field}`, title: label, keywords: form.watch(field) }} key={field} asChild className="grouped-field">
+              <GroupedRow search={{ id: `shared-profile-${field}`, title: translateUi(label), keywords: form.watch(field) }} key={field} asChild className="grouped-field">
                 <Label>
                   <span>
-                    {label}
+                    {translateUi(label)}
                   </span>
                   <GroupedTextarea
                     aria-invalid={!!form.formState.errors[field]}

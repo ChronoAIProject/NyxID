@@ -65,10 +65,13 @@ export function AgentLearningReview({
     <section aria-label={translateUi("Learning")} className="space-y-3">
       <GroupedList
         title={translateUi("Learning proposals")}
-        search={{ id: "learning-proposals", title: "Learning proposals", breadcrumb: "Skills", keywords: "Automatic learning private drafts" }}
+        search={{ id: "learning-proposals", title: translateUi("Learning proposals"), breadcrumb: "Skills", keywords: "Automatic learning private drafts" }}
         footer={
           <>
-            <p>{translateUi("Completed work can produce private, untrusted Ornn skill drafts. Full access publishes and attaches automatically; other modes require your confirmation.")}</p>
+            <p>{translateUi("Learning analyzes eligible conversations and may suggest a private skill draft, or find nothing to propose. Enabling learning does not publish learned drafts.")}</p>
+            {!readOnly ? <p>{translateUi("Learning settings apply immediately. Discard in the drawer does not undo them.")}</p> : null}
+            {review.configure.isPending || review.consent?.isPending ? <p role="status">{translateUi("Saving learning settings…")}</p> : !review.configure.error && !review.consent?.error && (review.configure.isSuccess || review.consent?.isSuccess) ? <p role="status">{translateUi("Learning settings saved.")}</p> : null}
+            {review.run.isPending ? <p role="status">{translateUi("Analyzing eligible conversations…")}</p> : review.run.isSuccess ? <p role="status">{translateUi("Analysis requested. It may produce a proposal or find nothing to suggest.")}</p> : null}
             {review.error ? (
               <p role="alert" className="text-destructive">{translateUi("Automatic learning is unavailable.")}</p>
             ) : null}
@@ -91,7 +94,7 @@ export function AgentLearningReview({
         }
       >
         <GroupedRow
-          search={{ id: "automatic-learning", title: "Automatic learning", breadcrumb: "Skills › Learning proposals", keywords: learningEnabled ? "On" : "Off" }}
+          search={{ id: "automatic-learning", title: translateUi("Automatic learning"), breadcrumb: "Skills › Learning proposals", keywords: learningEnabled ? "On" : "Off" }}
           title={translateUi("Automatic learning")}
           accessory={
             readOnly ? (
@@ -117,15 +120,18 @@ export function AgentLearningReview({
         />
         {!readOnly ? (
           <GroupedRow
-            search={{ id: "learning-threshold", title: "Threshold", breadcrumb: "Skills › Learning proposals", keywords: String(threshold) }}
-            title={translateUi("Threshold")}
+            search={{ id: "learning-threshold", title: translateUi("Analyze after eligible conversations"), breadcrumb: "Skills › Learning proposals", keywords: `Threshold ${threshold}` }}
+            title={translateUi("Analyze after")}
+            description={translateUi("Distinct eligible conversations; each analysis may produce no proposal.")}
             accessory={
+              <span className="flex items-center gap-2">
               <GroupedInput
-                aria-label={translateUi("Learning threshold")}
+                aria-label={translateUi("Eligible conversations before analysis")}
                 className="w-16 text-right"
                 type="number"
                 min={1}
                 max={50}
+                disabled={review.configure.isPending}
                 value={threshold}
                 onChange={(event) =>
                   setThreshold(Number(event.target.value) || 15)
@@ -138,6 +144,8 @@ export function AgentLearningReview({
                     });
                 }}
               />
+              <span>{translateUi("eligible conversations")}</span>
+              </span>
             }
           />
         ) : null}
@@ -246,8 +254,8 @@ export function AgentLearningReview({
               !readOnly ? (
                 <p className="text-warning">
                   {card
-                    ? translateUi("Step 2 of 2: Confirming this exact card publishes the private skill and attaches its pinned version. The card expires if the draft or agent changes.")
-                    : translateUi("Publishing takes two steps: this button first asks for an owner confirmation card, then you confirm that exact card here. Nothing is published until you confirm.")}
+                    ? translateUi("Confirming this exact card authorizes publication and attachment. The card expires if the draft or agent changes.")
+                    : translateUi("This request may publish the private skill and attach it immediately if the approving chat uses Full access. Otherwise, NyxID returns a confirmation card here. The approving chat's mode may differ from this agent's mode.")}
                 </p>
               ) : undefined
             }
@@ -334,11 +342,11 @@ export function AgentLearningReview({
                       ? card
                         ? translateUi("Confirm finish publishing")
                         : translateUi("Finish publishing")
-                      : proposal.status === "publication_failed"
-                        ? translateUi("Retry publication")
-                        : card
-                          ? translateUi("Confirm publish & attach")
-                          : translateUi("Publish & request confirmation")}
+                      : card
+                        ? translateUi("Confirm publish & attach")
+                        : proposal.status === "publication_failed"
+                          ? translateUi("Retry publication")
+                          : translateUi("Publish & attach")}
                 </button>
               </GroupedRow>
             )}

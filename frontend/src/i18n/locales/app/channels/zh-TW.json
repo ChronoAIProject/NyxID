@@ -602,6 +602,7 @@
   "This Verify Token is shown only once. Copy it now. The old relay Verify Token no longer verifies.": "此 Verify Token 只顯示一次。請立即複製。舊的中繼 Verify Token 已無法通過驗證。",
   "This agent has no enabled skills.": "這個智慧代理程式沒有已啟用的技能。",
   "This bot follows its ordinary channel settings. Guest access v1 applies when the platform rollout includes this bot.": "此機器人遵循一般頻道設定。平台推出範圍包含此機器人時，訪客存取 v1 將生效。",
+  "This bot must belong to the specialist’s organization to connect to it.": "此機器人必須屬於該專用智慧體的組織才能與其連線。",
   "This bot's details could not be loaded, so test messages can't be sent.": "無法載入該機器人的詳細資料，因此無法傳送測試訊息。",
   "This bot’s management changed. Manage the saved bot from Channel Bots.": "此機器人的管理權已變更。請從「頻道機器人」管理已儲存的機器人。",
   "This channel is not supported.": "不支援該頻道。",

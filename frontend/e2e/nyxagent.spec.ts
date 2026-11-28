@@ -26,6 +26,13 @@ function nav(page: Page) {
   return page.getByRole("navigation", { name: "Agents and conversations" });
 }
 
+async function saveAgentDetails(page: Page) {
+  const sheet = page.getByRole("dialog", { name: "Agent details" });
+  await sheet.getByRole("button", { name: "Save changes", exact: true }).click();
+  await page.getByRole("dialog", { name: "Review changes" }).getByRole("button", { name: "Save changes", exact: true }).click();
+  await expect(sheet.getByRole("region", { name: "Unsaved changes" })).toHaveCount(0);
+}
+
 test("the home composer starts a NyxBot thread: durable reload, connect link, rename and delete", async ({
   page,
 }) => {
@@ -394,26 +401,27 @@ test("agents get a display name and persona, shown with their @handle everywhere
   // The drawer edits both; they persist.
   await page.getByRole("button", { name: "Agent details" }).click();
   const profile = page.getByRole("dialog", { name: "Agent details" }).getByRole("form", { name: "Profile" });
-  await expect(profile.getByRole("textbox", { name: "Persona" })).toHaveValue("Warm, concise.");
-  await profile.getByRole("textbox", { name: "Persona" }).fill("Playful.");
-  await profile.getByRole("button", { name: "Save" }).click();
-  await expect(profile.getByRole("button", { name: "Save" })).toBeDisabled();
-  await page.keyboard.press("Escape");
+  await expect(profile.getByRole("textbox", { name: "Tone and style" })).toHaveValue("Warm, concise.");
+  await profile.getByRole("textbox", { name: "Tone and style" }).fill("Playful.");
+  await saveAgentDetails(page);
+  await page.getByRole("dialog", { name: "Agent details" }).getByRole("button", { name: "Close agent details" }).click();
+  await expect(page.getByRole("dialog", { name: "Agent details" })).toHaveCount(0);
   await page.reload();
   await page.getByRole("button", { name: "Agent details" }).click();
   await expect(
-    page.getByRole("dialog", { name: "Agent details" }).getByRole("textbox", { name: "Persona" }),
+    page.getByRole("dialog", { name: "Agent details" }).getByRole("textbox", { name: "Tone and style" }),
   ).toHaveValue("Playful.");
-  await page.keyboard.press("Escape");
+  await page.getByRole("dialog", { name: "Agent details" }).getByRole("button", { name: "Close agent details" }).click();
+  await expect(page.getByRole("dialog", { name: "Agent details" })).toHaveCount(0);
 
   // NyxBot can have one too (its @handle stays NyxBot).
   await page.getByRole("button", { name: "Home", exact: true }).click();
   await page.getByRole("region", { name: "What NyxBot remembers" }).getByRole("button", { name: "Manage" }).click();
   const nyxProfile = page.getByRole("dialog", { name: "Agent details" }).getByRole("form", { name: "Profile" });
   await nyxProfile.getByRole("textbox", { name: "Display name" }).fill("Nyx");
-  await nyxProfile.getByRole("button", { name: "Save" }).click();
-  await expect(nyxProfile.getByRole("button", { name: "Save" })).toBeDisabled();
-  await page.keyboard.press("Escape");
+  await saveAgentDetails(page);
+  await page.getByRole("dialog", { name: "Agent details" }).getByRole("button", { name: "Close agent details" }).click();
+  await expect(page.getByRole("dialog", { name: "Agent details" })).toHaveCount(0);
   await expect(nav(page).getByRole("button", { name: "Nyx (@NyxBot) — your personal agent" })).toBeVisible();
   const roster = page.getByRole("region", { name: "Your agents" });
   await expect(roster.getByRole("button", { name: "Chat with Nyx" })).toBeVisible();

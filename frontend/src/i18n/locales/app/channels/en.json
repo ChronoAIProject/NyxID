@@ -602,6 +602,7 @@
   "This Verify Token is shown only once. Copy it now. The old relay Verify Token no longer verifies.": "This Verify Token is shown only once. Copy it now. The old relay Verify Token no longer verifies.",
   "This agent has no enabled skills.": "This agent has no enabled skills.",
   "This bot follows its ordinary channel settings. Guest access v1 applies when the platform rollout includes this bot.": "This bot follows its ordinary channel settings. Guest access v1 applies when the platform rollout includes this bot.",
+  "This bot must belong to the specialist’s organization to connect to it.": "This bot must belong to the specialist’s organization to connect to it.",
   "This bot's details could not be loaded, so test messages can't be sent.": "This bot's details could not be loaded, so test messages can't be sent.",
   "This bot’s management changed. Manage the saved bot from Channel Bots.": "This bot’s management changed. Manage the saved bot from Channel Bots.",
   "This channel is not supported.": "This channel is not supported.",

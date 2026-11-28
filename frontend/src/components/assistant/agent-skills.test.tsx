@@ -299,7 +299,7 @@ it("never tests a pin until its Test button is clicked", () => {
   render(<AgentSkills agentId="agent" />);
   fireEvent.click(screen.getByRole("button", { name: /^Research/ }));
   expect(mocks.attachedPreview).toHaveBeenLastCalledWith("agent", "");
-  fireEvent.click(screen.getByRole("button", { name: "Test Research" }));
+  fireEvent.click(screen.getByRole("button", { name: "Check access to Research" }));
   expect(mocks.attachedPreview).toHaveBeenLastCalledWith("agent", "skill-id");
 });
 

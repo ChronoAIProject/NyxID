@@ -57,6 +57,11 @@ export function mockCreatedBotCount(): number {
   return state().bots.length;
 }
 
+/** Registered demo bots remain available to the real agent connection picker. */
+export function mockCreatedBots(): readonly CreateChannelBotResponse[] {
+  return state().bots;
+}
+
 const TELEGRAM: ChannelPlatformDescriptor = {
   platform: "telegram",
   display_name: "Telegram bot token",

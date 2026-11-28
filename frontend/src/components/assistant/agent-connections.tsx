@@ -230,10 +230,11 @@ function ConnectionGroups({
                     <GroupedRow asChild interactive>
                       <button
                         type="button"
+                        aria-label={translateUi("Edit connection order")}
                         disabled={disabled || Boolean(order.reason)}
                         title={order.reason}
                         onClick={() => order.start(group)}
-                      >{translateUi("Edit connection order")}</button>
+                      ><span>{translateUi("Edit connection order")}</span><span className="ml-auto type-secondary text-text-tertiary">{translateUi("All my agents")}</span></button>
                     </GroupedRow>
                   )
                 ))}

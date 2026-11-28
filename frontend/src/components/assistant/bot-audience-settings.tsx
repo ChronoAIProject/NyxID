@@ -20,7 +20,8 @@ import {
   useSetNyxBotPrivateChats,
 } from "@/hooks/use-nyxbot-agents";
 import { botAudienceDescription } from "@/lib/assistant/bot-audience";
-import { useDrawerSearchTarget } from "@/lib/drawer-search";
+import { DrawerNavigationContext, useDrawerSearchTarget } from "@/lib/drawer-search";
+import { useContext } from "react";
 import { useGroupedDraftGuard } from "@/lib/grouped-drafts";
 import { GuestReadiness } from "./guest-readiness";
 import { AudienceReadiness } from "./audience-readiness";
@@ -49,7 +50,7 @@ export function BotAudienceSettings({
   const searchId = `channel-audience-${channel.id}`;
   const searchTarget = useDrawerSearchTarget({
     id: searchId,
-    title: "Who can talk to this bot",
+    title: translateUi("Who can talk to this bot"),
     breadcrumb: `Channels › ${channel.bot_label}`,
     keywords:
       "Guests guest access private chats audience Grants organization spending billing",
@@ -127,6 +128,7 @@ function PersonalAudience({
   readonly disabled: boolean;
 }) {
   useUiTranslation();
+  const navigate = useContext(DrawerNavigationContext);
   const access = useSetNyxBotPrivateChats();
   const readiness = useGuestReadiness(channel.agent_id ?? agent?.id, !disabled);
   return (
@@ -134,6 +136,8 @@ function PersonalAudience({
       title={translateUi("Who can talk to this bot")}
       footer={
         <>
+          <p>{translateUi("Audience changes apply immediately. Discard in the drawer does not undo them.")}</p>
+          {access.isPending ? <p role="status">{translateUi("Saving audience…")}</p> : access.isSuccess ? <p role="status">{translateUi("Audience saved.")}</p> : null}
           <p>{botAudienceDescription(channel)}</p>
           <GuestReadiness
             readiness={readiness.data ?? channel.guest_readiness}
@@ -150,8 +154,9 @@ function PersonalAudience({
             <a
               className="type-button underline"
               href={`/assistant?agent=${encodeURIComponent(agent.id)}&details=grants`}
+              onClick={(event) => { if (navigate && event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey) { event.preventDefault(); void navigate("agent-service-access"); } }}
             >
-              {translateUi("Guest service access · Agent details → Grants")}
+              {translateUi("Guest service access · Agent details → Access")}
             </a>
           ) : null}
           {access.error ? (
@@ -266,6 +271,7 @@ function GuestSettings({
 }) {
   useUiTranslation();
   const privateAccess = useSetNyxBotPrivateChats();
+  const navigate = useContext(DrawerNavigationContext);
   const legacy = settings.guest_policy_mode !== "grants";
   const grantsLink = `/assistant?agent=${encodeURIComponent(settings.agent_id ?? channel.agent_id ?? "")}&details=grants`;
   return (
@@ -273,6 +279,8 @@ function GuestSettings({
       title={translateUi("Who can talk to this bot")}
       footer={
         <>
+          <p>{translateUi("Audience changes apply immediately. Discard in the drawer does not undo them.")}</p>
+          {api.save.isPending ? <p role="status">{translateUi("Saving audience…")}</p> : api.save.isSuccess ? <p role="status">{translateUi("Audience saved.")}</p> : null}
           <p>{botAudienceDescription(channel)}</p>
           <p>{translateUi("Group chats keep their own audience settings.")}</p>
           {!settings.can_manage ? <p>{translateUi("An organization admin can change these settings.")}</p> : null}
@@ -331,22 +339,22 @@ function GuestSettings({
         {legacy ? (
           <p>
             {settings.binding_limits_guest_services
-              ? translateUi("This bot's saved limits exclude services listed for guests in the specialist's Grants. An organization admin can review access for all linked bots in Grants.")
-              : translateUi("Existing guest limits are kept. Review them in Grants.")}
+              ? translateUi("This bot's saved limits exclude services listed for guests in the specialist's Access. An organization admin can review access for all linked bots in Access.")
+              : translateUi("Existing guest limits are kept. Review them in Access.")}
           </p>
         ) : (
           <>
             <p>
               {translateUi(
-                "Enabling guests applies this specialist's Grants, including the default Use access.",
+                "Enabling guests applies this specialist's Access settings, including the default Use access.",
               )}
             </p>
           </>
         )}
         <p>{translateUi("Guests can use")}</p>
         <GuestServices services={settings.effective_guest_services} />
-        <a className="type-button underline" href={grantsLink}>
-          {translateUi("Guest service access · Agent details → Grants")}
+        <a className="type-button underline" href={grantsLink} onClick={(event) => { if (navigate && event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey) { event.preventDefault(); void navigate("agent-service-access"); } }}>
+          {translateUi("Guest service access · Agent details → Access")}
         </a>
       </GroupedRow>
       {settings.can_manage && settings.spent_today_credits !== undefined && settings.reserved_today_credits !== undefined ? <>

@@ -13,7 +13,7 @@ import { useCompactTitle } from "@/lib/compact-title";
 import { FormViewport } from "@/components/ui/form-viewport";
 import { useVisualViewportBounds } from "@/lib/form-viewport";
 import { DrawerSearchProvider, AgentDrawerSearch } from "./agent-drawer-search";
-import { DrawerSearchTabContext, type DrawerSearchTab } from "@/lib/drawer-search";
+import { DrawerSearchTabContext, DrawerNavigationContext, useDrawerSearchTarget, type DrawerSearchTab } from "@/lib/drawer-search";
 import {
   GroupedFormActions,
   GroupedFormScope,
@@ -33,7 +33,8 @@ import { MachineCapabilities } from "./machine-capabilities";
 import { AgentOperationScopes } from "./agent-operation-scopes";
 import { MachineGrantPicker } from "./machine-grant-picker";
 import { AgentAutomations } from "./automation-preferences";
-import { useEffect, useRef, useState, type ComponentProps } from "react";
+import { useContext, useEffect, useRef, useState, type ComponentProps } from "react";
+import { createPortal } from "react-dom";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useQueryClient } from "@tanstack/react-query";
 import { Trash2, X } from "lucide-react";
@@ -44,6 +45,7 @@ import {
   GroupedTextarea,
   GroupedSelectTrigger,
   GroupedFooter,
+  GroupedDisclosure,
 } from "@/components/ui/grouped-list";
 import {
   SegmentedControl,
@@ -153,7 +155,7 @@ function errorMessage(error: unknown, fallback: string): string {
  * Who can widen a specialist's access, and why the agent itself cannot. Org
  * agents are maintained by the organization: only its maintainers approve.
  */
-export function accessAuthorityCopy(
+function accessAuthorityCopy(
   agent: AssistantAgent,
   requestMode: "denied" | "routed_to_nyxbot" | undefined,
 ): string {
@@ -447,6 +449,7 @@ function AgentDetailsContent({
   const panels = useRef<HTMLDivElement>(null);
   const [pageContainer, setPageContainer] = useState<HTMLDivElement | null>(null);
   const [editingAvatar, setEditingAvatar] = useState(false);
+  const [progressHost, setProgressHost] = useState<HTMLDivElement | null>(null);
   const readOnly = agent.status === "destroyed" || agent.can_maintain === false;
   const tabs = DRAWER_TABS.filter(([value]) =>
     value === "channels"
@@ -531,15 +534,9 @@ function AgentDetailsContent({
                 <CompactScroll data-panel-scroll="" active={selected === value && !searching} className="assistant-scrollbar flex-1 space-y-6 pb-6">
                   {value === "overview" ? (
                     <>
-                      {agent.share_role ? (
-                        <SharedAgentProfile agent={agent} />
-                      ) : (
-                        <ProfileForm agent={agent} />
-                      )}
-                      <AgentAvatarEditor agent={agent} onEditingChange={setEditingAvatar} />
                       <GroupedList
                         title={translateUi("Ownership")}
-                        search={{ id: "ownership", title: "Ownership", keywords: [agent.owner_kind === "org" ? agent.owner_name ?? agent.owner_id : agent.share_role ? `Shared by ${agent.owner_name ?? agent.owner_id}` : "Personal agent", agent.org_role, agent.share_role].filter(Boolean).join(" ") }}
+                        search={{ id: "ownership", title: translateUi("Ownership"), keywords: [agent.owner_kind === "org" ? agent.owner_name ?? agent.owner_id : agent.share_role ? `Shared by ${agent.owner_name ?? agent.owner_id}` : "Personal agent", agent.org_role, agent.share_role].filter(Boolean).join(" ") }}
                         footer={
                           agent.owner_kind === "org"
                             ? agent.can_use !== undefined && agent.can_maintain !== undefined
@@ -559,7 +556,15 @@ function AgentDetailsContent({
                                 : translateUi("Personal agent")
                           }
                         />
+                        {!agent.share_role ? <ApprovalSummary agent={agent} /> : null}
                       </GroupedList>
+                      {agent.share_role ? (
+                        <SharedAgentProfile agent={agent} />
+                      ) : (
+                        <ProfileForm agent={agent} />
+                      )}
+                      {!agent.share_role && !tabs.some(([tab]) => tab === "channels") ? <div ref={setProgressHost} /> : null}
+                      <AgentAvatarEditor agent={agent} onEditingChange={setEditingAvatar} />
                       {agent.kind === "specialist" && agent.owner_kind === "org" && agent.owner_id && agent.can_govern === true && (
                         <OrgAgentMemberAccess orgId={agent.owner_id} agentId={agent.id} />
                       )}
@@ -579,6 +584,7 @@ function AgentDetailsContent({
                         <SharedConsentCards agentId={agent.id} />
                       ) : (
                         <>
+                          <ApprovalBehaviorForm agent={agent} />
                           {agent.kind === "specialist" ? (
                             <>
                               {agent.owner_kind === "org" && agent.can_maintain === false ? (
@@ -628,10 +634,10 @@ function AgentDetailsContent({
                           ) : (
                             <GroupedList
                               title={translateUi("Access")}
-                              footer={translateUi("NyxBot runs with full access to your connected services and account, and is the only agent that can grant access to specialists. Machine capabilities are assigned separately. Its access mode decides when it asks you first.")}
+                              footer={translateUi("NyxBot can use your connected services and account, and is the only agent that can grant access to specialists. Machine capabilities are assigned separately. Approval behavior controls when it asks before acting.")}
                             >
                               <GroupedRow
-                                search={{ id: "nyxbot-full-access", title: "Connected services and account", breadcrumb: "Access", keywords: "Full access" }}
+                                search={{ id: "nyxbot-full-access", title: translateUi("Connected services and account"), breadcrumb: "Access", keywords: "Full access" }}
                                 title={translateUi("Connected services and account")}
                                 accessory="Full access"
                               />
@@ -673,7 +679,10 @@ function AgentDetailsContent({
                       <MemoryList agent={agent} memory={memory} />
                     )
                   ) : (
-                    <ChannelBotsManager agents={agents} agent={agent} connectionId={selected === "channels" ? connectionId : undefined} />
+                    <>
+                      <ChannelBotsManager agents={agents} agent={agent} connectionId={selected === "channels" ? connectionId : undefined} />
+                      <div ref={setProgressHost} />
+                    </>
                   )}
                 </CompactScroll>
                 <GroupedFormBar />
@@ -686,6 +695,9 @@ function AgentDetailsContent({
       </div>
     </SegmentedControl>
     </FormViewport>
+    {!agent.share_role ? <DrawerSearchTabContext value={tabs.some(([tab]) => tab === "channels") ? "channels" : "overview"}>
+      <ChannelProgressForm agent={agent} container={progressHost} breadcrumb={tabs.some(([tab]) => tab === "channels") ? "Channels" : "Overview"} />
+    </DrawerSearchTabContext> : null}
     {!editingAvatar && <GroupedFormBar viewport />}
     </GroupedFormScope>
     </DrawerSearchProvider></DrawerSectionInfoContext>
@@ -700,11 +712,12 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
   const advancedControls = useFeature(FEATURE_FLAG.ASSISTANT_MODEL_CONTROLS);
   const update = useUpdateNyxBotAgent();
   const models = useNyxAgentModels(advancedControls, { agentId: agent.id });
-  const workspaceMode = useNyxBotSettings().data?.access_mode;
+  const navigate = useContext(DrawerNavigationContext);
+  const deviceVoice = useFeature(FEATURE_FLAG.VOICE_AGENT_KEY) && agent.owner_kind !== "org" && agent.status !== "destroyed";
   const nyxbot = agent.kind === "nyxbot";
   const readOnly = agent.status === "destroyed" || agent.can_maintain === false;
-  const form = useAppForm<AssistantAgentProfile>({
-    resolver: zodResolver(assistantAgentProfileSchema(agent.kind)),
+  const form = useAppForm<Omit<AssistantAgentProfile, "access_mode_override" | "channel_checking_notice">>({
+    resolver: zodResolver(assistantAgentProfileSchema(agent.kind).omit({ access_mode_override: true, channel_checking_notice: true })),
     resetOptions: { keepDirtyValues: true },
     values: {
       name: agent.name,
@@ -713,14 +726,12 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
       persona: agent.persona ?? "",
       voice_instructions: agent.voice_instructions ?? "",
       model: agent.model ?? "",
-      access_mode_override: agent.access_mode_override ?? null,
-      channel_checking_notice: agent.channel_checking_notice ?? false,
     },
   });
   const [error, setError] = useState<string>();
   const { dirtyFields } = form.formState;
 
-  async function save(values: AssistantAgentProfile) {
+  async function save(values: Omit<AssistantAgentProfile, "access_mode_override" | "channel_checking_notice">) {
     setError(undefined);
     const dirty = dirtyFields;
     try {
@@ -733,12 +744,6 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
         ...(dirty.persona ? { persona: values.persona } : {}),
         ...(dirty.voice_instructions ? { voice_instructions: values.voice_instructions } : {}),
         ...(dirty.model ? { model: values.model } : {}),
-        ...(dirty.access_mode_override
-          ? { access_mode_override: values.access_mode_override }
-          : {}),
-        ...(dirty.channel_checking_notice
-          ? { channel_checking_notice: values.channel_checking_notice }
-          : {}),
       });
       form.reset(values, { keepDirtyValues: false });
     } catch (cause) {
@@ -770,7 +775,7 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
                 control={form.control}
                 name="name"
                 render={({ field }) => (
-                  <GroupedRow search={{ id: "profile-name", title: "Name", breadcrumb: "Overview › Profile", keywords: String(field.value ?? "") }} asChild className="grouped-field">
+                  <GroupedRow search={{ id: "profile-name", title: translateUi("Name"), breadcrumb: "Overview › Profile", keywords: String(field.value ?? "") }} asChild className="grouped-field">
                     <FormItem>
                       <FormLabel>{translateUi("Name")}</FormLabel>
                       <FormControl>
@@ -796,7 +801,7 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
               control={form.control}
               name="display_name"
               render={({ field }) => (
-                <GroupedRow search={{ id: "profile-display_name", title: "Display name", breadcrumb: "Overview › Profile", keywords: String(field.value ?? "") }} asChild className="grouped-field">
+                <GroupedRow search={{ id: "profile-display_name", title: translateUi("Display name"), breadcrumb: "Overview › Profile", keywords: String(field.value ?? "") }} asChild className="grouped-field">
                   <FormItem>
                     <FormLabel>{translateUi("Display name")}</FormLabel>
                     <FormControl>
@@ -821,7 +826,7 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
                 control={form.control}
                 name="model"
                 render={({ field }) => (
-                  <GroupedRow search={{ id: "profile-model", title: "Model", breadcrumb: "Overview › Profile", keywords: `${field.value ?? ""} ${models.data?.filter((model) => model.id === field.value).map(modelDisplayName).join(" ") ?? ""}` }} asChild className="grouped-field">
+                  <GroupedRow search={{ id: "profile-model", title: translateUi("Model"), breadcrumb: "Overview › Profile", keywords: `${field.value ?? ""} ${models.data?.filter((model) => model.id === field.value).map(modelDisplayName).join(" ") ?? ""}` }} asChild className="grouped-field">
                     <FormItem>
                       <FormLabel>{translateUi("Model")}</FormLabel>
                       <ModelSelect
@@ -843,84 +848,11 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
             )}
             <FormField
               control={form.control}
-              name="access_mode_override"
-              render={({ field }) => (
-                <GroupedRow search={{ id: "profile-access_mode_override", title: "Access mode", breadcrumb: "Overview › Profile", keywords: field.value ? ACCESS_MODE_LABEL[field.value] : `Workspace setting ${workspaceMode ? ACCESS_MODE_LABEL[workspaceMode] : ""}` }}
-                  asChild
-                  className="!flex-row !flex-wrap !items-center !gap-3"
-                >
-                  <FormItem>
-                    <FormLabel className="mr-auto text-foreground">{translateUi("Access mode")}</FormLabel>
-                    <Select
-                      value={field.value ?? INHERIT}
-                      disabled={readOnly}
-                      onValueChange={(value) =>
-                        field.onChange(
-                          value === INHERIT
-                            ? null
-                            : nyxAgentAccessModeSchema.parse(value),
-                        )
-                      }
-                    >
-                      <FormControl>
-                        <GroupedSelectTrigger aria-label={translateUi("Agent access mode")}>
-                          <SelectValue />
-                        </GroupedSelectTrigger>
-                      </FormControl>
-                      <SelectContent>
-                        <SelectItem value={INHERIT}>{translateUi("Workspace setting")}{workspaceMode
-                            ? translateUi(" ({{value}})", { value: ACCESS_MODE_LABEL[workspaceMode] })
-                            : ""}
-                        </SelectItem>
-                        {nyxAgentAccessModeSchema.options.map((option) => (
-                          <SelectItem key={option} value={option}>
-                            {ACCESS_MODE_LABEL[option]}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                    <FormDescription className="basis-full type-secondary text-text-tertiary">
-                        {
-                          ACCESS_MODE_DESCRIPTION[
-                            effectiveAccessMode(workspaceMode, field.value)
-                          ]
-                        }
-                      </FormDescription>
-                    <GroupedFooter>
-                      <FormMessage />
-                    </GroupedFooter>
-                  </FormItem>
-                </GroupedRow>
-              )}
-            />
-            <FormField
-              control={form.control}
-              name="channel_checking_notice"
-              render={({ field }) => (
-                <GroupedRow search={{ id: "profile-channel_checking_notice", title: "Channel progress reply", breadcrumb: "Overview › Profile", keywords: field.value ? "On" : "Off" }} asChild className="grouped-field">
-                  <FormItem>
-                    <div className="flex items-center justify-between gap-3">
-                      <FormLabel className="text-foreground">{translateUi("Channel progress reply")}</FormLabel>
-                      <FormControl>
-                        <Switch
-                          checked={field.value ?? false}
-                          onCheckedChange={field.onChange}
-                          disabled={readOnly}
-                        />
-                      </FormControl>
-                    </div>
-                    <FormDescription className="basis-full type-secondary text-text-tertiary">{translateUi("After five seconds, send “Got it, let me check and get back to you.” if an external check is needed. Attached skill reads and tool discovery do not trigger it. The completed answer follows in the same chat.")}</FormDescription>
-                  </FormItem>
-                </GroupedRow>
-              )}
-            />
-            <FormField
-              control={form.control}
               name="description"
               render={({ field }) => (
-                <GroupedRow search={{ id: "profile-description", title: nyxbot ? "Notes" : "Role", breadcrumb: "Overview › Profile", keywords: `Description ${field.value ?? ""}` }} asChild className="grouped-field">
+                <GroupedRow search={{ id: "profile-description", title: translateUi("Instructions"), breadcrumb: "Overview › Profile", keywords: `Role purpose notes description ${field.value ?? ""}` }} asChild className="grouped-field">
                   <FormItem>
-                    <FormLabel>{nyxbot ? translateUi("Notes") : translateUi("Role")}</FormLabel>
+                    <FormLabel>{translateUi("Instructions")}</FormLabel>
                     <FormControl>
                       <GroupedTextarea
                         className="min-h-20"
@@ -934,20 +866,21 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
                         {...field}
                       />
                     </FormControl>
-                    <GroupedFooter>
-                      <FormMessage />
-                    </GroupedFooter>
+                    <FormDescription className="basis-full type-secondary text-text-tertiary">{nyxbot ? translateUi("How this agent should work with you. Memory keeps facts and preferences; Skills provide reusable procedures.") : translateUi("Define this specialist’s role, purpose and working instructions. Memory keeps facts and preferences; Skills provide reusable procedures.")}</FormDescription>
+                    <GroupedFooter><FormMessage /></GroupedFooter>
                   </FormItem>
                 </GroupedRow>
               )}
             />
+          </GroupedList>
+          <GroupedList title={translateUi("Tone and style")} search={false}>
             <FormField
               control={form.control}
               name="persona"
               render={({ field }) => (
-                <GroupedRow search={{ id: "profile-persona", title: "Persona", breadcrumb: "Overview › Profile", keywords: String(field.value ?? "") }} asChild className="grouped-field">
+                <GroupedRow search={{ id: "profile-persona", title: translateUi("Tone and style"), breadcrumb: "Overview", keywords: `Persona personality communication ${field.value ?? ""}` }} asChild className="grouped-field">
                   <FormItem>
-                    <FormLabel>{translateUi("Persona")}</FormLabel>
+                    <FormLabel>{translateUi("Tone and style")}</FormLabel>
                     <FormControl>
                       <GroupedTextarea
                         className="min-h-20"
@@ -965,13 +898,15 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
                 </GroupedRow>
               )}
             />
+          </GroupedList>
+          <GroupedList title={translateUi("Call instructions")} search={false}>
             <FormField
               control={form.control}
               name="voice_instructions"
               render={({ field }) => (
-                <GroupedRow search={{ id: "profile-voice-instructions", title: "Voice instructions", breadcrumb: "Overview › Profile", keywords: String(field.value ?? "") }} asChild className="grouped-field">
+                <GroupedRow search={{ id: "profile-voice-instructions", title: translateUi("Call instructions"), breadcrumb: "Overview", keywords: `Voice phone device ${field.value ?? ""}` }} asChild className="grouped-field">
                   <FormItem>
-                    <FormLabel>{translateUi("Voice instructions")}</FormLabel>
+                    <FormLabel>{translateUi("Call instructions")}</FormLabel>
                     <FormControl>
                       <GroupedTextarea
                         className="min-h-20"
@@ -988,9 +923,10 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
               )}
             />
           </GroupedList>
+          {deviceVoice && navigate ? <GroupedList><GroupedDisclosure onClick={() => void navigate("device-voice")}>{translateUi("Set up optional Device voice")}</GroupedDisclosure></GroupedList> : null}
           {readOnly ? null : (
             <GroupedFormActions
-          changes={() => describeChanges(form.formState.defaultValues, form.getValues(), [{ key: "name", label: "Name" }, { key: "display_name", label: "Display name" }, { key: "description", label: "Role / description" }, { key: "persona", label: "Persona" }, { key: "voice_instructions", label: "Voice instructions" }, { key: "channel_checking_notice", label: "Channel progress reply" }, { key: "model", label: "Model", format: (value) => models.data?.find((model) => model.id === value) ? modelDisplayName(models.data.find((model) => model.id === value)!) : String(value || "Default model") }, { key: "access_mode_override", label: "Access mode", format: labelValue(ACCESS_MODE_LABEL, "Workspace setting") }])}
+          changes={() => describeChanges(form.formState.defaultValues, form.getValues(), [{ key: "name", label: "Name" }, { key: "display_name", label: "Display name" }, { key: "description", label: "Instructions" }, { key: "persona", label: "Tone and style" }, { key: "voice_instructions", label: "Call instructions" }, { key: "model", label: "Model", format: (value) => models.data?.find((model) => model.id === value) ? modelDisplayName(models.data.find((model) => model.id === value)!) : String(value || "Default model") }])}
               label={translateUi("profile")}
               dirty={form.formState.isDirty}
               pending={update.isPending}
@@ -1008,6 +944,315 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
   );
 }
 
+function ApprovalBehaviorForm({ agent }: { readonly agent: AssistantAgent }) {
+  useUiTranslation();
+  const workspace = useNyxBotSettings();
+  const workspaceMode = workspace.data?.access_mode;
+  const readOnly = agent.status === "destroyed" || agent.can_maintain === false;
+  const update = useUpdateNyxBotAgent();
+  const [error, setError] = useState<string>();
+  const form = useAppForm<Pick<AssistantAgentProfile, "access_mode_override">>({
+    resolver: zodResolver(
+      assistantAgentProfileSchema(agent.kind).pick({
+        access_mode_override: true,
+      }),
+    ),
+    resetOptions: { keepDirtyValues: true },
+    values: { access_mode_override: agent.access_mode_override ?? null },
+  });
+  const save = form.handleSubmit(async (values) => {
+    setError(undefined);
+    try {
+      await update.mutateAsync({ id: agent.id, ...values });
+      form.reset(values, { keepDirtyValues: false });
+    } catch (cause) {
+      setError(errorMessage(cause, "Could not save. Try again."));
+    }
+  });
+  return (
+    <Form {...form}>
+      <form
+        aria-label={translateUi("Approval behavior")}
+        onSubmit={save}
+        className="space-y-3"
+      >
+        <GroupedList
+          title={translateUi("Approval behavior")}
+          search={false}
+          footer={
+            <>
+              <p>
+                {translateUi(
+                  "Controls when this agent asks before acting within its service and machine permissions. It does not grant more capabilities.",
+                )}
+              </p>
+              <p>
+                {form.watch("access_mode_override") == null
+                  ? translateUi("Source: workspace setting")
+                  : translateUi("Source: agent override")}
+              </p>
+              {workspace.error && form.watch("access_mode_override") == null ? (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  onClick={() => void workspace.refetch()}
+                >
+                  {translateUi("Retry workspace setting")}
+                </Button>
+              ) : null}
+              {error ? (
+                <p role="alert" className="text-destructive">
+                  {translateUi(error)}
+                </p>
+              ) : null}
+            </>
+          }
+        >
+          <FormField
+            control={form.control}
+            name="access_mode_override"
+            render={({ field }) => (
+              <GroupedRow
+                search={{
+                  id: "profile-access_mode_override",
+                  title: translateUi("Approval behavior"),
+                  breadcrumb: "Access",
+                  keywords: `approvals permissions ask before acting ${field.value ? ACCESS_MODE_LABEL[field.value] : `Workspace setting ${workspaceMode ? ACCESS_MODE_LABEL[workspaceMode] : ""}`}`,
+                }}
+                asChild
+                className="!flex-row !flex-wrap !items-center !gap-3"
+              >
+                <FormItem>
+                  <FormLabel className="mr-auto text-foreground">
+                    {translateUi("Approval behavior")}
+                  </FormLabel>
+                  <Select
+                    value={field.value ?? INHERIT}
+                    disabled={readOnly}
+                    onValueChange={(value) =>
+                      field.onChange(
+                        value === INHERIT
+                          ? null
+                          : nyxAgentAccessModeSchema.parse(value),
+                      )
+                    }
+                  >
+                    <FormControl>
+                      <GroupedSelectTrigger
+                        aria-label={translateUi("Agent approval behavior")}
+                      >
+                        <SelectValue />
+                      </GroupedSelectTrigger>
+                    </FormControl>
+                    <SelectContent>
+                      <SelectItem value={INHERIT}>
+                        {translateUi("Workspace setting")}
+                        {workspaceMode
+                          ? translateUi(" ({{value}})", {
+                              value: ACCESS_MODE_LABEL[workspaceMode],
+                            })
+                          : ""}
+                      </SelectItem>
+                      {nyxAgentAccessModeSchema.options.map((option) => (
+                        <SelectItem key={option} value={option}>
+                          {ACCESS_MODE_LABEL[option]}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <FormDescription className="basis-full type-secondary text-text-tertiary">
+                    {field.value != null || workspaceMode
+                      ? translateUi(
+                          ACCESS_MODE_DESCRIPTION[
+                            effectiveAccessMode(workspaceMode, field.value)
+                          ],
+                        )
+                      : workspace.isPending
+                        ? translateUi("Loading workspace approval behavior…")
+                        : translateUi(
+                            "Workspace approval behavior is unavailable. Retry to see the effective setting.",
+                          )}
+                  </FormDescription>
+                  <GroupedFooter>
+                    <FormMessage />
+                  </GroupedFooter>
+                </FormItem>
+              </GroupedRow>
+            )}
+          />
+        </GroupedList>
+        {!readOnly ? (
+          <GroupedFormActions
+            label={translateUi("Approval behavior")}
+            dirty={form.formState.isDirty}
+            pending={update.isPending}
+            save={save}
+            discard={() => {
+              form.reset(undefined, { keepDirtyValues: false });
+              setError(undefined);
+            }}
+            changes={() =>
+              describeChanges(form.formState.defaultValues, form.getValues(), [
+                {
+                  key: "access_mode_override",
+                  label: "Approval behavior",
+                  format: labelValue(ACCESS_MODE_LABEL, "Workspace setting"),
+                },
+              ])
+            }
+          />
+        ) : null}
+      </form>
+    </Form>
+  );
+}
+
+function ChannelProgressForm({
+  agent,
+  container,
+  breadcrumb,
+}: {
+  readonly agent: AssistantAgent;
+  readonly container: HTMLElement | null;
+  readonly breadcrumb: string;
+}) {
+  useUiTranslation();
+  const readOnly = agent.status === "destroyed" || agent.can_maintain === false;
+  const update = useUpdateNyxBotAgent();
+  const [error, setError] = useState<string>();
+  const form = useAppForm<
+    Pick<AssistantAgentProfile, "channel_checking_notice">
+  >({
+    resolver: zodResolver(
+      assistantAgentProfileSchema(agent.kind).pick({
+        channel_checking_notice: true,
+      }),
+    ),
+    resetOptions: { keepDirtyValues: true },
+    values: { channel_checking_notice: agent.channel_checking_notice ?? false },
+  });
+  const save = form.handleSubmit(async (values) => {
+    setError(undefined);
+    try {
+      await update.mutateAsync({ id: agent.id, ...values });
+      form.reset(values, { keepDirtyValues: false });
+    } catch (cause) {
+      setError(errorMessage(cause, "Could not save. Try again."));
+    }
+  });
+  return container
+    ? createPortal(
+        <Form {...form}>
+          <form
+            aria-label={translateUi("Channel progress reply")}
+            onSubmit={save}
+            className="space-y-3"
+          >
+            <GroupedList
+              title={translateUi("Channel progress reply")}
+              search={false}
+              footer={
+                error ? (
+                  <p role="alert" className="text-destructive">
+                    {translateUi(error)}
+                  </p>
+                ) : undefined
+              }
+            >
+              <FormField
+                control={form.control}
+                name="channel_checking_notice"
+                render={({ field }) => (
+                  <GroupedRow
+                    search={{
+                      id: "profile-channel_checking_notice",
+                      title: translateUi("Channel progress reply"),
+                      breadcrumb,
+                      keywords: field.value ? "On" : "Off",
+                    }}
+                    asChild
+                    className="grouped-field"
+                  >
+                    <FormItem>
+                      <div className="flex items-center justify-between gap-3">
+                        <FormLabel className="text-foreground">
+                          {translateUi("Channel progress reply")}
+                        </FormLabel>
+                        <FormControl>
+                          <Switch
+                            checked={field.value ?? false}
+                            onCheckedChange={field.onChange}
+                            disabled={readOnly}
+                          />
+                        </FormControl>
+                      </div>
+                      <FormDescription className="basis-full type-secondary text-text-tertiary">
+                        {translateUi(
+                          "Applies across this agent’s channels. After five seconds of an external check, send a short progress reply; the completed answer follows in the same chat. Skill reads and tool discovery do not trigger it.",
+                        )}
+                      </FormDescription>
+                    </FormItem>
+                  </GroupedRow>
+                )}
+              />
+            </GroupedList>
+            {!readOnly ? (
+              <GroupedFormActions
+                label={translateUi("Channel progress reply")}
+                dirty={form.formState.isDirty}
+                pending={update.isPending}
+                save={save}
+                discard={() => {
+                  form.reset(undefined, { keepDirtyValues: false });
+                  setError(undefined);
+                }}
+                changes={() =>
+                  describeChanges(
+                    form.formState.defaultValues,
+                    form.getValues(),
+                    [
+                      {
+                        key: "channel_checking_notice",
+                        label: "Channel progress reply",
+                      },
+                    ],
+                  )
+                }
+              />
+            ) : null}
+          </form>
+        </Form>,
+        container,
+      )
+    : null;
+}
+
+function ApprovalSummary({ agent }: { readonly agent: AssistantAgent }) {
+  useUiTranslation();
+  const navigate = useContext(DrawerNavigationContext);
+  const workspace = useNyxBotSettings();
+  const mode = agent.access_mode_override ?? workspace.data?.access_mode;
+  return (
+    <GroupedDisclosure
+      onClick={() => void navigate?.("profile-access_mode_override")}
+    >
+      <span className="block">
+        {translateUi("Approval behavior")}:{" "}
+        {mode
+          ? ACCESS_MODE_LABEL[mode]
+          : workspace.isPending
+            ? translateUi("Loading…")
+            : translateUi("Unavailable")}
+        <span className="block type-secondary text-text-tertiary">
+          {agent.access_mode_override == null
+            ? translateUi("Source: workspace setting")
+            : translateUi("Source: agent override")}
+        </span>
+      </span>
+    </GroupedDisclosure>
+  );
+}
+
 function GrantsForm({
   agent,
   requestMode,
@@ -1016,6 +1261,7 @@ function GrantsForm({
   readonly requestMode?: "denied" | "routed_to_nyxbot";
 }) {
   useUiTranslation();
+  const searchTarget = useDrawerSearchTarget({ id: "agent-service-access", title: translateUi("Service and guest access"), breadcrumb: "Access", keywords: "permissions guest service actions" });
   const orgChannels = useFeature(FEATURE_FLAG.ORG_SPECIALIST_CHANNELS);
   const canManageGuests =
     agent.owner_kind !== "org" || (orgChannels && agent.org_role === "admin");
@@ -1068,10 +1314,10 @@ function GrantsForm({
   }
 
   return (
-    <section id={GRANTS_SECTION_ID} aria-label={translateUi("Grants")} className="space-y-3">
+    <section ref={searchTarget} id={GRANTS_SECTION_ID} aria-label={translateUi("Access grants")} className="space-y-3">
       <Form {...form}>
         <form
-          aria-label={translateUi("Grants")}
+          aria-label={translateUi("Access grants")}
           noValidate
           onSubmit={form.handleSubmit(save)}
           className="space-y-3"
@@ -1162,7 +1408,7 @@ function GrantsForm({
                       </>
                     }
                   >
-                    <GroupedRow search={{ id: "account-read", title: "Read my account", breadcrumb: "Access › Account", keywords: field.value ? "On" : "Off" }}>
+                    <GroupedRow search={{ id: "account-read", title: translateUi("Read my account"), breadcrumb: "Access › Account", keywords: field.value ? "On" : "Off" }}>
                       <div className="mr-auto">
                         <FormLabel className="text-foreground">{translateUi("Read my account")}</FormLabel>
                       </div>
@@ -1317,6 +1563,7 @@ function MemoryList({
 
   return (
     <section aria-label={translateUi("Agent memory")} className="space-y-6">
+      <p className="px-4 type-secondary text-text-tertiary">{translateUi("Memory keeps facts and preferences across chats. Use Instructions for working behavior and Skills for reusable procedures.")}</p>
       {agent.status !== "destroyed" ? (
         <form
           aria-label={
