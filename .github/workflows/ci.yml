@@ -515,7 +515,6 @@ jobs:
           --log-file "$RUNNER_TEMP/clippy.log" --
           python3 .github/scripts/ci_resources.py clippy cargo clippy --workspace --lib --bins --locked -- -D warnings
       - name: Check raw AES receivers and Rust privacy
-        if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.backend == 'true'
         run: python3 scripts/raw-aes/check.py
 
   rust-clippy:
@@ -553,7 +552,6 @@ jobs:
           --log-file "$RUNNER_TEMP/clippy.log" --
           python3 .github/scripts/ci_resources.py clippy cargo clippy --workspace --all-targets -- -D warnings
       - name: Check raw AES receivers and Rust privacy
-        if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.backend == 'true'
         run: python3 scripts/raw-aes/check.py
       - name: Verify incremental cache and CodeQL Rust fixtures
         env:
