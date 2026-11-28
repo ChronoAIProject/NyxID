@@ -269,7 +269,7 @@ pub(super) async fn exact_sandbox(
 fn has_non_creation_proof(creation: &AssistantCmaCreation) -> bool {
     !creation.released_by_inventory
         && creation.submission_state == "confirmed_not_created"
-        && creation.operation_id.is_none()
+        && (creation.covered_key.is_some() || creation.operation_id.is_none())
         && creation.cma_agent_id.is_none()
         && creation.cma_sandbox_id.is_none()
 }
@@ -286,13 +286,67 @@ async fn observe(
     if creation.is_some_and(|c| c.released_by_inventory) {
         return (unknown("released_after_inventory_check"), None);
     }
-    if parent.cma_sandbox_id.is_none() && creation.is_some_and(has_non_creation_proof) {
+    if parent.cma_sandbox_id.is_none()
+        && let Some(creation) = creation.filter(|row| has_non_creation_proof(row))
+    {
         return (
             InspectionOutcome::ProvenAbsent {
-                evidence: "confirmed_not_created",
+                evidence: if creation.covered_key.is_some() {
+                    "covered_creation_outcome"
+                } else {
+                    "confirmed_not_created"
+                },
             },
             None,
         );
+    }
+    if let Some(creation) = creation.filter(|row| row.covered_key.is_some()) {
+        use super::assistant_cma_admission::creation_outcome::{self, Evidence};
+        match creation_outcome::lookup(gateway, creation).await {
+            Ok(Evidence::Absent { operation })
+                if parent.cma_sandbox_id.is_none()
+                    && parent
+                        .operation_id
+                        .as_deref()
+                        .is_none_or(|id| Some(id) == operation.as_deref()) =>
+            {
+                return (
+                    InspectionOutcome::ProvenAbsent {
+                        evidence: "covered_creation_outcome",
+                    },
+                    None,
+                );
+            }
+            Ok(Evidence::Created { sandbox, .. }) => {
+                return match exact_sandbox(gateway, &parent.user_id, &sandbox).await {
+                    Ok(remote)
+                        if remote.owner_id.as_deref() == Some(parent.user_id.as_str())
+                            && parent
+                                .cma_sandbox_id
+                                .as_deref()
+                                .is_none_or(|id| id == sandbox) =>
+                    {
+                        (
+                            InspectionOutcome::Exists {
+                                remote_sandbox_id: remote.id.clone(),
+                                state: remote.state,
+                            },
+                            Some(remote),
+                        )
+                    }
+                    Ok(_) => (unknown("owner_mismatch"), None),
+                    Err(error) => (unknown_reason(error), None),
+                };
+            }
+            Ok(Evidence::Progress { operation: None }) if creation.operation_id.is_none() => {
+                return (unknown("covered_creation_in_progress"), None);
+            }
+            Ok(Evidence::Unknown | Evidence::Absent { .. }) => {
+                return (unknown("covered_creation_outcome_unknown"), None);
+            }
+            Err(error) => return (unknown_reason(error), None),
+            _ => {}
+        }
     }
     let mut operation_reason = None;
     let result = async {
@@ -442,12 +496,20 @@ pub async fn inspect(
         InspectionOutcome::Unknown {
             reason: "operation_waiting_for_connection",
         } => Some(
-            "The owner must complete the connection required by CMA and retry the original request. NyxID continues observing; it cannot resume this operation by reading it.",
+            "The owner may repair the connection and retry the original request, or explicitly cancel a covered operation. An older creation remains held until authoritative evidence is available.",
         ),
         InspectionOutcome::Unknown {
             reason: "operation_failed_without_resource" | "operation_without_resource",
         } => Some(
             "CMA has not provided a resource identity or proof of non-creation. NyxID keeps checking, but cannot release this slot from operation status alone; CMA must provide authoritative creation identity or absence evidence.",
+        ),
+        InspectionOutcome::Unknown {
+            reason:
+                "covered_creation_outcome_unknown"
+                | "covered_creation_in_progress"
+                | "creation_identity_not_observable_without_replay",
+        } => Some(
+            "NyxID retains the reservation while CMA creation evidence is uncertain. Recover the original request or confirm retirement of the exact associated Sandbox.",
         ),
         _ => None,
     };
@@ -482,6 +544,7 @@ pub(super) fn require_inventory_release_candidate(
                 | SandboxAdmissionState::Creating
                 | SandboxAdmissionState::Reserved
         )
+        || creation.covered_key.is_some()
         || parent.operation_id.is_some()
         || creation.operation_id.is_some()
         || creation.cma_agent_id.is_some()
@@ -649,52 +712,71 @@ pub async fn resolve(
         return Err(drift());
     }
     verify(gateway, &parent, Some(&creation)).await?;
-    let change = match request.action {
-        ResolveAction::ConfirmRetirement => unreachable!("handled above"),
-        ResolveAction::Release => {
-            if !has_non_creation_proof(&creation) {
-                return Err(AppError::Conflict("cma_creation_absence_proof_required: CMA has not provided authoritative proof that this creation was never made".into()));
+    let change = if creation.covered_key.is_some() {
+        use super::assistant_cma_admission::creation_outcome::{self, Evidence};
+        match (
+            request.action,
+            creation_outcome::lookup(gateway, &creation).await?,
+        ) {
+            (ResolveAction::Release, Evidence::Absent { operation }) => {
+                admission::Change::CoveredAbsent(operation)
             }
-            admission::Change::Release
+            (ResolveAction::Associate, Evidence::Created { sandbox, operation })
+                if request.remote_sandbox_id.as_deref() == Some(&sandbox)
+                    && parent.cma_sandbox_id.is_none() =>
+            {
+                let remote = exact_sandbox(gateway, &parent.user_id, &sandbox).await?;
+                admission::Change::CoveredCreated(remote, operation)
+            }
+            _ => return Err(drift()),
         }
-        ResolveAction::Associate => {
-            if parent.cma_sandbox_id.is_some()
-                || !parent.occupies_account_slot
-                || creation.submission_state == "confirmed_not_created"
-            {
-                return Err(drift());
+    } else {
+        match request.action {
+            ResolveAction::ConfirmRetirement => unreachable!("handled above"),
+            ResolveAction::Release => {
+                if !has_non_creation_proof(&creation) {
+                    return Err(AppError::Conflict("cma_creation_absence_proof_required: CMA has not provided authoritative proof that this creation was never made".into()));
+                }
+                admission::Change::Release
             }
-            let id = request
-                .remote_sandbox_id
-                .as_deref()
-                .ok_or_else(|| AppError::ValidationError("remote_sandbox_id is required".into()))?;
-            if creation
-                .cma_sandbox_id
-                .as_deref()
-                .is_some_and(|saved| saved != id)
-            {
-                return Err(drift());
-            }
-            if creation.cma_sandbox_id.is_none()
-                && creation.operation_id.is_none()
-                && creation.cma_agent_id.is_none()
-            {
-                return Err(AppError::Conflict("cma_creation_provenance_required: no saved receipt or CMA lineage ties a sandbox to this creation; ownership alone cannot establish NyxID creation provenance".into()));
-            }
-            if creation.operation_id.is_some() || creation.cma_agent_id.is_some() {
-                let (_, observed) = observe(gateway, &parent, Some(&creation)).await;
-                if observed.as_ref().is_none_or(|remote| remote.id != id) {
+            ResolveAction::Associate => {
+                if parent.cma_sandbox_id.is_some()
+                    || !parent.occupies_account_slot
+                    || creation.submission_state == "confirmed_not_created"
+                {
                     return Err(drift());
                 }
-            }
-            let remote = exact_sandbox(gateway, &parent.user_id, id).await?;
-            if remote.state == SandboxObservationState::Retired {
-                return Err(AppError::Conflict(
+                let id = request.remote_sandbox_id.as_deref().ok_or_else(|| {
+                    AppError::ValidationError("remote_sandbox_id is required".into())
+                })?;
+                if creation
+                    .cma_sandbox_id
+                    .as_deref()
+                    .is_some_and(|saved| saved != id)
+                {
+                    return Err(drift());
+                }
+                if creation.cma_sandbox_id.is_none()
+                    && creation.operation_id.is_none()
+                    && creation.cma_agent_id.is_none()
+                {
+                    return Err(AppError::Conflict("cma_creation_provenance_required: no saved receipt or CMA lineage ties a sandbox to this creation; ownership alone cannot establish NyxID creation provenance".into()));
+                }
+                if creation.operation_id.is_some() || creation.cma_agent_id.is_some() {
+                    let (_, observed) = observe(gateway, &parent, Some(&creation)).await;
+                    if observed.as_ref().is_none_or(|remote| remote.id != id) {
+                        return Err(drift());
+                    }
+                }
+                let remote = exact_sandbox(gateway, &parent.user_id, id).await?;
+                if remote.state == SandboxObservationState::Retired {
+                    return Err(AppError::Conflict(
                     "cma_sandbox_retired: a retired resource cannot resolve an uncertain creation"
                         .into(),
                 ));
+                }
+                admission::Change::Associate(remote)
             }
-            admission::Change::Associate(remote)
         }
     };
     let data = json!({"reservation_id":parent.id,"owner_id":parent.user_id,"cma_service_id":parent.cma_service_id,
@@ -753,6 +835,7 @@ mod tests {
             method: "POST".into(),
             path: "/api/v1/sandboxes".into(),
             idempotency_key: "secret-idempotency-key".into(),
+            covered_key: None,
             request_hash: "private-request-hash".into(),
             sandbox_ref_id: "reservation".into(),
             sandbox_generation: 1,

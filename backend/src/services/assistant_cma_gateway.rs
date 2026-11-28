@@ -316,6 +316,12 @@ pub trait CmaGateway: Send + Sync {
     async fn get_lifecycle(&self, _owner_id: &str, _operation_id: &str) -> CmaResult<Value> {
         Err(CmaGatewayError::Unavailable)
     }
+    async fn creation_outcome(&self, _owner: &str, _request: &Value) -> CmaResult<Value> {
+        Err(CmaGatewayError::Unavailable)
+    }
+    async fn cancel_creation(&self, _owner: &str, _operation: &str) -> CmaResult<()> {
+        Err(CmaGatewayError::Unavailable)
+    }
     async fn list_agents(
         &self,
         _owner_id: &str,
@@ -2338,6 +2344,41 @@ impl CmaGateway for CatalogCmaGateway {
             return Err(CmaGatewayError::InvalidResponse);
         }
         Ok(body)
+    }
+    async fn creation_outcome(&self, owner: &str, request: &Value) -> CmaResult<Value> {
+        let (status, body) = self
+            .request_body(
+                owner,
+                reqwest::Method::POST,
+                &["api", "v1", "sandbox-creation-outcomes", "lookup"],
+                None,
+                None,
+                Some(serde_json::to_vec(request).map_err(|_| CmaGatewayError::InvalidRequest)?),
+            )
+            .await?;
+        if status != 200 {
+            return Err(CmaGatewayError::InvalidResponse);
+        }
+        Ok(body)
+    }
+    async fn cancel_creation(&self, owner: &str, operation: &str) -> CmaResult<()> {
+        validate_remote_id(operation)?;
+        let (status, body) = self
+            .request(
+                owner,
+                reqwest::Method::POST,
+                &["api", "v1", "agent-lifecycle", operation, "cancel"],
+                None,
+                None,
+            )
+            .await?;
+        if status != 200
+            || body.get("id").and_then(Value::as_str) != Some(operation)
+            || body.get("status").and_then(Value::as_str) != Some("failed")
+        {
+            return Err(CmaGatewayError::InvalidResponse);
+        }
+        Ok(())
     }
     async fn list_agents(
         &self,

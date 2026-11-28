@@ -119,6 +119,8 @@
   "CMA resource status updated.": "CMA resource status updated.",
   "CMA will resume the environment. Task continuation depends on each Agent’s state.": "CMA will resume the environment. Task continuation depends on each Agent’s state.",
   "CMA · Last active ": "CMA · Last active ",
+  "Cancel a pending covered creation. CMA must confirm its terminal outcome before this account slot can be released.": "Cancel a pending covered creation. CMA must confirm its terminal outcome before this account slot can be released.",
+  "Cancel creation": "Cancel creation",
   "Cancel invitation": "Cancel invitation",
   "Changes apply everywhere this agent appears.": "Changes apply everywhere this agent appears.",
   "Changes existing": "Changes existing",

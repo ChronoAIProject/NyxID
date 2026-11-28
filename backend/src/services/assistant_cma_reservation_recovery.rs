@@ -149,6 +149,15 @@ pub(super) async fn recover_one(
         .await?;
         return Ok("retirement_confirmed");
     }
+    if let Some(creation) = creation.as_ref()
+        && creation.covered_key.is_some()
+        && !matches!(
+            creation.submission_state.as_str(),
+            "confirmed" | "confirmed_not_created"
+        )
+    {
+        return admission::recover_covered(db, gateway, row, creation).await;
+    }
     if let Some(creation) = creation
         && !matches!(
             creation.submission_state.as_str(),

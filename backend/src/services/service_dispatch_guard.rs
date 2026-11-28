@@ -6,5 +6,9 @@ use crate::errors::AppResult;
 pub(crate) trait ServiceDispatchGuard: Send + Sync {
     async fn before_send(&self, request: &reqwest::Request) -> AppResult<()>;
 
+    async fn prepare_request(&self, request: &mut reqwest::Request) -> AppResult<()> {
+        self.before_send(request).await
+    }
+
     async fn observe_response(&self, response: reqwest::Response) -> AppResult<reqwest::Response>;
 }

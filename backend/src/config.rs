@@ -442,6 +442,8 @@ pub struct AppConfig {
     pub rate_limit_per_second: u64,
     /// Max burst size for rate limiter
     pub rate_limit_burst: u32,
+    /// CMA coverage epoch for newly issued Sandbox creation keys.
+    pub cma_creation_outcome_epoch: Option<String>,
     /// Sustained per-user request rate for platform-credentialed services.
     /// Zero disables this limiter.
     pub platform_service_rate_limit_per_second: u32,
@@ -1469,6 +1471,7 @@ impl AppConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(30),
+            cma_creation_outcome_epoch: env::var("CMA_CREATION_OUTCOME_EPOCH").ok().filter(|value| !value.is_empty()),
             // Default 0 = disabled. Enabling a per-user cap on a shared platform
             // credential is a deliberate operator decision made after observing real
             // traffic; defaulting it on would throttle existing callers at deploy.
@@ -2364,6 +2367,7 @@ mod tests {
             contextual_record_writes: true,
             rate_limit_per_second: 10,
             rate_limit_burst: 30,
+            cma_creation_outcome_epoch: None,
             platform_service_rate_limit_per_second: 2,
             platform_service_rate_limit_burst: 10,
             trusted_proxy_ips: vec![],

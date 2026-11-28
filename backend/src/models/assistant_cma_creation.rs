@@ -14,6 +14,9 @@ pub struct AssistantCmaCreation {
     pub method: String,
     pub path: String,
     pub idempotency_key: String,
+    /// Immutable CMA-side covered key, distinct from the caller key.
+    #[serde(default)]
+    pub covered_key: Option<String>,
     pub request_hash: String,
     pub sandbox_ref_id: String,
     pub sandbox_generation: i64,
@@ -69,6 +72,7 @@ mod tests {
             method: "POST".into(),
             path: "/api/v1/agents".into(),
             idempotency_key: "private-key".into(),
+            covered_key: None,
             request_hash: "hash".into(),
             sandbox_ref_id: "slot".into(),
             sandbox_generation: 1,

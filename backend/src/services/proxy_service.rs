@@ -5403,7 +5403,7 @@ async fn forward_request_with_egress_guard_inner(
                 .map_err(ForwardRequestError::PreDispatchRejected)?;
         }
         guard
-            .before_send(&request)
+            .prepare_request(&mut request)
             .await
             .map_err(ForwardRequestError::PreDispatchRejected)?;
         if let Some(permit) = &target.execution_permission {

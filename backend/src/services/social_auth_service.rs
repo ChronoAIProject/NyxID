@@ -915,6 +915,7 @@ mod tests {
             contextual_record_writes: true,
             rate_limit_per_second: 10,
             rate_limit_burst: 30,
+            cma_creation_outcome_epoch: None,
             platform_service_rate_limit_per_second: 2,
             platform_service_rate_limit_burst: 10,
             trusted_proxy_ips: vec![],
