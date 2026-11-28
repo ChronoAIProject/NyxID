@@ -8385,7 +8385,8 @@ Service account tokens do **not** include `sid`, `roles`, `groups`, `permissions
 ## Security Rollout Readiness
 
 For the admin endpoints that start and advance an encrypted-record census and
-read its dated report, see [Running a dated census](security/KEY_LIFECYCLE.md#running-a-dated-census).
+read its dated report, see [Running a dated census](security/KEY_LIFECYCLE.md#running-a-dated-census). For retirement evaluation,
+request revisions and approval blockers, see [Evaluating retirement](security/KEY_LIFECYCLE.md#evaluating-retirement).
 
 ```
 GET /api/v1/admin/security-readiness
