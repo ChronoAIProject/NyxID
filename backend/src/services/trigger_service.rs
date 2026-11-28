@@ -1253,7 +1253,7 @@ async fn deliver_webhook_body(
         "trigger.event",
         event_id,
         body,
-        SignatureContract::Timestamped,
+        SignatureContract::TriggerDelivery,
         Some(key_id),
     )
     .await
@@ -1488,6 +1488,7 @@ pub(crate) async fn validate_associations(
         }
         super::assistant_nyxagent::require_enabled(db, user_id).await?;
         return Ok(Some(crate::models::trigger::AssistantTargetOwner {
+            eligibility_revision: access.as_ref().map_or(0, |a| a.eligibility_revision()),
             agent_id: agent.id,
             owner_id: if access.is_some_and(|a| a.shared().is_none()) {
                 agent.user_id
@@ -1714,19 +1715,15 @@ mod tests {
         .await
         .unwrap();
         assert!(created.trigger.secret_context_versions.is_empty());
-        // The reader stage retains the exact pre-cutover encrypted format.
         assert_eq!(
-            staged
-                .decrypt(
-                    created
-                        .trigger
-                        .verification_secret_encrypted
-                        .as_deref()
-                        .unwrap()
-                )
-                .await
-                .unwrap()
-                .as_slice(),
+            super::super::trigger_record_service::secret(
+                &staged,
+                &created.trigger,
+                "verification_secret_encrypted"
+            )
+            .await
+            .unwrap()
+            .as_slice(),
             created.raw_secret.as_bytes()
         );
         let body = br#"{"action":"opened"}"#;
@@ -1769,8 +1766,7 @@ mod tests {
         };
         assert!(record.secret_context_versions.is_empty());
         assert_eq!(
-            staged
-                .decrypt(record.envelope_encrypted.as_deref().unwrap())
+            super::super::trigger_record_service::envelope(&staged, &record)
                 .await
                 .unwrap()
                 .as_slice(),
@@ -1841,6 +1837,26 @@ mod tests {
             wire_headers["X-NyxID-Signature"],
             format!("sha256={expected}")
         );
+        let delivery_id = wire_headers["X-NyxID-Delivery-Id"].as_bytes();
+        assert_eq!(delivery_id, b"before-cutover");
+        let sign = |id: &[u8]| {
+            let material = [
+                b"nyxid-trigger-v2\0".as_slice(),
+                wire_headers["X-NyxID-Timestamp"].as_bytes(),
+                b"\0",
+                id,
+                b"\0",
+                &wire_body,
+            ]
+            .concat();
+            let digest = webhook_delivery_service::compute_body_signature(
+                created.delivery_signing_secret.as_ref().unwrap().as_bytes(),
+                &material,
+            );
+            format!("sha256={digest}")
+        };
+        assert_eq!(wire_headers["X-NyxID-Signature-V2"], sign(delivery_id));
+        assert_ne!(wire_headers["X-NyxID-Signature-V2"], sign(b"other-event"));
         let (rotated, secret) = rotate_secret(&db, &strict, &live).await.unwrap();
         assert_eq!(
             rotated
@@ -1925,9 +1941,20 @@ mod tests {
         );
         trigger.delivery = TriggerDelivery::Webhook { url };
         trigger.delivery_secret_encrypted = Some(
-            keys.encrypt(b"delivery-signing-secret")
-                .await
-                .expect("encrypt delivery secret"),
+            super::super::trigger_record_service::encrypt_secret(
+                keys,
+                &trigger.id,
+                &trigger.user_id,
+                "delivery_secret_encrypted",
+                b"delivery-signing-secret",
+            )
+            .await
+            .unwrap(),
+        );
+        super::super::credential_record_service::mark_version(
+            &mut trigger.secret_context_versions,
+            keys,
+            "delivery_secret_encrypted",
         );
         trigger.delivery_key_id = Some("key_fixture".to_string());
         trigger
@@ -2284,12 +2311,27 @@ mod tests {
     async fn hmac_verification_checks_raw_body() {
         let keys = test_encryption_keys();
         let secret = b"nyx_trg_hmac_secret";
-        let encrypted = keys.encrypt(secret).await.expect("encrypt secret");
-        let trigger = trigger(
+        let mut trigger = trigger(
             TriggerVerification::HmacSha256 {
                 header_name: "X-Hub-Signature-256".to_string(),
             },
-            Some(encrypted),
+            None,
+        );
+        trigger.verification_secret_encrypted = Some(
+            super::super::trigger_record_service::encrypt_secret(
+                &keys,
+                &trigger.id,
+                &trigger.user_id,
+                "verification_secret_encrypted",
+                secret,
+            )
+            .await
+            .unwrap(),
+        );
+        super::super::credential_record_service::mark_version(
+            &mut trigger.secret_context_versions,
+            &keys,
+            "verification_secret_encrypted",
         );
         let body = br#"{"action":"opened"}"#;
         let signature = webhook_delivery_service::compute_body_signature(secret, body);

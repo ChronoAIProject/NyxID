@@ -59,6 +59,8 @@ pub struct OracleWorkerEnrollment {
     #[serde(default)]
     pub installation_epoch: i64,
     pub membership_id: Option<String>,
+    #[serde(default)]
+    pub eligibility_revision: i64,
     #[serde(default, with = "bson_datetime::optional")]
     pub membership_created_at: Option<DateTime<Utc>>,
 }

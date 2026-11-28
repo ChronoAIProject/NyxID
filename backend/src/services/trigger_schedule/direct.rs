@@ -63,7 +63,7 @@ pub async fn register_in_session(
     };
     let receipt = DirectHandoff {
         source_owner_id: Some(source_owner_id),
-        org_use_revision: child.org_use_revision,
+        member_use: child.member_use,
         id: work.work_id.clone(),
         user_id: owner.into(),
         run_id: run.id,
@@ -281,7 +281,7 @@ async fn publish(
             Some(&receipt.agent_id),
         );
         event.source_owner_id.clone_from(&receipt.source_owner_id);
-        event.source_org_use_revision = receipt.org_use_revision;
+        event.set_source_member_use(receipt.member_use);
         event.id = format!("automation-direct:{}", receipt.id);
         if error.is_none()
             && let Some(edge) = receipt.assignment.as_ref()

@@ -25,7 +25,6 @@ use utoipa::ToSchema;
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
-use crate::handlers::auth::extract_ip;
 use crate::mw::auth::AuthUser;
 use crate::services::cli_pairing_service::{self, ClaimedPairing, CreateParams, PollResponse};
 
@@ -203,10 +202,7 @@ pub async fn claim_pairing(
         return Err(AppError::RateLimited);
     }
 
-    // `extract_ip` IS still used below for audit logging only — where
-    // spoofability is informational, not security-critical — so the
-    // X-Forwarded-For hint can be captured without gating throttling.
-    let ip_string = extract_ip(&headers, Some(peer));
+    let ip_string = client_ip.to_string();
 
     let ClaimedPairing {
         id,
@@ -219,7 +215,7 @@ pub async fn claim_pairing(
         state.cli_pairing_hmac_key.as_slice(),
         &req.code,
         &user.user_id.to_string(),
-        ip_string.as_deref(),
+        Some(&ip_string),
     )
     .await?;
 

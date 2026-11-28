@@ -177,6 +177,7 @@ pub(super) async fn for_group(
             None
         } else if agent.user_id == actor {
             Some(model::Authority {
+                eligibility_revision: 0,
                 owner_id: actor.into(),
                 lane: model::Lane::Owner,
                 revision: 0,
@@ -201,17 +202,20 @@ pub(super) async fn for_group(
                         OwnerAccess::AsOrgAdmin {
                             org_user_id: agent.user_id.clone(),
                             membership_id: m.id.clone(),
+                            eligibility_revision: m.eligibility_revision,
                             allowed_service_ids,
                         }
                     } else {
                         OwnerAccess::AsOrgMember {
                             org_user_id: agent.user_id.clone(),
                             membership_id: m.id.clone(),
+                            eligibility_revision: m.eligibility_revision,
                             role: m.role,
                             allowed_service_ids,
                         }
                     });
                     model::Authority {
+                        eligibility_revision: m.eligibility_revision,
                         owner_id: agent.user_id.clone(),
                         lane: model::Lane::OrgMember,
                         revision: agent.org_use_revision,
@@ -229,6 +233,7 @@ pub(super) async fn for_group(
                 })
         }) {
             Some(model::Authority {
+                eligibility_revision: 0,
                 owner_id: agent.user_id.clone(),
                 lane: model::Lane::Shared,
                 revision: policy.revision,
@@ -243,6 +248,7 @@ pub(super) async fn for_group(
                         && g.consenting_owner_id.as_deref() == Some(agent.user_id.as_str())
                 })
                 .map(|g| model::Authority {
+                    eligibility_revision: 0,
                     owner_id: agent.user_id.clone(),
                     lane: model::Lane::Guest,
                     revision: g.revision,

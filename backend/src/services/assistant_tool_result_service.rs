@@ -62,7 +62,7 @@ fn page(reference: &str, part: usize, parts: usize, size: usize, content: &str) 
 }
 /// Reserve enough room for all metadata; measure the two JSON escaping layers.
 /// Prefer a newline only when it keeps at least half the candidate bytes.
-fn boundaries(text: &str) -> Vec<i64> {
+pub(crate) fn boundaries(text: &str) -> Vec<i64> {
     let mut out = vec![0];
     let mut start = 0;
     while start < text.len() {
@@ -106,7 +106,7 @@ fn render(row: &AssistantToolResult, part: usize, text: &str) -> AppResult<Value
     }
     Ok(value)
 }
-fn context_path(row: &AssistantToolResult) -> [&str; 8] {
+pub(crate) fn context_path(row: &AssistantToolResult) -> [&str; 8] {
     [
         "data_encrypted",
         &row.actor_id,

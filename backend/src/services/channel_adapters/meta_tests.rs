@@ -84,7 +84,7 @@ pub(crate) async fn registered_bot(
     "platform":platform,
     "label":"Fixture inbox",
     "bot_token_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,
-    bytes:state.encryption_keys.encrypt(b"fixture-token").await.unwrap()},
+    bytes:hex::decode(crate::services::channel_registration::historical::META_BOT_TOKEN).unwrap()},
     "platform_bot_id":"222",
     "platform_bot_username":"Fixture",
     "webhook_registered":true,
@@ -290,7 +290,7 @@ async fn signed_instagram_control_loss_survives_rewrap_and_rejects_a_replaced_si
     };
     bots.update_one(
         doc! {"_id": &bot.id},
-        doc! {"$set": { APP: encrypted(keys.encrypt(b"fixture-signing-secret").await.unwrap()) }},
+        doc! {"$set": { APP: encrypted(hex::decode(crate::services::channel_registration::historical::META_SIGNING_SECRET).unwrap()) }},
     )
     .await
     .unwrap();

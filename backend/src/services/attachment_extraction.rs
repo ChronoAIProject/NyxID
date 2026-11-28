@@ -421,6 +421,9 @@ async fn extract_deadline(
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .kill_on_drop(true);
+    // Keep glibc's per-thread arena reservations from crowding the instrumented test binary under RLIMIT_AS.
+    #[cfg(all(test, coverage, target_os = "linux", target_env = "gnu"))]
+    command.env("MALLOC_ARENA_MAX", "1");
     #[cfg(unix)]
     unsafe {
         command.pre_exec(|| {

@@ -259,7 +259,10 @@ pub async fn configure(
             let result: AppResult<_> = async {
                 let actor = actor.as_str();
                 let agent_id = agent_id.as_str();
-                super::org_agent_service::fence_maintenance(&db, session, actor, &agent).await?;
+                let eligibility_revision = super::org_agent_service::fence_maintenance_revision(
+                    &db, session, actor, &agent,
+                )
+                .await?;
                 fence_live_agent(&db, agent_id, &agent.user_id, session).await?;
                 let collection = db.collection::<AssistantAgentLearning>(CONFIG_COLLECTION_NAME);
                 let now = Utc::now();
@@ -270,7 +273,9 @@ pub async fn configure(
                 let epoch = match current.as_ref() {
                     Some(row)
                         if row.enabled == enabled
-                            && (!enabled || row.enabled_by.as_deref() == Some(actor)) =>
+                            && (!enabled
+                                || (row.enabled_by.as_deref() == Some(actor)
+                                    && row.eligibility_revision == eligibility_revision)) =>
                     {
                         row.learning_epoch.max(0)
                     }
@@ -281,6 +286,7 @@ pub async fn configure(
                 };
                 let revision = current.as_ref().map_or(0, |row| row.config_revision + 1);
                 let row = AssistantAgentLearning {
+                    eligibility_revision,
                     agent_id: agent.id.clone(),
                     owner_id: agent.user_id.clone(),
                     enabled,
@@ -356,7 +362,9 @@ pub async fn set_member_opt_in(
             "Learning consent is available only to organization members".into(),
         ));
     }
-    super::org_agent_service::require_use(db, actor, &agent).await?;
+    let access = super::org_agent_service::resolve_agent_access(db, actor, &agent)
+        .await?
+        .ok_or_else(feature_not_enabled)?;
     let config = db
         .collection::<AssistantAgentLearning>(CONFIG_COLLECTION_NAME)
         .find_one(doc! {"_id": agent_id, "owner_id": &agent.user_id})
@@ -369,6 +377,7 @@ pub async fn set_member_opt_in(
         .find_one(doc! {"_id": &id})
         .await?;
     let row = AssistantAgentLearningMember {
+        eligibility_revision: access.eligibility_revision(),
         id,
         agent_id: agent_id.into(),
         member_user_id: actor.into(),
@@ -422,15 +431,17 @@ pub async fn enrollment_epoch(
     if agent.user_id == actor {
         return Ok((config.learning_epoch > 0).then_some(config.learning_epoch));
     }
-    let can_use = match snapshot {
-        Some(access) => access.permits_agent(actor, agent),
+    let (can_use, revision) = match snapshot {
+        Some(access) => (
+            access.permits_agent(actor, agent),
+            access.eligibility_revision(),
+        ),
         None => {
-            super::org_agent_service::specialist_rights(
-                actor,
-                agent,
-                &super::org_agent_service::access(db, actor, &agent.user_id).await?,
+            let access = super::org_agent_service::access(db, actor, &agent.user_id).await?;
+            (
+                super::org_agent_service::specialist_rights(actor, agent, &access).can_use,
+                access.eligibility_revision(),
             )
-            .can_use
         }
     };
     if !can_use {
@@ -446,6 +457,7 @@ pub async fn enrollment_epoch(
         })
         .await?;
     Ok(member
+        .filter(|m| m.eligibility_revision == revision)
         .map(|_| config.learning_epoch)
         .filter(|epoch| *epoch > 0))
 }
@@ -478,7 +490,11 @@ async fn owner_is_org(db: &Database, owner: &str) -> AppResult<bool> {
     Ok(user.user_type.is_org())
 }
 
-async fn member_ids(db: &Database, agent: &AssistantAgent, epoch: i64) -> AppResult<Vec<String>> {
+async fn member_revisions(
+    db: &Database,
+    agent: &AssistantAgent,
+    epoch: i64,
+) -> AppResult<std::collections::HashMap<String, i64>> {
     let members: Vec<AssistantAgentLearningMember> = db
         .collection::<AssistantAgentLearningMember>(MEMBERS_COLLECTION_NAME)
         .find(doc! {"agent_id": &agent.id, "opted_in": true, "learning_epoch": epoch})
@@ -486,16 +502,15 @@ async fn member_ids(db: &Database, agent: &AssistantAgent, epoch: i64) -> AppRes
         .await?
         .try_collect::<Vec<_>>()
         .await?;
-    let mut ids = Vec::with_capacity(members.len());
+    let mut ids = std::collections::HashMap::with_capacity(members.len());
     for member in members {
-        if super::org_agent_service::specialist_rights(
-            &member.member_user_id,
-            agent,
-            &super::org_agent_service::access(db, &member.member_user_id, &agent.user_id).await?,
-        )
-        .can_use
+        let access =
+            super::org_agent_service::access(db, &member.member_user_id, &agent.user_id).await?;
+        if member.eligibility_revision == access.eligibility_revision()
+            && super::org_agent_service::specialist_rights(&member.member_user_id, agent, &access)
+                .can_use
         {
-            ids.push(member.member_user_id);
+            ids.insert(member.member_user_id, member.eligibility_revision);
         }
     }
     Ok(ids)
@@ -516,17 +531,19 @@ async fn candidate_threads(
         "guest_turn": false,
         "active_turn": bson::Bson::Null,
     };
-    if !owner_is_org(db, &config.owner_id).await? {
+    let member_revisions = if !owner_is_org(db, &config.owner_id).await? {
         filter.insert("user_id", &config.owner_id);
         filter.insert("agent_owner_id", bson::Bson::Null);
+        None
     } else {
         filter.insert("agent_owner_id", &config.owner_id);
-        let ids = member_ids(db, agent, config.learning_epoch).await?;
+        let ids = member_revisions(db, agent, config.learning_epoch).await?;
         if ids.is_empty() {
             return Ok(Vec::new());
         }
-        filter.insert("user_id", doc! {"$in": ids});
-    }
+        filter.insert("user_id", doc! {"$in": ids.keys().collect::<Vec<_>>()});
+        Some(ids)
+    };
     let conversations: Vec<AssistantConversation> = db
         .collection::<AssistantConversation>(crate::models::assistant_conversation::COLLECTION_NAME)
         .find(filter)
@@ -572,6 +589,17 @@ async fn candidate_threads(
         else {
             continue;
         };
+        if let Some(members) = &member_revisions
+            && members.get(&conversation.user_id).copied()
+                != Some(
+                    prompt
+                        .turn_metadata
+                        .as_ref()
+                        .map_or(0, |m| m.eligibility_revision),
+                )
+        {
+            continue;
+        }
         if !before_cursor(
             &reply,
             &conversation.id,
@@ -649,6 +677,10 @@ fn build_input(
         }
         input.push_str(&chunk);
         evidence.push(LearningEvidence {
+            eligibility_revision: prompt
+                .turn_metadata
+                .as_ref()
+                .map_or(0, |m| m.eligibility_revision),
             label,
             conversation_id: conversation.id.clone(),
             turn_id: reply.turn_id.clone(),
@@ -841,6 +873,7 @@ async fn create_run(
         turn_id: row.turn_id.clone(),
     });
     let run = AssistantAgentLearningRun {
+        eligibility_revision: 0,
         org_maintain_revision: agent.org_maintain_revision,
         id: Uuid::new_v4().to_string(),
         agent_id: agent.id.clone(),
@@ -883,7 +916,8 @@ async fn reserve_run(
         .start_transaction()
         .and_run2(async move |session| {
             let result: AppResult<_> = async {
-                super::org_agent_service::fence_maintenance(&db,session,&run.actor_id,&agent).await?;
+                let eligibility_revision = super::org_agent_service::fence_maintenance_revision(&db,session,&run.actor_id,&agent).await?;
+                if run.mode == "threshold" && config.eligibility_revision != eligibility_revision { return Ok(None); }
                 fence_live_agent(&db, &agent.id, &agent.user_id, session).await?;
                 if db.collection::<AssistantAgentLearningRun>(RUNS_COLLECTION_NAME)
                     .count_documents(doc! {"agent_id": &agent.id, "status": {"$in": ["queued", "analyzing"]}})
@@ -913,6 +947,7 @@ async fn reserve_run(
                 };
                 let mut run = run.clone();
                 run.fence = reserved.fence;
+                run.eligibility_revision = eligibility_revision;
                 if db.collection::<AssistantAgentLearningRun>(RUNS_COLLECTION_NAME)
                     .find_one(doc! {
                         "agent_id": &run.agent_id,
@@ -1107,12 +1142,11 @@ async fn evidence_is_current(
             return Ok(None);
         }
     } else if agent.user_id == run.owner_id {
-        if !super::org_agent_service::specialist_rights(
-            &conversation.user_id,
-            agent,
-            &super::org_agent_service::access(db, &conversation.user_id, &agent.user_id).await?,
-        )
-        .can_use
+        let access =
+            super::org_agent_service::access(db, &conversation.user_id, &agent.user_id).await?;
+        if evidence.eligibility_revision != access.eligibility_revision()
+            || !super::org_agent_service::specialist_rights(&conversation.user_id, agent, &access)
+                .can_use
         {
             return Ok(None);
         }
@@ -1121,6 +1155,7 @@ async fn evidence_is_current(
             .find_one(doc! {
                 "agent_id": &run.agent_id,
                 "member_user_id": &conversation.user_id,
+                "$expr":{"$eq":[{"$ifNull":["$eligibility_revision",0_i64]},access.eligibility_revision()]},
                 "opted_in": true,
                 "learning_epoch": run.learning_epoch,
             })
@@ -1251,8 +1286,9 @@ async fn run_authority_error(
     if agent.user_id == run.actor_id {
         return Ok(None);
     }
-    match super::org_agent_service::require_maintain(db, &run.actor_id, &agent).await {
-        Ok(_) => Ok(None),
+    match super::org_agent_service::maintenance_revision(db, &run.actor_id, &agent).await {
+        Ok(revision) if revision == run.eligibility_revision => Ok(None),
+        Ok(_) => Ok(Some("owner_access_lost")),
         Err(AppError::Forbidden(_) | AppError::NotFound(_)) => Ok(Some("owner_access_lost")),
         Err(error) => Err(error),
     }
@@ -1466,9 +1502,10 @@ async fn tick(state: &AppState) -> AppResult<()> {
         }
         if agent.kind == AgentKind::Specialist
             && agent.user_id != actor
-            && super::org_agent_service::require_maintain(&state.db, actor, &agent)
+            && super::org_agent_service::maintenance_revision(&state.db, actor, &agent)
                 .await
-                .is_err()
+                .ok()
+                != Some(config.eligibility_revision)
         {
             let _ = state
                 .db

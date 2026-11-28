@@ -329,12 +329,25 @@ async fn actual_proxy_and_mcp_delayed_exchange_revocation_prevents_operation_sen
                 .await
                 .unwrap();
             let key = Uuid::new_v4().to_string();
-            let encrypted = f.state.encryption_keys.encrypt(b"{}").await.unwrap();
-            f.state.db.collection::<Document>("user_api_keys").insert_one(doc!{
+            let mut row = doc! {
                 "_id":&key,"user_id":&owner,"label":"exchange","credential_type":"api_key","status":"active",
-                "credential_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:encrypted},
                 "created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now(),
-            }).await.unwrap();
+            };
+            row.extend(
+                crate::services::credential_test_fixtures::api_key_fields(
+                    &f.state.encryption_keys,
+                    &key,
+                    &owner,
+                    b"{}",
+                )
+                .await,
+            );
+            f.state
+                .db
+                .collection::<Document>("user_api_keys")
+                .insert_one(row)
+                .await
+                .unwrap();
             f.state
                 .db
                 .collection::<Document>("user_services")

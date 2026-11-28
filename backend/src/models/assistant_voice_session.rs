@@ -34,6 +34,11 @@ impl std::fmt::Debug for VoiceClientKey {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct VoiceSession {
+    /// A personal owner marks a call that needs no membership lookup.
+    #[serde(default)]
+    pub eligibility_owner_id: Option<String>,
+    #[serde(default)]
+    pub eligibility_revision: i64,
     /// Non-authorizing enrollment hint copied from the authenticated person.
     #[serde(default)]
     pub execution_enrolled: bool,

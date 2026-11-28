@@ -33,8 +33,8 @@ impl RunOutcome {
 pub struct TriggerRun {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub org_specialist_owner_id: Option<String>,
-    #[serde(default)]
-    pub org_use_revision: i64,
+    #[serde(flatten)]
+    pub member_use: super::org_membership::MemberUse,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coordinator: Option<CoordinatorState>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

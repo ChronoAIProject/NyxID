@@ -329,6 +329,10 @@ pub(crate) async fn relink_in_session(
             Some(manager),
         )
         .await?;
+        let issuer = db.collection::<crate::models::org_membership::OrgMembership>(crate::models::org_membership::COLLECTION_NAME)
+            .find_one(doc! {"org_user_id":&binding.org_id,"member_user_id":owner,"revoked_at":null,"role":"admin"})
+            .session(&mut *session).await?.ok_or_else(not_found)?;
+        binding.eligibility_revision = issuer.eligibility_revision;
         binding.revision = uuid::Uuid::new_v4().to_string();
         let enabled = binding.guests.enabled;
         binding.guests = super::super::org_channel_service::new_guest_policy(

@@ -92,6 +92,7 @@ pub(super) async fn queue_voice(
     let parent=db.collection::<VoiceRequest>(crate::models::assistant_voice::REQUESTS).find_one(doc!{"_id":request_id,"user_id":&row.user_id,"execution_enrolled":true,"state":{"$ne":"cancelled"}}).session(&mut *session).await?.ok_or_else(refused)?;
     let now = Utc::now();
     let continuation = VoiceRequest {
+        eligibility_revision: parent.eligibility_revision,
         execution_enrolled: true,
         model_task: None,
         progress: None,

@@ -1,7 +1,7 @@
 //! Service-owned adapter for bounded encryption verification and KEK rotation.
 use super::*;
 
-fn decode(source: &Document) -> AppResult<AssistantToolResult> {
+pub(crate) fn decode(source: &Document) -> AppResult<AssistantToolResult> {
     let row: AssistantToolResult = bson::from_document(source.clone()).map_err(|_| missing())?;
     if row.version != 1 || row.size <= 0 || row.size as usize > MAX_BYTES {
         return Err(missing());

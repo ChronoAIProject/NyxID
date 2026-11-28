@@ -21,6 +21,65 @@ fn invalid() -> AppError {
     AppError::Conflict("Learning proposal storage could not be verified".into())
 }
 
+#[derive(Default)]
+pub(in crate::services) struct Validation {
+    draft: Option<crate::services::assistant_agent_learning::GeneratedProposal>,
+    snapshot: Option<InterfaceSnapshot>,
+}
+impl Validation {
+    pub(in crate::services) fn field(
+        &mut self,
+        row: &Proposal,
+        field: Field<'_>,
+        plain: &[u8],
+    ) -> AppResult<()> {
+        match field {
+            Field::Body => {
+                if row.body_bytes != plain.len() as i64 {
+                    return Err(invalid());
+                }
+                self.draft = Some(
+                    assistant_agent_learning_review::decode_draft(row, plain)
+                        .map_err(|_| invalid())?,
+                );
+            }
+            Field::Scope => {
+                let _: DraftScope = serde_json::from_slice(plain).map_err(|_| invalid())?;
+                if row.scope_digest.as_deref() != Some(&publication::hash(plain)) {
+                    return Err(invalid());
+                }
+            }
+            Field::Interface(_) => {
+                self.snapshot = Some(serde_json::from_slice(plain).map_err(|_| invalid())?);
+            }
+        }
+        Ok(())
+    }
+    pub(in crate::services) fn package(self, row: &Proposal) -> AppResult<()> {
+        if let Some(p) = &row.publication
+            && p.package_format == assistant_agent_learning_review::PACKAGE_FORMAT_SNAPSHOT
+        {
+            if p.target_kind.as_deref() == Some("update") && self.snapshot.is_none() {
+                return Err(invalid());
+            }
+            if let Some(body) = self.draft {
+                let package = publication::package_with_snapshot(
+                    &body,
+                    &p.operation_id,
+                    &p.name,
+                    &p.version,
+                    self.snapshot.as_ref(),
+                )
+                .map_err(|_| invalid())?;
+                if publication::hash(&package) != p.sha256 {
+                    return Err(invalid());
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 async fn inspect(keys: &EncryptionKeys, source: &Document, rewrap: bool) -> AppResult<Document> {
     let row: Proposal = bson::from_document(source.clone()).map_err(|_| invalid())?;
     let mut fields = vec![
@@ -49,8 +108,7 @@ async fn inspect(keys: &EncryptionKeys, source: &Document, rewrap: bool) -> AppR
         ));
     }
     let mut set = Document::new();
-    let mut draft = None;
-    let mut snapshot: Option<InterfaceSnapshot> = None;
+    let mut validation = Validation::default();
     for (field, name, marker, version, bytes) in fields {
         let path = field.path(&row.agent_id);
         let context = RecordContext::new(PROPOSALS_COLLECTION_NAME, &row.id, &row.owner_id, &path)?;
@@ -78,26 +136,7 @@ async fn inspect(keys: &EncryptionKeys, source: &Document, rewrap: bool) -> AppR
             return Err(invalid());
         }
         let plain = record_field::decrypt_context(keys, &context, version, bytes).await?;
-        match field {
-            Field::Body => {
-                if row.body_bytes != plain.len() as i64 {
-                    return Err(invalid());
-                }
-                draft = Some(
-                    assistant_agent_learning_review::decode_draft(&row, &plain)
-                        .map_err(|_| invalid())?,
-                );
-            }
-            Field::Scope => {
-                let _: DraftScope = serde_json::from_slice(&plain).map_err(|_| invalid())?;
-                if row.scope_digest.as_deref() != Some(&publication::hash(&plain)) {
-                    return Err(invalid());
-                }
-            }
-            Field::Interface(_) => {
-                snapshot = Some(serde_json::from_slice(&plain).map_err(|_| invalid())?);
-            }
-        }
+        validation.field(&row, field, &plain)?;
         if !current {
             let bytes = keys.encrypt_record(&plain, &context).await?;
             keys.authenticate_current_record(&bytes, &context).await?;
@@ -111,26 +150,7 @@ async fn inspect(keys: &EncryptionKeys, source: &Document, rewrap: bool) -> AppR
             set.insert(marker, 3_i32);
         }
     }
-    if let Some(p) = &row.publication
-        && p.package_format == assistant_agent_learning_review::PACKAGE_FORMAT_SNAPSHOT
-    {
-        if p.target_kind.as_deref() == Some("update") && snapshot.is_none() {
-            return Err(invalid());
-        }
-        if let Some(body) = draft {
-            let package = publication::package_with_snapshot(
-                &body,
-                &p.operation_id,
-                &p.name,
-                &p.version,
-                snapshot.as_ref(),
-            )
-            .map_err(|_| invalid())?;
-            if publication::hash(&package) != p.sha256 {
-                return Err(invalid());
-            }
-        }
-    }
+    validation.package(&row)?;
     Ok(set)
 }
 

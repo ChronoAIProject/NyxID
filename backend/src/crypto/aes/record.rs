@@ -108,6 +108,50 @@ impl EncryptionKeys {
                 "Encrypted field writes await the configured writer cutover".into(),
             ));
         }
+        self.seal_bound_record(plaintext, context).await
+    }
+
+    /// Census checkpoints have their own fixed collection and owner. This
+    /// capability cannot produce an envelope accepted by an application field.
+    pub(crate) async fn seal_census_record(
+        &self,
+        generation: &str,
+        fields: &[&str],
+        plaintext: &[u8],
+    ) -> Result<Vec<u8>, AppError> {
+        let context = RecordContext::new(
+            "encrypted_record_census_log",
+            generation,
+            "platform",
+            fields,
+        )?;
+        self.seal_bound_record(plaintext, &context).await
+    }
+
+    pub(crate) async fn open_census_record(
+        &self,
+        generation: &str,
+        fields: &[&str],
+        ciphertext: &[u8],
+    ) -> Result<Zeroizing<Vec<u8>>, AppError> {
+        let context = RecordContext::new(
+            "encrypted_record_census_log",
+            generation,
+            "platform",
+            fields,
+        )?;
+        Ok(self
+            .decrypt_record_with_policy(ciphertext, &context, false, ReadPurpose::Observation)
+            .await?
+            .into_parts()
+            .0)
+    }
+
+    async fn seal_bound_record(
+        &self,
+        plaintext: &[u8],
+        context: &RecordContext<'_>,
+    ) -> Result<Vec<u8>, AppError> {
         let mut dek = Zeroizing::new([0u8; 32]);
         rand::thread_rng().fill_bytes(dek.as_mut());
         let wrapped = self.provider.wrap_dek(dek.as_ref()).await?;

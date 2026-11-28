@@ -7,8 +7,8 @@ pub const COLLECTION_NAME: &str = "assistant_direct_handoffs";
 pub struct DirectHandoff {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_owner_id: Option<String>,
-    #[serde(default)]
-    pub org_use_revision: i64,
+    #[serde(flatten)]
+    pub member_use: super::org_membership::MemberUse,
     #[serde(rename = "_id")]
     pub id: String,
     pub user_id: String,

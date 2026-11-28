@@ -383,23 +383,30 @@ async fn machine_preview_consent_encryption_acl_expiry_and_late_result() {
         0
     );
     // Purge uses the same collection regardless of attachment origin.
+    let mut preview = AssistantAttachment {
+        artifact: Default::default(),
+        secret_context_versions: Default::default(),
+        id: Uuid::new_v4().to_string(),
+        origin: "machine_preview".into(),
+        user_id: f.owner.clone(),
+        conversation_id: f.nyxbot_thread.clone(),
+        turn_id: Uuid::new_v4().to_string(),
+        content_type: "text/plain".into(),
+        size: 4,
+        chunks: 0,
+        data_encrypted: vec![],
+        created_at: Utc::now(),
+    };
+    crate::services::assistant_record_service::set_fixture_image_data(
+        &f.state.encryption_keys,
+        &mut preview,
+        b"test",
+    )
+    .await;
     f.state
         .db
         .collection::<AssistantAttachment>(ATTACHMENTS)
-        .insert_one(AssistantAttachment {
-            artifact: Default::default(),
-            secret_context_versions: Default::default(),
-            id: Uuid::new_v4().to_string(),
-            origin: "machine_preview".into(),
-            user_id: f.owner.clone(),
-            conversation_id: f.nyxbot_thread.clone(),
-            turn_id: Uuid::new_v4().to_string(),
-            content_type: "text/plain".into(),
-            size: 4,
-            chunks: 0,
-            data_encrypted: f.state.encryption_keys.encrypt(b"test").await.unwrap(),
-            created_at: Utc::now(),
-        })
+        .insert_one(preview)
         .await
         .unwrap();
     Box::pin(crate::test_utils::accept_and_process_owner_erasure(

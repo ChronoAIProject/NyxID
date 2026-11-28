@@ -56,13 +56,21 @@ pub fn validate_preferences(p: &VoicePreferences) -> AppResult<()> {
 }
 
 pub async fn thread(db: &Database, user: &str, id: &str) -> AppResult<AssistantConversation> {
-    let row = super::assistant_nyxagent::get_public(db, user, id).await?;
+    Ok(thread_with_revision(db, user, id).await?.0)
+}
+
+pub(super) async fn thread_with_revision(
+    db: &Database,
+    user: &str,
+    id: &str,
+) -> AppResult<(AssistantConversation, i64)> {
+    let (row, access) = super::assistant_nyxagent::get_public_authorized(db, user, id).await?;
     private_thread(&row)?;
     if row.shared_agent_thread {
         super::shared_agent_transport::require_ready(db).await?;
         crate::mw::auth::api_key_auth_user_for_voice(db, &row).await?;
     }
-    Ok(row)
+    Ok((row, access.as_ref().map_or(0, |a| a.eligibility_revision())))
 }
 
 pub(crate) fn private_thread(row: &AssistantConversation) -> AppResult<()> {
@@ -130,7 +138,7 @@ pub async fn enqueue(
     text: &str,
 ) -> AppResult<VoiceRequest> {
     require_enabled(db, user).await?;
-    thread(db, user, conversation).await?;
+    let (_, eligibility_revision) = thread_with_revision(db, user, conversation).await?;
     if Uuid::parse_str(session_id).is_err()
         || source_id.is_empty()
         || source_id.len() > 256
@@ -140,6 +148,7 @@ pub async fn enqueue(
         return Err(AppError::ValidationError("Invalid voice request".into()));
     }
     let request = VoiceRequest {
+        eligibility_revision,
         execution_enrolled: false,
         model_task: None,
         progress: None,
@@ -207,6 +216,22 @@ pub(crate) async fn enqueue_in_session(
         .await?
         .ok_or_else(|| AppError::NotFound("Conversation not found".into()))?;
     private_thread(&row)?;
+    if let Some(org) = super::org_agent_service::ordinary_member_org(&row) {
+        let live = super::org_agent_service::fence_member_use(
+            db,
+            session,
+            &row.user_id,
+            org,
+            row.agent_id
+                .as_deref()
+                .ok_or(AppError::AssistantTurnRequired)?,
+            false,
+        )
+        .await?;
+        if live.eligibility_revision != request.eligibility_revision {
+            return Err(AppError::Forbidden("Voice task authority changed".into()));
+        }
+    }
     if requests
         .count_documents(doc! {"conversation_id":&row.id,"state":"queued",
         "expires_at":{"$gt":bson::DateTime::from_chrono(Utc::now())}})
@@ -513,6 +538,7 @@ pub(crate) async fn publish_result(
 pub(crate) async fn claim(
     db: &Database,
     row: &AssistantConversation,
+    eligibility_revision: i64,
     id: &str,
     text: &str,
     session: &mut ClientSession,
@@ -525,6 +551,9 @@ pub(crate) async fn claim(
         .session(&mut *session)
         .await?
         .ok_or_else(|| AppError::Conflict("Voice request is no longer queued".into()))?;
+    if request.eligibility_revision != eligibility_revision {
+        return Err(AppError::Forbidden("Voice task authority changed".into()));
+    }
     // Serialize claims across replicas with a write on the shared VoiceSession.
     // Separate execution threads otherwise allow snapshot write skew past the cap.
     let visible = db
@@ -885,6 +914,10 @@ pub(crate) async fn ensure_task_conversation(
         &mut session,
     ))
     .await?;
+    if hidden.member_use.eligibility_revision != current.eligibility_revision {
+        session.abort_transaction().await?;
+        return Err(AppError::Forbidden("Voice task authority changed".into()));
+    }
     let changed = requests
         .update_one(
             doc! {"_id":&current.id,"state":"queued","task_conversation_id":bson::Bson::Null},
@@ -1176,6 +1209,7 @@ pub(crate) async fn continuation(
     let request = enqueue_in_session(
         db,
         VoiceRequest {
+            eligibility_revision: parent.eligibility_revision,
             execution_enrolled: parent.execution_enrolled,
             model_task: None,
             progress: None,

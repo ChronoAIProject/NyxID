@@ -871,6 +871,21 @@ async fn registry_table_drives_worker_erasure_and_preserves_bystanders() {
         "joined-child fixture drifted from registry"
     );
     let mut joined_children = Vec::new();
+    // MCP children remain joined to a person under either session storage format.
+    let legacy = uuid::Uuid::new_v4().to_string();
+    let hashed = crate::services::mcp_session_storage::hash(&uuid::Uuid::new_v4().to_string());
+    for key in [legacy, hashed] {
+        let child_id = format!("{key}:1");
+        db.collection::<Document>("mcp_sessions")
+            .insert_one(doc! {"_id":&key,"user_id":&owner})
+            .await
+            .unwrap();
+        db.collection::<Document>("mcp_session_notifications")
+            .insert_one(doc! {"_id":&child_id,"session_id":&key,"sequence":1_i64})
+            .await
+            .unwrap();
+        joined_children.push(("mcp_session_notifications", child_id));
+    }
     for (index, (child, parent, field)) in joined_cases.into_iter().enumerate() {
         let parent_owner_field = crate::services::personal_data_registry::find(parent)
             .and_then(|entry| match entry.owner {

@@ -91,15 +91,19 @@ pub(crate) async fn lane_for_grant(
     let filter = doc! {"channel_id":&origin.nyxbot_channel_id,"partition":&origin.partition,"actor_id":actor,
     "agent_id":agent,"binding_revision":&e.revision,"guest_revision":&e.guest_revision,"sender_hash":if e.guest {e.sender_hash.as_str()} else {""}};
     let rows = db.collection::<Document>(LANES);
+    let revision = e.member_use.eligibility_revision;
+    let same_revision = doc! {"$eq":[{"$ifNull":["$eligibility_revision",0_i64]},revision]};
+    let mut writable = filter.clone();
+    writable.insert("$or", bson::bson!([{"eligibility_revision":{"$exists":false}},{"eligibility_revision":{"$lte":revision}}]));
     if let Some(grant) = grant {
         let reserved = format!("nyxa-{}", uuid::Uuid::new_v4().simple());
-        let lane=crate::services::transaction_service::run_db_only(db,&(db,grant,&filter,&reserved,e),|tx,&(db,grant,filter,reserved,e)| {
+        let lane=crate::services::transaction_service::run_db_only(db,&(db,grant,&writable,&reserved,e,&same_revision),|tx,&(db,grant,filter,reserved,e,same_revision)| {
             Box::pin(async move {
                 crate::services::channel_meta_service::scopes::fence_reference(db,tx,grant,true).await?;
                 db.collection::<Document>(LANES).find_one_and_update(filter.clone(),vec![doc! {"$set":{
                     "_id":{"$ifNull":["$_id",uuid::Uuid::new_v4().to_string()]},"org_id":{"$literal":&e.org_id},
-                    "created_at":{"$ifNull":["$created_at","$$NOW"]},
-                    "conversation_id":{"$cond":[{"$eq":["$meta_grant.grant_id",&grant.grant_id]},"$conversation_id",reserved]},
+                    "created_at":{"$ifNull":["$created_at","$$NOW"]},"eligibility_revision":e.member_use.eligibility_revision,
+                    "conversation_id":{"$cond":[{"$and":[same_revision,{"$eq":["$meta_grant.grant_id",&grant.grant_id]}]},"$conversation_id",reserved]},
                     "meta_grant":{"$literal":bson::to_bson(grant).map_err(|_|super::denied())?},
                     "channel_bot_id":{"$literal":&grant.bot_id},
                 }}]).upsert(true).return_document(mongodb::options::ReturnDocument::After).session(tx).await?.ok_or_else(super::denied)
@@ -116,14 +120,21 @@ pub(crate) async fn lane_for_grant(
             .is_some();
         return Ok((id, exists));
     }
-    let result=rows.update_one(filter.clone(),doc!{"$setOnInsert":{"_id":uuid::Uuid::new_v4().to_string(),
-        "org_id":&e.org_id,"conversation_id":format!("nyxa-{}",uuid::Uuid::new_v4().simple()),"created_at":bson::DateTime::now()}}).upsert(true).await;
+    let reserved = format!("nyxa-{}", uuid::Uuid::new_v4().simple());
+    let result = rows.update_one(writable,vec![doc! {"$set":{
+        "_id":{"$ifNull":["$_id",uuid::Uuid::new_v4().to_string()]},
+        "org_id":{"$literal":&e.org_id},"created_at":{"$ifNull":["$created_at","$$NOW"]},
+        "eligibility_revision":revision,"conversation_id":{"$cond":[same_revision,{"$ifNull":["$conversation_id",&reserved]},&reserved]}
+    }}]).upsert(true).await;
     if let Err(error) = result
         && !crate::services::assistant_team_service::is_duplicate(&error)
     {
         return Err(error.into());
     }
     let lane = rows.find_one(filter).await?.ok_or_else(super::denied)?;
+    if super::eligibility_revision(&lane)? != revision {
+        return Err(super::denied());
+    }
     let id = lane
         .get_str("conversation_id")
         .map_err(|_| super::denied())?

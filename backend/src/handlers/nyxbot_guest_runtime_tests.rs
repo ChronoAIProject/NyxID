@@ -404,27 +404,31 @@ async fn assert_hosted_native_replay_checks_each_answer_frame(
     let id = "hosted_answer_replay";
     let mut payload = recovery::Payload::new(id, "hosted-test", Default::default());
     payload.finish_text(Some("Hosted answer payload"), false);
+    let mut stored = GatewayResponse {
+        id: Uuid::new_v4().to_string(),
+        response_id: id.into(),
+        user_id: row.user_id.clone(),
+        channel_id: row.id.clone(),
+        binding_id: row.binding_id.clone().unwrap(),
+        partition: event.partition,
+        event_key: event.id.clone(),
+        request_hash: "test".into(),
+        conversation_id: Some(conversation_id.into()),
+        terminal: true,
+        answer_delivery: None,
+        revision: 0,
+        payload_ciphertext: Vec::new(),
+        payload_context_version: None,
+        created_at: Utc::now(),
+        expires_at: Utc::now() + ChronoDuration::hours(1),
+    };
+    recovery::storage::install(&state.encryption_keys, &mut stored, &payload)
+        .await
+        .unwrap();
     state
         .db
         .collection::<GatewayResponse>(RESPONSES)
-        .insert_one(GatewayResponse {
-            id: Uuid::new_v4().to_string(),
-            response_id: id.into(),
-            user_id: row.user_id.clone(),
-            channel_id: row.id.clone(),
-            binding_id: row.binding_id.clone().unwrap(),
-            partition: event.partition,
-            event_key: event.id.clone(),
-            request_hash: "test".into(),
-            conversation_id: Some(conversation_id.into()),
-            terminal: true,
-            answer_delivery: None,
-            revision: 0,
-            payload_ciphertext: payload.seal_legacy(&state.encryption_keys).await.unwrap(),
-            payload_context_version: None,
-            created_at: Utc::now(),
-            expires_at: Utc::now() + ChronoDuration::hours(1),
-        })
+        .insert_one(stored)
         .await
         .unwrap();
 

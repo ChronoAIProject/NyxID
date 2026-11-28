@@ -19,8 +19,8 @@ pub struct DelegatedImages {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Assignment {
-    #[serde(default)]
-    pub org_use_revision: i64,
+    #[serde(flatten)]
+    pub member_use: super::org_membership::MemberUse,
     pub id: String,
     pub actor: String,
     pub source_agent: String,

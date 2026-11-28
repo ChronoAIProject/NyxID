@@ -14,7 +14,7 @@ const FIELD: &str = "refresh_token_encrypted";
 fn invalid() -> AppError {
     AppError::Internal("Broker credential requires authenticated repair".into())
 }
-fn identity<'a>(id: &'a str, owner: &str, client: &str) -> AppResult<HistoricalAad<'a>> {
+pub(super) fn identity<'a>(id: &'a str, owner: &str, client: &str) -> AppResult<HistoricalAad<'a>> {
     let binding = HistoricalAad::broker_binding(id).ok_or_else(invalid)?;
     if owner.is_empty() || client.is_empty() {
         return Err(invalid());
