@@ -1377,10 +1377,11 @@ NyxID ships without a default admin account. You must create the first admin usi
 
 ### Option 1: Bootstrap Endpoint (Recommended for First Deploy)
 
-When the database is empty (zero users), NyxID exposes a one-time setup endpoint:
+Before starting the server, configure a random `NYXID_ADMIN_SETUP_SECRET` on each replica. On an empty deployment, route setup traffic only to upgraded replicas. Earlier releases accept setup without this credential. Export the same value in the operator shell for the request below.
 
 ```bash
 curl -X POST http://localhost:3001/api/v1/auth/setup \
+  -H "Authorization: Bearer ${NYXID_ADMIN_SETUP_SECRET}" \
   -H "Content-Type: application/json" \
   -d '{
     "email": "admin@example.com",

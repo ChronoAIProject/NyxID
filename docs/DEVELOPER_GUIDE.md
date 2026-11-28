@@ -38,6 +38,8 @@ docker compose up -d
 cp .env.example .env
 # Replace ENCRYPTION_KEY with: openssl rand -hex 32
 
+# For initial admin setup, export NYXID_ADMIN_SETUP_SECRET=$(openssl rand -hex 32)
+
 # 3. Start backend (auto-generates RSA keys in dev mode)
 cargo run --manifest-path backend/Cargo.toml
 
@@ -46,6 +48,7 @@ cd frontend && npm install && npm run dev
 
 # 5. Create initial admin
 curl -X POST http://localhost:3001/api/v1/auth/setup \
+  -H "Authorization: Bearer ${NYXID_ADMIN_SETUP_SECRET}" \
   -H "Content-Type: application/json" \
   -d '{"email": "admin@example.com", "password": "securepassword123"}'
 ```
