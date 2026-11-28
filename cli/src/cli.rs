@@ -2974,14 +2974,26 @@ pub enum NodeCommands {
         #[arg(long, env = "NYXID_PROFILE")]
         profile: Option<String>,
     },
-    /// Update the node's auth token and signing secret after a server-side rotation
+    /// Update rotated credentials. Omitted secrets are prompted for with hidden input
     Rekey {
         /// Replacement auth token (nyx_nauth_...)
-        #[arg(long)]
-        auth_token: String,
+        #[arg(long, group = "rekey_auth_token")]
+        auth_token: Option<String>,
+        /// Read the replacement auth token from a file
+        #[arg(long, group = "rekey_auth_token", value_name = "PATH")]
+        auth_token_file: Option<std::path::PathBuf>,
+        /// Read the replacement auth token from this environment variable
+        #[arg(long, group = "rekey_auth_token", value_name = "NAME")]
+        auth_token_env: Option<String>,
         /// Replacement HMAC signing secret (64 hex chars)
-        #[arg(long)]
-        signing_secret: String,
+        #[arg(long, group = "rekey_signing_secret")]
+        signing_secret: Option<String>,
+        /// Read the replacement signing secret from a file
+        #[arg(long, group = "rekey_signing_secret", value_name = "PATH")]
+        signing_secret_file: Option<std::path::PathBuf>,
+        /// Read the replacement signing secret from this environment variable
+        #[arg(long, group = "rekey_signing_secret", value_name = "NAME")]
+        signing_secret_env: Option<String>,
         /// Path to config directory
         #[arg(long)]
         config: Option<String>,

@@ -679,7 +679,7 @@ pub async fn run_node_rotate_token_wizard(
             );
             eprintln!("  ID: {id}");
             eprintln!("  Restart the node agent with the new credentials:");
-            eprintln!("    nyxid node rekey --auth-token <token-from-browser> --signing-secret <hex-from-browser>");
+            eprintln!("    nyxid node rekey");
             eprintln!("  The previous token is now revoked.");
         },
         "Node token",
