@@ -1,5 +1,7 @@
 use super::*;
 
+const PROVIDER_PENDING_NOTICE: &str = "The provider accepted the operation (HTTP 202); completion is pending and unverified. It will not be sent again.";
+
 /// In-process capability created only after the stored source and live turn match.
 /// No public request deserializes this object.
 #[derive(Clone)]
@@ -110,32 +112,68 @@ pub(crate) async fn resume_turn(
     let Some(turn) = row.active_turn.as_ref() else {
         return Ok(None);
     };
-    let ids: Vec<_> = turn
+    let ids: Vec<String> = turn
         .events
         .iter()
-        .filter_map(|e| e.id.strip_prefix("execution-decision:"))
+        .filter_map(|e| e.id.strip_prefix("execution-decision:").map(str::to_owned))
         .collect();
     if ids.is_empty() {
         return Ok(None);
     }
-    let mut notes = Vec::new();
-    let mut receipts = Vec::new();
-    let mut withheld = Vec::new();
+    // Stored batch IDs are evidence only. They never add executable decisions
+    // to this admitted wake; an incomplete recovery remains receipt-only.
+    let mut batch = ids.clone();
+    batch.sort();
+    batch.dedup();
+    if batch.len() > 64 {
+        return Err(refused());
+    }
     let typed_wake = turn.events.iter().all(|event| {
         event.kind == "permission_decided" && event.id.starts_with("execution-decision:")
     });
-    let mut continuation_ready = None;
+    let filter = assistant_selector(doc! {"_id":{"$in":&batch}, "user_id":&row.user_id,
+    "execution_proposal.v1.conversation_id":&row.id,
+    "execution_proposal.v1.key_id":&row.credential_api_key_id});
+    let mut requests: Vec<ApprovalRequest> = state
+        .db
+        .collection::<ApprovalRequest>(REQUESTS)
+        .find(filter.clone())
+        .limit(64)
+        .await?
+        .try_collect()
+        .await?;
+    if requests.len() != batch.len() {
+        return Err(missing());
+    }
+    let batch_bound = continuation::bind_batch(state, row, &requests, &batch, typed_wake).await?;
+    if batch_bound {
+        requests = state
+            .db
+            .collection::<ApprovalRequest>(REQUESTS)
+            .find(filter)
+            .limit(64)
+            .await?
+            .try_collect()
+            .await?;
+    }
+    let mut notes = Vec::new();
+    let mut receipts = Vec::new();
+    let mut withheld = Vec::new();
+    let mut continuation_ready = batch_bound.then_some(true);
     let mut owner_source = None;
     let mut reviews = presentation::ReviewNotes::default();
     let mut seen = std::collections::HashSet::new();
-    for id in ids {
+    for id in ids.iter().map(String::as_str) {
         // Replayed wake IDs are the same receipt, never another operation.
         if !seen.insert(id) {
             continue;
         }
-        let request=state.db.collection::<ApprovalRequest>(REQUESTS).find_one(assistant_selector(doc!{"_id":id,"user_id":&row.user_id,"execution_proposal.v1.conversation_id":&row.id,"execution_proposal.v1.key_id":&row.credential_api_key_id})).await?.ok_or_else(missing)?;
-        let p = proposal(&request)?;
-        let version = AssistantVersion::of(&request)?;
+        let request = requests
+            .iter()
+            .find(|request| request.id == id)
+            .ok_or_else(missing)?;
+        let p = proposal(request)?;
+        let version = AssistantVersion::of(request)?;
         let mut eligible = continuation::eligible(row, p, version);
         if turn.execution_task.as_ref().is_none_or(|t| {
             t.task != p.task.task
@@ -150,13 +188,15 @@ pub(crate) async fn resume_turn(
             super::super::super::execution_permission_channel::check(&state.db, &p.task).await?;
         }
         if request.status != "approved" {
-            reviews.push(&request, p);
+            reviews.push(request, p);
             continue;
         }
         if p.state == "completed" {
-            notes.push(if matches!(p.contract.context.audience,Audience::Group{..}) {"The operation completed. Its private result is available on your permission card.".into()}else{result_for_human(state,&request).await?.unwrap_or_else(||"The operation completed; its retained result is no longer available.".into())});
+            notes.push(if matches!(p.contract.context.audience,Audience::Group{..}) {"The operation completed. Its private result is available on your permission card.".into()}else{result_for_human(state,request).await?.unwrap_or_else(||"The operation completed; its retained result is no longer available.".into())});
             if p.owner_continuation.as_ref().is_some_and(|release| {
-                release.version == 1 && !release.blocked && release.released_turn_id.is_none()
+                matches!(release.version, 1 | 2)
+                    && !release.blocked
+                    && release.released_turn_id.is_none()
             }) {
                 let receipt = continuation::Receipt {
                     id: id.into(),
@@ -164,6 +204,13 @@ pub(crate) async fn resume_turn(
                     claim_id: p.claim_id.clone().ok_or_else(conflict)?,
                 };
                 if eligible
+                    && p.owner_continuation
+                        .as_ref()
+                        .is_some_and(|release| release.version == 2)
+                    && p.owner_continuation
+                        .as_ref()
+                        .and_then(|release| release.batch.as_ref())
+                        == Some(&batch)
                     && request.activity_outcome.as_deref() == Some("completed")
                     && p.delivered_turn_id.is_none()
                     && p.result.is_some()
@@ -197,6 +244,10 @@ pub(crate) async fn resume_turn(
             continue;
         }
         if matches!(p.state.as_str(), "dispatched" | "unknown") {
+            if p.failure_code.as_deref() == Some("provider_completion_pending") {
+                notes.push(PROVIDER_PENDING_NOTICE.into());
+                continue;
+            }
             let mut session = state.db.client().start_session().await?;
             session.start_transaction().and_run((&state.db,id),move |session,(db,id)|Box::pin(async move {
                 let result:AppResult<()>=async {
@@ -277,7 +328,7 @@ pub(crate) async fn resume_turn(
             return Err(refused());
         }
         let raw = Field::Payload
-            .open(&state.encryption_keys, &request)
+            .open(&state.encryption_keys, request)
             .await?
             .ok_or_else(conflict)?;
         if raw.len() > MAX_PAYLOAD {
@@ -323,7 +374,15 @@ pub(crate) async fn resume_turn(
         let (state_name, text, code) = match outcome {
             Ok(response) if sent => {
                 let status = response.status();
-                match tokio::time::timeout(std::time::Duration::from_secs(120),axum::body::to_bytes(response.into_body(),MAX_PAYLOAD)).await {
+                if status == axum::http::StatusCode::ACCEPTED {
+                    activity_outcome = Some("pending");
+                    (
+                        "unknown",
+                        PROVIDER_PENDING_NOTICE.into(),
+                        Some("provider_completion_pending"),
+                    )
+                } else {
+                    match tokio::time::timeout(std::time::Duration::from_secs(120),axum::body::to_bytes(response.into_body(),MAX_PAYLOAD)).await {
                     Ok(Ok(bytes))=>{
                         let text=String::from_utf8_lossy(&bytes);
                         let text=match serde_json::from_slice::<serde_json::Value>(&bytes) {
@@ -339,6 +398,7 @@ pub(crate) async fn resume_turn(
                         ("completed",if row.group_id.is_some() || row.collaboration.is_some(){format!("Operation finished (HTTP {}). The private result is available on the requester's permission card.",status.as_u16())}else{result},None)
                     },
                     _=>("unknown","The response was incomplete or unavailable. The operation will not be sent again.".into(),Some("response_unavailable")),
+                }
                 }
             }
             Ok(response) => {
@@ -417,14 +477,18 @@ pub(crate) async fn resume_turn(
             "execution_proposal.v1.independent_card_id": independent_card,
         };
         let successful = state_name == "completed" && activity_outcome == Some("completed");
-        let release_pending = eligible && successful && continuation_ready == Some(true);
-        if release_pending {
-            set.insert(
-                "execution_proposal.v1.owner_continuation",
-                doc! {
-                    "version": 1, "released_turn_id": bson::Bson::Null,
-                },
-            );
+        let release_pending = typed_wake
+            && eligible
+            && successful
+            && continuation_ready == Some(true)
+            && p.owner_continuation.as_ref().is_some_and(|marker| {
+                marker.version == 2
+                    && !marker.blocked
+                    && marker.released_turn_id.is_none()
+                    && marker.batch.as_ref() == Some(&batch)
+            });
+        if p.owner_continuation.is_some() && !release_pending && state_name != "waiting" {
+            set.insert("execution_proposal.v1.owner_continuation.blocked", true);
         }
         if let Some(version) = marker {
             set.insert(
@@ -444,6 +508,14 @@ pub(crate) async fn resume_turn(
             }.await;
             super::super::super::api_key_mutation_service::transaction_result(result)
         })).await.map_err(super::super::super::api_key_mutation_service::map_transaction_error)?;
+        #[cfg(test)]
+        if release_pending
+            && continuation::FAIL_AFTER_RECEIPT
+                .try_with(|fail| *fail)
+                .unwrap_or(false)
+        {
+            return Err(AppError::Internal("Injected receipt interruption".into()));
+        }
         if release_pending {
             receipts.push(continuation::Receipt {
                 id: id.into(),

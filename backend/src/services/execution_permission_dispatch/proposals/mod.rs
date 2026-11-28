@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 pub(crate) mod continuation;
+pub(in crate::services::execution_permission_dispatch) mod effects;
 mod lifecycle;
 mod presentation;
 pub(crate) mod record;
@@ -980,28 +981,65 @@ pub(super) async fn existing_effect(
     context: &RequestContext,
     chat: &acks::ChatAuthority,
     connection: &str,
+    method: &str,
     digest: &str,
     frontend_url: &str,
 ) -> AppResult<()> {
     let task = chat.execution_task.as_ref().ok_or_else(refused)?;
-    // A task has at most 32 assistant proposals. One bounded query preserves
-    // the ordinary no-match cost and lets outstanding retries take precedence
-    // over an older delivered success with the same prepared digest.
-    let rows: Vec<ApprovalRequest> = db.collection::<ApprovalRequest>(REQUESTS).find(assistant_selector(doc! {
+    // Include the current turn's immutable release in the same bounded lookup.
+    // A first-time ordinary call still pays for one no-match proposal query.
+    let effect_filter = assistant_selector(doc! {
         "user_id":&chat.user_id,"execution_proposal.v1.key_id":&chat.api_key_id,
         "execution_proposal.v1.conversation_id":&chat.conversation_id,"execution_proposal.v1.task.task":bson::to_bson(&task.task).map_err(encoding)?,
         "execution_proposal.v1.task.epoch":task.epoch,"execution_proposal.v1.contract.binding.connection_id":connection,
         "execution_proposal.v1.prepared_digest":digest,
         "$or":[{"execution_proposal.v1.state":{"$ne":"completed"}},
-            {"execution_proposal.v1.owner_continuation.version":1},
+            {"execution_proposal.v1.owner_continuation.version":{"$in":[1,2]}},
             {"execution_proposal.v1.delivered_turn_id":null},
             {"execution_proposal.v1.source_turn_id":&chat.turn_id},
             {"execution_proposal.v1.resume_turn_id":&chat.turn_id}]
-    })).limit(32).await?.try_collect().await?;
+    });
+    let filter = match continuation::release_filter(chat)? {
+        Some(release) => doc! {"$or":[effect_filter,release]},
+        None => effect_filter,
+    };
+    // A task has at most 32 assistant proposals, including the release anchor.
+    let rows: Vec<ApprovalRequest> = db
+        .collection::<ApprovalRequest>(REQUESTS)
+        .find(filter)
+        .limit(32)
+        .await?
+        .try_collect()
+        .await?;
+    let released = rows.iter().any(|row| {
+        proposal(row).is_ok_and(|p| {
+            row.status == "approved"
+                && p.state == "completed"
+                && p.task.actor_user_id == task.actor_user_id
+                && row.activity_outcome.as_deref() == Some("completed")
+                && p.owner_continuation.as_ref().is_some_and(|marker| {
+                    matches!(marker.version, 1 | 2)
+                        && !marker.blocked
+                        && marker.released_turn_id.is_some()
+                        && marker.released_turn_id == chat.turn_id
+                })
+        })
+    });
+    if released
+        && !matches!(method, "GET" | "HEAD" | "OPTIONS")
+        && effects::prior_dispatch(db, chat, connection, digest).await?
+    {
+        return Err(AppError::Conflict(
+            "This original task already dispatched this effect under its execution permission. It will not be repeated; review its outcome.".into(),
+        ));
+    }
     let mut existing = None;
     let mut marked = None;
     for row in rows {
         let p = proposal(&row)?;
+        if p.prepared_digest != digest || p.contract.binding.connection_id != connection {
+            continue;
+        }
         if p.state != "completed"
             || p.delivered_turn_id.is_none()
             || Some(p.source_turn_id.as_str()) == chat.turn_id.as_deref()
@@ -1012,7 +1050,7 @@ pub(super) async fn existing_effect(
         }
         marked = Some(row);
     }
-    if existing.is_none() && marked.is_some() && continuation::released_for_turn(db, chat).await? {
+    if existing.is_none() && marked.is_some() && released {
         existing = marked;
     }
     if let Some(row) = existing {

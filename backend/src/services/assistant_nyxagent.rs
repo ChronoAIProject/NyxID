@@ -4549,6 +4549,13 @@ pub(crate) async fn begin_owner_turn_in_session(
                 .await?;
         }
     }
+    super::execution_permission_dispatch::tasks::mark_effect_evidence(
+        db,
+        session,
+        &row,
+        &message_id,
+    )
+    .await?;
     if voice_request.is_some() {
         let source_conversation = voice_request
             .as_ref()

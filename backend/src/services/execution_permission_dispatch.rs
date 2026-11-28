@@ -817,6 +817,7 @@ pub(crate) fn prepare<'a>(
                 context,
                 chat,
                 effect.connection,
+                effect.method,
                 &digest,
                 &state.config.frontend_url,
             )
@@ -1342,6 +1343,10 @@ impl Permit {
         Box::pin(async move {
             self.revalidate(target).await?;
             self.reserve().await?;
+            #[cfg(test)]
+            if let Ok(barrier) = proposals::effects::BEFORE_SEND.try_with(Arc::clone) {
+                barrier.wait().await;
+            }
             let mut session = self.db.client().start_session().await?;
             session
                 .start_transaction()
@@ -1628,6 +1633,22 @@ impl Permit {
                 resume.fence(&self.db, session, dispatch).await?;
             }
             if dispatch {
+                // All covered proxy/MCP/specialized transports share this actual
+                // send barrier, even when no approval request was authored.
+                if !matches!(self.method.as_str(), "GET" | "HEAD" | "OPTIONS")
+                    && let Some(chat) = &self.chat
+                {
+                    proposals::effects::record(
+                        &self.db,
+                        session,
+                        chat,
+                        &self.binding.connection_id,
+                        &self.digest,
+                        &self.operation_id,
+                        &current.id,
+                    )
+                    .await?;
+                }
                 self.db
                     .collection::<Document>("approval_grants")
                     .update_one(

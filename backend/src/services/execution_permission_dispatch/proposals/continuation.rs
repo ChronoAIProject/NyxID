@@ -3,7 +3,7 @@ use super::*;
 use crate::models::assistant_message::{AssistantMessage, MessageAuthor};
 use crate::services::assistant_nyxagent as engine;
 
-pub(crate) const READINESS: &str = "permissions:execution-owner-continuation-v1";
+pub(crate) const READINESS: &str = "permissions:execution-owner-continuation-v2";
 
 /// Match the engine's effective lease: an explicit date wins, including an
 /// expired date; only null/missing leases fall back to started_at plus the TTL.
@@ -44,39 +44,32 @@ fn current_task_filter(task: &TaskAdmission) -> AppResult<Document> {
 
 /// Only the runner's irreversible release establishes this context. An ordinary
 /// follow-up event in the same task cannot acquire it by naming an older receipt.
-pub(super) async fn released_for_turn(
-    db: &Database,
-    chat: &acks::ChatAuthority,
-) -> AppResult<bool> {
+pub(super) fn release_filter(chat: &acks::ChatAuthority) -> AppResult<Option<Document>> {
     let (Some(turn), Some(task)) = (chat.turn_id.as_deref(), chat.execution_task.as_ref()) else {
-        return Ok(false);
+        return Ok(None);
     };
     if !chat.turn_live || chat.turn_stopped {
-        return Ok(false);
+        return Ok(None);
     }
-    Ok(db
-        .collection::<Document>(REQUESTS)
-        .find_one(assistant_selector(doc! {
-            "user_id": &chat.user_id, "status": "approved", "activity_outcome": "completed",
-            "execution_proposal.v1.key_id": &chat.api_key_id,
-            "execution_proposal.v1.conversation_id": &chat.conversation_id,
-            "execution_proposal.v1.task.task": bson::to_bson(&task.task).map_err(encoding)?,
-            "execution_proposal.v1.task.epoch": task.epoch,
-            "execution_proposal.v1.task.actor_user_id": &task.actor_user_id,
-            "execution_proposal.v1.state": "completed",
-            "execution_proposal.v1.owner_continuation.version": 1,
-            "execution_proposal.v1.owner_continuation.blocked": {"$ne": true},
-            "execution_proposal.v1.owner_continuation.released_turn_id": turn,
-        }))
-        .projection(doc! {"_id": 1})
-        .await?
-        .is_some())
+    Ok(Some(assistant_selector(doc! {
+        "user_id": &chat.user_id, "status": "approved", "activity_outcome": "completed",
+        "execution_proposal.v1.key_id": &chat.api_key_id,
+        "execution_proposal.v1.conversation_id": &chat.conversation_id,
+        "execution_proposal.v1.task.task": bson::to_bson(&task.task).map_err(encoding)?,
+        "execution_proposal.v1.task.epoch": task.epoch,
+        "execution_proposal.v1.task.actor_user_id": &task.actor_user_id,
+        "execution_proposal.v1.state": "completed",
+        "execution_proposal.v1.owner_continuation.version": {"$in": [1, 2]},
+        "execution_proposal.v1.owner_continuation.blocked": {"$ne": true},
+        "execution_proposal.v1.owner_continuation.released_turn_id": turn,
+    })))
 }
 
 #[cfg(test)]
 tokio::task_local! {
     pub(crate) static FAIL_BEFORE_RELEASE: bool;
     pub(crate) static FAIL_AFTER_RELEASE: bool;
+    pub(crate) static FAIL_AFTER_RECEIPT: bool;
 }
 
 pub(crate) enum ResumeOutcome {
@@ -92,6 +85,85 @@ impl ResumeOutcome {
             Self::Continue(continuation) => continuation.receipt_text,
         }
     }
+}
+
+/// Bind every actionable member before any provider call. This prevents a crash
+/// at the first success from leaving an unprocessed sibling free to form a new,
+/// smaller release batch. Stored IDs remain evidence, never runnable events.
+pub(super) async fn bind_batch(
+    state: &crate::AppState,
+    row: &AssistantConversation,
+    requests: &[ApprovalRequest],
+    batch: &[String],
+    typed_wake: bool,
+) -> AppResult<bool> {
+    let mut candidates = Vec::new();
+    for request in requests {
+        let p = proposal(request)?;
+        let version = AssistantVersion::of(request)?;
+        if request.status == "approved"
+            && matches!(p.state.as_str(), "queued" | "preparing")
+            && p.owner_continuation.is_none()
+            && eligible(row, p, version)
+        {
+            candidates.push((request.id.clone(), version));
+        }
+    }
+    if candidates.is_empty()
+        || !crate::services::security_readiness_service::serving_report(&state.db, READINESS)
+            .await?
+            .serving_ready
+    {
+        return Ok(false);
+    }
+    let turn = row.active_turn.as_ref().ok_or_else(refused)?;
+    let task = turn.execution_task.as_ref().ok_or_else(refused)?;
+    if state
+        .db
+        .collection::<Document>("assistant_messages")
+        .find_one(doc! {
+            "_id":&task.task.root_id, "user_id":&row.user_id, "conversation_id":&row.id,
+            "execution_dispatch_evidence_version":2,
+        })
+        .projection(doc! {"_id":1})
+        .await?
+        .is_none()
+    {
+        // An older task cannot prove effects or the purity of earlier wakes.
+        return Ok(false);
+    }
+    let mut session = state.db.client().start_session().await?;
+    session.start_transaction().and_run((&state.db, row, task, &candidates, batch),
+        |session, (db, row, task, candidates, batch)| Box::pin(async move {
+            let result: AppResult<()> = async {
+                let mut filter = engine::WorkerFence::capture(row)?.filter();
+                filter.extend(current_task_filter(task)?);
+                filter.extend(doc! {"credential_api_key_id":&row.credential_api_key_id,
+                    "active_turn.stop_requested":false, "$expr":unexpired_turn()});
+                if db.collection::<Document>("assistant_conversations").update_one(filter,
+                    doc! {"$inc":{"execution_dispatch_fence":1_i64}})
+                    .session(&mut *session).await?.matched_count != 1 { return Err(refused()); }
+                for (id, version) in candidates.iter() {
+                    if db.collection::<Document>(REQUESTS).update_one(version.selector(doc! {
+                        "_id":id, "user_id":&row.user_id, "status":"approved",
+                        "execution_proposal.v1.key_id":&row.credential_api_key_id,
+                        "execution_proposal.v1.conversation_id":&row.id,
+                        "execution_proposal.v1.task.task":bson::to_bson(&task.task).map_err(encoding)?,
+                        "execution_proposal.v1.task.epoch":task.epoch,
+                        "execution_proposal.v1.state":{"$in":["queued","preparing"]},
+                        "execution_proposal.v1.owner_continuation":null,
+                    }), version.update(doc! {"$set":{"execution_proposal.v1.owner_continuation":{
+                        "version":2, "batch":*batch, "blocked":!typed_wake,
+                        "released_turn_id":bson::Bson::Null,
+                    }}})).session(&mut *session).await?.matched_count != 1 {
+                        return Err(conflict());
+                    }
+                }
+                Ok(())
+            }.await;
+            crate::services::api_key_mutation_service::transaction_result(result)
+        })).await.map_err(crate::services::api_key_mutation_service::map_transaction_error)?;
+    Ok(true)
 }
 
 pub(super) struct Receipt {
@@ -244,6 +316,11 @@ impl OwnerContinuation {
             |session, (db, row, turn, task, receipts, key_hash)| Box::pin(async move {
                 let result: AppResult<bool> = async {
                     tasks::fence(db, session, task).await?;
+                    let mut root = source_filter(row)?;
+                    root.insert("execution_dispatch_evidence_version", 2);
+                    if db.collection::<Document>("assistant_messages").update_one(root,
+                        doc! {"$inc":{"execution_dispatch_fence":1_i64}})
+                        .session(&mut *session).await?.matched_count != 1 { return Err(refused()); }
                     let mut filter = engine::WorkerFence::capture(row)?.filter();
                     filter.extend(current_task_filter(task)?);
                     filter.extend(doc! {
@@ -256,6 +333,16 @@ impl OwnerContinuation {
                         .update_one(filter, doc! {"$inc": {"execution_dispatch_fence": 1_i64}})
                         .session(&mut *session).await?.matched_count != 1
                     {
+                        return Err(refused());
+                    }
+                    // Rotation/revocation changes or removes this exact relationship.
+                    // Writing it in the release transaction serializes those mutations
+                    // without decrypting redundant ciphertext a second time.
+                    if db.collection::<Document>("assistant_agent_credentials").update_one(doc! {
+                        "user_id": &row.user_id, "conversation_id": &row.id,
+                        "api_key_id": &row.credential_api_key_id,
+                    }, doc! {"$inc": {"execution_dispatch_fence": 1_i64}})
+                        .session(&mut *session).await?.matched_count != 1 {
                         return Err(refused());
                     }
                     if db.collection::<Document>("api_keys").update_one(doc! {
@@ -277,6 +364,9 @@ impl OwnerContinuation {
                     {
                         return Err(refused());
                     }
+                    let mut batch: Vec<_> = receipts.iter().map(|receipt| receipt.id.clone()).collect();
+                    batch.sort();
+                    batch.dedup();
                     for receipt in receipts.iter() {
                         let filter = receipt.version.selector(doc! {
                             "_id": &receipt.id, "user_id": &row.user_id, "status": "approved",
@@ -290,7 +380,8 @@ impl OwnerContinuation {
                             "execution_proposal.v1.delivery_abandoned": {"$ne": true},
                             "execution_proposal.v1.result": {"$ne": null},
                             "execution_proposal.v1.delivered_turn_id": null,
-                            "execution_proposal.v1.owner_continuation.version": 1,
+                            "execution_proposal.v1.owner_continuation.version": 2,
+                            "execution_proposal.v1.owner_continuation.batch": &batch,
                             "execution_proposal.v1.owner_continuation.blocked": {"$ne": true},
                             "execution_proposal.v1.owner_continuation.released_turn_id": null,
                         });
@@ -326,7 +417,7 @@ pub(super) async fn withhold(db: &Database, receipts: &[Receipt]) -> AppResult<(
                 receipt.version.selector(doc! {
                     "_id": &receipt.id,
                     "execution_proposal.v1.claim_id": &receipt.claim_id,
-                    "execution_proposal.v1.owner_continuation.version": 1,
+                    "execution_proposal.v1.owner_continuation.version": {"$in": [1, 2]},
                     "execution_proposal.v1.owner_continuation.released_turn_id": null,
                 }),
                 receipt.version.update(doc! {"$set": {
