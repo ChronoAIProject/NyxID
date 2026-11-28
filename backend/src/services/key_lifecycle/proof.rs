@@ -20,6 +20,7 @@ pub(super) struct Slot {
     kind: &'static str,
     resource: Option<String>,
     keys: EncryptionKeys,
+    pub(super) selector: u8,
 }
 
 impl Slot {
@@ -52,6 +53,7 @@ impl Slot {
         resource: Option<String>,
         provider: Arc<dyn KeyProvider>,
     ) -> Self {
+        let selector = provider.current_key_id();
         let mut keys = EncryptionKeys::with_provider(provider);
         // This isolated one-key codec only writes the fixed enrollment challenge.
         keys.set_contextual_record_writes(true);
@@ -60,6 +62,7 @@ impl Slot {
             kind,
             resource,
             keys,
+            selector,
         }
     }
 }
@@ -104,6 +107,36 @@ pub(super) async fn slots(config: &AppConfig) -> AppResult<Vec<Slot>> {
         return Err(unavailable());
     }
     Ok(result)
+}
+
+/// Local proposals never enter the string-backed application configuration.
+pub(super) async fn proposed_slots(config: &AppConfig, previous: &str) -> AppResult<Vec<Slot>> {
+    if config.key_provider == "local" {
+        let mut key = Zeroizing::new([0; 32]);
+        hex::decode_to_slice(previous, &mut *key).map_err(|_| unavailable())?;
+        if key.iter().all(|byte| *byte == 0) {
+            return Err(unavailable());
+        }
+        let mut slots = slots(config).await?;
+        slots.push(Slot::new(
+            "previous",
+            "local",
+            None,
+            Arc::new(LocalKeyProvider::new(*key, None)),
+        ));
+        return Ok(slots);
+    }
+    let mut staged = config.clone();
+    match staged.key_provider.as_str() {
+        "aws-kms" => staged.aws_kms_key_arn_previous = Some(previous.into()),
+        "gcp-kms" => staged.gcp_kms_key_name_previous = Some(previous.into()),
+        _ => return Err(unavailable()),
+    }
+    let slots = slots(&staged).await?;
+    if !slots.iter().all(|s| s.pinned(&staged)) {
+        return Err(conflict("unpinned_provider"));
+    }
+    Ok(slots)
 }
 
 fn unavailable() -> AppError {
@@ -195,7 +228,7 @@ async fn cloud_slots(config: &AppConfig, result: &mut Vec<Slot>) -> AppResult<()
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct Proof {
     pub key: Key,
     binding: String,
@@ -251,22 +284,39 @@ pub(super) async fn issue(deployment: &str, slots: &[Slot]) -> AppResult<Vec<Pro
     Ok(proofs)
 }
 
-async fn identify<'a>(deployment: &str, slot: &Slot, proofs: &'a [Proof]) -> AppResult<&'a Key> {
+pub(super) async fn recognizes(deployment: &str, slot: &Slot, proof: &Proof) -> AppResult<bool> {
+    let bound = resource_binding(deployment, slot.kind, slot.resource.as_deref());
+    if proof.binding != bound || proof.key.provider != slot.kind {
+        return Ok(false);
+    }
+    if slot.resource.is_some() {
+        return Ok(true);
+    }
+    authenticates(deployment, slot, proof).await
+}
+
+async fn authenticates(deployment: &str, slot: &Slot, proof: &Proof) -> AppResult<bool> {
+    let fields = ["key_possession", proof.binding.as_str()];
+    let ctx = RecordContext::new(HEAD, deployment, &proof.key.key_ref, &fields)?;
+    Ok(slot
+        .keys
+        .authenticate_current_record(&proof.envelope.bytes, &ctx)
+        .await
+        .is_ok())
+}
+
+pub(super) async fn identify<'a>(
+    deployment: &str,
+    slot: &Slot,
+    proofs: &'a [Proof],
+) -> AppResult<&'a Key> {
     let bound = resource_binding(deployment, slot.kind, slot.resource.as_deref());
     let mut found = None;
     for proof in proofs
         .iter()
         .filter(|p| p.binding == bound && p.key.provider == slot.kind)
     {
-        let fields = ["key_possession", bound.as_str()];
-        let ctx = RecordContext::new(HEAD, deployment, &proof.key.key_ref, &fields)?;
-        if slot
-            .keys
-            .authenticate_current_record(&proof.envelope.bytes, &ctx)
-            .await
-            .is_ok()
-            && found.replace(&proof.key).is_some()
-        {
+        if authenticates(deployment, slot, proof).await? && found.replace(&proof.key).is_some() {
             return Err(unavailable());
         }
     }

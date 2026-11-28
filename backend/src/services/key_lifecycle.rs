@@ -2,9 +2,11 @@
 //! writes the same singleton and appends its evidence and chained audit atomically.
 mod contract;
 mod inventory;
+mod load_gate;
 mod location;
 mod proof;
 pub(crate) mod retirement;
+pub(crate) mod rotation;
 use super::{
     audit_service::{self, AuditActor},
     hmac_lifecycle_service, transaction_service,
@@ -98,7 +100,9 @@ pub(crate) async fn status(db: &Database, config: &AppConfig) -> AppResult<Optio
     Ok(Some(Status {
         revision: field(&row, "revision")?,
         scope: field(&row, "scope")?,
-        rotation_open: keys.len() > 1,
+        rotation_open: keys.len() > 1
+            || (row.contains_key("published_retirement") && !rotation::closed(&db, &row).await?),
+        rolling: row.get_bool("rolling") == Ok(true),
         restore_required: field(&row, "restore_required")?,
         scope_revision: field(&row, "scope_revision")?,
         keys,
@@ -166,7 +170,7 @@ async fn admit_enrolled(
     let row = bootstrap
         .collection::<Document>(HEAD)
         .find_one(doc! {"_id": SINGLETON, "revision": revision})
-        .projection(doc! {"scope": 1, "location": 1, "restore_required": 1, "proofs": 1, "published_retirement":1, "survivor_proofs":1, "revision":1, "retirement_generation":1})
+        .projection(doc! {"scope": 1, "location": 1, "restore_required": 1, "proofs": 1, "published_retirement":1, "survivor_proofs":1, "revision":1, "retirement_generation":1,"managed_proofs":1,"rolling":1,"scope_revision":1,"survivor_lineage":1})
         .await?
         .ok_or_else(stale)?;
     if row.get_bool("restore_required") != Ok(false) {
@@ -190,19 +194,25 @@ async fn admit_enrolled(
             "Enrolled lifecycle requires contextual record writers",
         ));
     }
-    let pinned = if row.contains_key("published_retirement") {
+    let (proofs, pinned) = if row.contains_key("published_retirement") {
         retirement::admit(bootstrap, config, &row).await?;
-        true
+        (field(&row, "survivor_proofs")?, true)
     } else {
         let slots = proof::slots(config).await?;
-        proof::verify(
-            &scope.deployment_id,
-            &slots,
-            &field::<Vec<proof::Proof>>(&row, "proofs")?,
-        )
-        .await?;
-        slots.iter().all(|slot| slot.pinned(config))
+        let pinned = slots.iter().all(|slot| slot.pinned(config));
+        let proofs = rotation::admitted(&row, &scope, &slots).await?;
+        if row.contains_key("managed_proofs") && (!pinned || config.allow_legacy_record_reads) {
+            return Err(stale());
+        }
+        if row.get_bool("survivor_lineage") == Ok(true) {
+            retirement::survivor_dependencies(bootstrap, config).await?;
+        }
+        (proofs, pinned)
     };
+    let primary = proofs
+        .iter()
+        .find(|p| p.key.role == "primary")
+        .ok_or_else(stale)?;
     // A slow provider challenge can straddle publication or restore. Linearize
     // admission after proof, while the version that supplied the proof is current.
     bootstrap
@@ -211,7 +221,7 @@ async fn admit_enrolled(
         .projection(doc! {"_id":1})
         .await?
         .ok_or_else(stale)?;
-    let mut layout = doc! {"_id":SINGLETON,"scope":row.get("scope"),"location":row.get("location"),"proofs":row.get("proofs"),"restore_required":false};
+    let mut layout = doc! {"_id":SINGLETON,"scope":row.get("scope"),"location":row.get("location"),"proofs":row.get("proofs"),"scope_revision":row.get("scope_revision"),"restore_required":false};
     if let Some(publication) = row.get("published_retirement") {
         layout.insert("published_retirement", publication);
     } else {
@@ -219,7 +229,15 @@ async fn admit_enrolled(
     }
     Ok(retirement::Admission {
         layout,
-        cohort: (pinned && !config.allow_legacy_record_reads).then(|| retirement::cohort(&scope)),
+        cohort: if pinned && !config.allow_legacy_record_reads {
+            Some(retirement::cohort(
+                &scope,
+                &primary.key.key_ref,
+                load_gate::executable().await?,
+            ))
+        } else {
+            None
+        },
     })
 }
 
@@ -233,14 +251,14 @@ pub(crate) async fn invalidate_in_transaction(
     let head = db.collection::<Document>(HEAD);
     let Some(row) = head
         .find_one_and_update(
-            doc! {"_id": SINGLETON, "restore_required": false, "published_retirement":{"$exists":false}},
+            doc! {"_id": SINGLETON, "restore_required": false, "published_retirement":{"$exists":false},"survivor_lineage":{"$ne":true}},
             doc! {"$inc": {"revision": 1_i64}, "$set": {"restore_required": true, "current": {}}},
         )
         .projection(doc! {"revision": 1})
         .session(&mut *session)
         .await?
     else {
-        if head.find_one(doc! {"_id": SINGLETON, "published_retirement":{"$exists":true}}).projection(doc!{"_id":1}).session(&mut *session).await?.is_some() {
+        if head.find_one(doc! {"_id": SINGLETON, "$or":[{"published_retirement":{"$exists":true}},{"survivor_lineage":true}]}).projection(doc!{"_id":1}).session(&mut *session).await?.is_some() {
             return Err(conflict("Published survivor requires isolated recovery"));
         }
         return Ok(None);
@@ -375,6 +393,7 @@ enum Action<'a> {
     Enroll(Document),
     Change(&'a Change, Option<Document>),
     Detected,
+    Rotation(&'a rotation::Edit<'a>),
 }
 struct Mutation<'a> {
     db: &'a Database,
@@ -449,6 +468,10 @@ async fn commit(m: &Mutation<'_>, tx: &mut ClientSession) -> AppResult<Receipt> 
     };
     let assertion = match &m.action {
         Action::Enroll(_) => json!({"kind":"enroll"}),
+        Action::Rotation(edit) => {
+            edit.apply(m.db, tx, &mut receipt).await?;
+            serde_json::to_value(edit.operation).map_err(|_| invalid())?
+        }
         Action::Detected => {
             head.update_one(
                 doc! {"_id": SINGLETON},
@@ -487,6 +510,11 @@ async fn commit(m: &Mutation<'_>, tx: &mut ClientSession) -> AppResult<Receipt> 
     let mut entry = bson::to_document(&evidence).map_err(|_| corrupt())?;
     entry.insert("_id", &receipt.entry_id);
     entry.insert("request_digest", &m.digest);
+    if let Action::Rotation(edit) = &m.action
+        && let Some(proof) = &edit.closed_proof
+    {
+        entry.insert("closed_proof", proof);
+    }
 
     entries.insert_one(entry).session(&mut *tx).await?;
     let metadata = json!({
@@ -589,9 +617,8 @@ async fn active_proofs(
         retirement::admit(db, config, head).await?;
         field(head, "survivor_proofs")
     } else {
-        let proofs = field::<Vec<proof::Proof>>(head, "proofs")?;
-        proof::verify(&scope.deployment_id, &proof::slots(config).await?, &proofs).await?;
-        Ok(proofs)
+        let slots = proof::slots(config).await?;
+        rotation::admitted(head, scope, &slots).await
     }
 }
 
@@ -627,3 +654,6 @@ impl CensusRing {
         proof::verify(&self.deployment, &proof::slots(config).await?, &self.proofs).await
     }
 }
+
+#[cfg(test)]
+mod rollout_peer;

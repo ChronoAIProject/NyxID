@@ -25,9 +25,15 @@ async fn coordinator_child() {
     let db = connect_transaction_test_database("rk_crash").await;
     let mut f = fixture(&db).await;
     for _ in 0..stage {
-        let result = step(&db, &f.config, &f.actor, &f.request, &CertifiedRelease)
-            .await
-            .unwrap();
+        let result = step(
+            &db,
+            &f.config,
+            &f.actor,
+            &f.request,
+            &CertifiedRelease::Rehearsal,
+        )
+        .await
+        .unwrap();
         f.request.expected_step_revision = result.revision;
     }
     let info = json!({"database":db.name(),"actor":f.actor.user_id,"hmac":f.config.hmac_keyset_path,"request":&f.request});
@@ -38,7 +44,13 @@ async fn coordinator_child() {
     .unwrap();
     resume_after(
         site,
-        step(&db, &f.config, &f.actor, &f.request, &CertifiedRelease),
+        step(
+            &db,
+            &f.config,
+            &f.actor,
+            &f.request,
+            &CertifiedRelease::Rehearsal,
+        ),
         async {
             std::fs::write(directory.join("boundary"), site).unwrap();
             std::future::pending::<()>().await;
@@ -80,13 +92,12 @@ async fn crash_cases(boundary: &str, first: usize) {
             let committed=boundary=="commit";
             assert_eq!(row.get_i64("revision"),Ok(req.expected_step_revision+i64::from(committed)));
             if boundary=="capture" || boundary=="claim" {
-                assert!(step(&db,&config,&actor,&req,&CertifiedRelease).await.is_err());
+                assert!(step(&db,&config,&actor,&req,&CertifiedRelease::Rehearsal).await.is_err());
                 assert!(!row.contains_key("published_retirement"));
             }else{
-                let scope:Scope=field(&row,"scope").unwrap();
-                fleet::observe_retirement_test_replica(&db,cohort(&scope)).await;
+                fleet::observe_retirement_test_replica(&db,layout_cohort(&row).await.unwrap()).await;
                 for _ in 0..6 {
-                    let status=step(&db,&config,&actor,&req,&CertifiedRelease).await.unwrap();
+                    let status=step(&db,&config,&actor,&req,&CertifiedRelease::Rehearsal).await.unwrap();
                     if status.phase==Phase::Published {break;}
                     req.expected_step_revision=status.revision;
                 }

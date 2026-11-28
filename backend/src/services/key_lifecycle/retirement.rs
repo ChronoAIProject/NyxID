@@ -11,23 +11,37 @@ use crate::{
 use serde::Deserialize;
 use std::collections::BTreeSet;
 
-mod guards;
+pub(super) mod guards;
 mod initialization;
 pub(crate) use initialization::{Admission, Initialization};
 pub(crate) const CAPABILITY: &str = "encryption:retirement-v1";
 pub(crate) const LOAD_BLOCKER: &str = "isolated_load_gate_unmet";
 
-pub(super) fn cohort(scope: &Scope) -> String {
+pub(super) fn cohort(scope: &Scope, primary: &str, artifact: &str) -> String {
     // Scope contains only opaque identifiers and bounded release metadata.
     hex::encode(Sha256::digest(
-        bson::to_vec(scope).expect("serializable enrollment scope"),
+        bson::to_vec(&doc! {"scope":encode(scope).expect("enrollment scope"),"primary":primary,"executable":artifact})
+            .expect("serializable enrollment scope"),
     ))
 }
 
-// PR 10 verifies isolated-rig evidence before a release can issue this capability.
-struct CertifiedRelease;
-fn certified_release() -> AppResult<CertifiedRelease> {
-    Err(conflict(LOAD_BLOCKER))
+pub(super) async fn layout_cohort(head: &Document) -> AppResult<String> {
+    let keys: Vec<Key> = field(head, "keys")?;
+    let primary = keys
+        .iter()
+        .find(|key| key.role == "primary")
+        .ok_or_else(corrupt)?;
+    Ok(cohort(
+        &field(head, "scope")?,
+        &primary.key_ref,
+        load_gate::executable().await?,
+    ))
+}
+
+enum CertifiedRelease {
+    Recorded(i64),
+    #[cfg(test)]
+    Rehearsal,
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -136,7 +150,7 @@ pub(in crate::services) async fn revision_at(
 
 async fn reader(config: &AppConfig, head: &Document, target: &Target) -> AppResult<EncryptionKeys> {
     let scope: Scope = field(head, "scope")?;
-    let proofs: Vec<proof::Proof> = field(head, "proofs")?;
+    let proofs = rotation::canonical(head)?;
     let mut slots = proof::slots(config).await?;
     proof::verify(&scope.deployment_id, &slots, &proofs).await?;
     if !slots.iter().all(|slot| slot.pinned(config))
@@ -177,6 +191,10 @@ pub(crate) async fn evaluate(
         return Ok(result);
     };
     result.revision = Some(field(&head, "revision")?);
+    if load_gate::verified(&db, &head).await.is_ok() {
+        result.certification_enabled = true;
+        result.blockers.remove(LOAD_BLOCKER);
+    }
     let scope: Scope = field(&head, "scope")?;
     let mut checks = guards::environment(&db, config, &head).await?;
     let Ok(keys) = reader(config, &head, target).await else {
@@ -221,15 +239,18 @@ pub(crate) async fn advance(
 ) -> AppResult<Progress> {
     request.recording.validate()?;
     request.target.validate()?;
-    let release = certified_release()?;
-    step(
-        &transaction_service::durable_database(db),
-        config,
-        actor,
-        request,
-        &release,
-    )
-    .await
+    let db = transaction_service::durable_database(db);
+    let head = location::observed(&db)
+        .await?
+        .ok_or_else(|| conflict(LOAD_BLOCKER))?;
+    // A lost response after publication replays only the authenticated receipt.
+    if !head.contains_key("published_retirement") {
+        load_gate::verified(&db, &head)
+            .await
+            .map_err(|_| conflict(LOAD_BLOCKER))?;
+    }
+    let release = CertifiedRelease::Recorded(field(&head, "revision")?);
+    step(&db, config, actor, request, &release).await
 }
 
 async fn step(
@@ -237,7 +258,7 @@ async fn step(
     config: &AppConfig,
     actor: &AuditActor,
     request: &Request,
-    _release: &CertifiedRelease,
+    release: &CertifiedRelease,
 ) -> AppResult<Progress> {
     let head = location::observed(db).await?.ok_or_else(stale)?;
     let id = &request.recording.request_id;
@@ -247,6 +268,10 @@ async fn step(
         &(&request.recording, &request.target, request.report_revision),
     )?;
     let revision: i64 = field(&head, "revision")?;
+    match release {
+        CertifiedRelease::Recorded(checked) if *checked != revision => return Err(stale()),
+        _ => {}
+    }
     if head.contains_key("published_retirement") {
         let mut slots = proof::slots(config).await?;
         let i = slots
@@ -353,7 +378,12 @@ async fn step(
     };
     let sealed = census::seal(db, &keys, &request.target.generation, &next).await?;
     let update = if phase == Phase::Published {
-        let proofs: Vec<proof::Proof> = field(&head, "proofs")?;
+        let proofs = rotation::canonical(&head)?;
+        let retired = proofs
+            .iter()
+            .find(|p| p.key.key_ref == request.target.retiring)
+            .ok_or_else(stale)?;
+        let retired = encode(retired)?;
         let survivor = proofs
             .into_iter()
             .filter(|p| p.key.key_ref == request.target.survivor)
@@ -363,8 +393,8 @@ async fn step(
         // Empty legacy proof list fences pre-publication admission binaries.
         doc! {"$set":{"published_retirement":sealed,"retirement_generation":&request.target.generation,
         "scope":encode(&survivor_scope)?, "scope_revision":next.revision, "keys":[encode(survivor_key)?],
-        "current":{}, "survivor_proofs":encode(&survivor)?,"proofs":[]}, "$inc":{"revision":1_i64},
-        "$unset":{"retirement_state":"","retirement_revision":""}}
+        "current":{}, "retired_proof":retired, "survivor_proofs":encode(&survivor)?,"proofs":[]}, "$inc":{"revision":1_i64},
+        "$unset":{"retirement_state":"","retirement_revision":"","managed_proofs":"","rolling":"","rotation_close_revision":""}}
     } else {
         doc! {"$set":{"retirement_state":sealed,"retirement_revision":next.revision,"retirement_id":id},"$inc":{"revision":1_i64}}
     };
@@ -456,6 +486,10 @@ async fn publication(
 pub(super) async fn admit(db: &Database, config: &AppConfig, head: &Document) -> AppResult<()> {
     let keys = admission_reader(config, head).await?;
     publication(db, &keys, head).await?;
+    survivor_dependencies(db, config).await
+}
+
+pub(super) async fn survivor_dependencies(db: &Database, config: &AppConfig) -> AppResult<()> {
     if !hmac_lifecycle_service::independent_file_matches(db, config.hmac_keyset_path.as_deref())
         .await?
     {

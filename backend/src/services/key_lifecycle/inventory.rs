@@ -48,6 +48,12 @@ fn invalidations(kind: Inventory, scope: &Scope, clear_inventory: bool) -> AppRe
     let assertion_field = current_key("assertion", assertion)?;
     let mut unset = Document::new();
     for key in &scope.keys {
+        if kind == Inventory::DatabaseCredential {
+            unset.insert(
+                format!("current.assertion_catalog_access_withdrawn.{key}"),
+                "",
+            );
+        }
         if clear_inventory {
             unset.insert(format!("current.{inventory_field}.{key}"), "");
         }
@@ -112,6 +118,7 @@ async fn resolve_dependency(
     id: &str,
     resolution: Option<Resolution>,
     receipt: &Receipt,
+    ring: &Scope,
     scope_revision: i64,
 ) -> AppResult<Inventory> {
     contract::uuid(id)?;
@@ -122,7 +129,9 @@ async fn resolve_dependency(
         .await?
         .ok_or_else(|| conflict("Unknown dependency"))?;
     let dep: Dependency = bson::from_document(row).map_err(|_| corrupt())?;
-    if dep.opened.scope.keys != receipt.scope.keys
+    let affected = &dep.opened.scope.keys & &ring.keys;
+    if dep.opened.scope.deployment_id != ring.deployment_id
+        || affected != receipt.scope.keys
         || resolution.is_some_and(|r| !dep.inventory.permits(r))
     {
         return Err(invalid());
@@ -182,7 +191,8 @@ pub(super) async fn apply(
         }
         Change::ReopenDependency { dependency_id } => {
             let kind =
-                resolve_dependency(db, tx, dependency_id, None, receipt, scope_revision).await?;
+                resolve_dependency(db, tx, dependency_id, None, receipt, ring, scope_revision)
+                    .await?;
             update.insert("$unset", invalidations(kind, &receipt.scope, true)?);
         }
         Change::CloseDependency {
@@ -195,6 +205,7 @@ pub(super) async fn apply(
                 dependency_id,
                 Some(*resolution),
                 receipt,
+                ring,
                 scope_revision,
             )
             .await?;
@@ -238,7 +249,9 @@ pub(super) async fn apply(
             if *affirmed
                 && let Some(kind) = match assertion {
                     Assertion::OldWritersWithdrawn => Some(Inventory::WriterCohort),
-                    Assertion::DatabaseAccessRevoked => Some(Inventory::DatabaseCredential),
+                    Assertion::DatabaseAccessRevoked | Assertion::CatalogAccessWithdrawn => {
+                        Some(Inventory::DatabaseCredential)
+                    }
                     _ => None,
                 }
             {
@@ -291,6 +304,9 @@ pub(super) async fn apply(
                 }
             }
             update.insert("$set",doc!{"scope":encode(&receipt.scope)?,"scope_revision":receipt.revision,"current":doc!{}});
+        }
+        Change::DeclareLoadProtocol { .. } | Change::RecordLoadResult { .. } => {
+            update = load_gate::record(db, tx, row, ring, receipt, change).await?;
         }
         Change::VerifyRing => return Ok(()),
     }

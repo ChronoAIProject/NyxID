@@ -31,7 +31,11 @@ impl Status {
         invalid: Option<&'static str>,
     ) -> Self {
         let published = state.phase == Phase::Published;
-        let mut blockers = vec!["isolated_load_gate_unmet"];
+        let mut blockers = vec![if state.ring.revision == 0 {
+            "isolated_load_gate_unmet"
+        } else {
+            "retirement_evaluation_required"
+        }];
         if !current {
             blockers.push("registry_digest_mismatch");
         }

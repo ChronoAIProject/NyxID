@@ -30,8 +30,27 @@ pub(super) async fn environment(
     {
         checks.blockers.insert("independent_hmac_unverified");
     }
+    if head.get_bool("rolling") == Ok(true) {
+        checks.blockers.insert("writer_roll_in_progress");
+    }
+    match fleet_deadline(db, &super::layout_cohort(head).await?).await {
+        Ok(deadline) => checks.deadline = deadline,
+        Err(_) => {
+            checks.blockers.insert("writer_fleet_unverified");
+        }
+    }
+    if !native_cleanup(db).await.unwrap_or(false) {
+        checks.blockers.insert("native_parent_cleanup_unverified");
+    }
+    Ok(checks)
+}
+
+pub(in crate::services::key_lifecycle) async fn fleet_deadline(
+    db: &Database,
+    bound: &str,
+) -> AppResult<i64> {
+    let mut deadline = i64::MAX;
     let ready = fleet::without_diagnostics(fleet::serving_report(db, CAPABILITY)).await;
-    let bound = cohort(&field(head, "scope")?);
     // Every newly enrolled generation holds the lifecycle reservation until it
     // publishes its first observation. Expiry of the oldest member also fences
     // the decision at database time, even if proof validation took a long time.
@@ -45,26 +64,23 @@ pub(super) async fn environment(
     let mut count = 0;
     while let Some(row) = live.try_next().await? {
         count += 1;
-        if row.get_str("retirement_cohort") != Ok(bound.as_str()) {
-            checks.blockers.insert("writer_fleet_unverified");
+        if row.get_str("retirement_cohort") != Ok(bound) {
+            return Err(conflict("writer_fleet_unverified"));
         }
         let seen = row
             .get_datetime("observed_at")
             .map_err(|_| corrupt())?
             .timestamp_millis();
-        checks.deadline = checks.deadline.min(seen.saturating_add(age_ms));
+        deadline = deadline.min(seen.saturating_add(age_ms));
     }
     if count == 0
         || count > 256
         || !ready
             .is_ok_and(|r| r.activated && r.ready && r.serving_ready && r.live_generations == count)
     {
-        checks.blockers.insert("writer_fleet_unverified");
+        return Err(conflict("writer_fleet_unverified"));
     }
-    if !native_cleanup(db).await.unwrap_or(false) {
-        checks.blockers.insert("native_parent_cleanup_unverified");
-    }
-    Ok(checks)
+    Ok(deadline)
 }
 
 pub(super) async fn native_cleanup(db: &Database) -> AppResult<bool> {
@@ -94,8 +110,12 @@ pub(super) async fn native_cleanup(db: &Database) -> AppResult<bool> {
     Ok(indexed)
 }
 
-pub(super) const ASSERTIONS: [(&str, Assertion); 4] = [
+pub(super) const ASSERTIONS: [(&str, Assertion); 5] = [
     ("old_writers_withdrawn", Assertion::OldWritersWithdrawn),
+    (
+        "catalog_access_withdrawn",
+        Assertion::CatalogAccessWithdrawn,
+    ),
     ("database_access_revoked", Assertion::DatabaseAccessRevoked),
     ("restore_continuity", Assertion::RestoreContinuity),
     (
@@ -188,7 +208,13 @@ pub(super) async fn evidence(
                 affirmed: true,
                 valid_until_ms: pointer.valid_until_ms
             });
-            if pointer.revision <= baseline
+            // Older evidence writers clear the credential inventory on edit,
+            // even when they do not know the newer catalog assertion.
+            let superseded = matches!(assertion, Assertion::CatalogAccessWithdrawn)
+                && !checked("inventory_database_credential", key)
+                    .is_some_and(|(review, _)| review.revision < pointer.revision);
+            if superseded
+                || pointer.revision <= baseline
                 || pointer.disposition != "affirmed"
                 || pointer.valid_until_ms.is_some_and(|end| end <= now)
                 || value != &required
