@@ -88,7 +88,7 @@ pub(crate) async fn record_activity(
     Ok(())
 }
 
-fn material(source: &Document) -> AppResult<Option<NyxbotThread>> {
+pub(in crate::services) fn material(source: &Document) -> AppResult<Option<NyxbotThread>> {
     if matches!(source.get(FIELD), None | Some(Bson::Null)) {
         return if matches!(source.get(VERSION), None | Some(Bson::Null)) {
             Ok(None)

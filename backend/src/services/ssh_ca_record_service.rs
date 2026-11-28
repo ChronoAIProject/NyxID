@@ -15,7 +15,7 @@ const FIELD: &str = "ssh_config.ca_private_key_encrypted";
 fn invalid() -> AppError {
     AppError::Internal("SSH signing authority storage is invalid or unresolved".into())
 }
-fn validate_key(public: &str, private: &[u8]) -> AppResult<()> {
+pub(super) fn validate_key(public: &str, private: &[u8]) -> AppResult<()> {
     if private.is_empty() || private.len() > 65_536 || public.is_empty() || public.len() > 8192 {
         return Err(invalid());
     }
@@ -26,7 +26,7 @@ fn validate_key(public: &str, private: &[u8]) -> AppResult<()> {
     }
     Ok(())
 }
-fn public_digest(public: &str) -> String {
+pub(super) fn public_digest(public: &str) -> String {
     use sha2::{Digest, Sha256};
     hex::encode(Sha256::digest(public.as_bytes()))
 }

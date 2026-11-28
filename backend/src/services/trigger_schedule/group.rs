@@ -13,12 +13,8 @@ use crate::models::{
     trigger_run::AutomationWork,
 };
 
-fn roster(members: &[groups::Member]) -> Vec<crate::models::assistant_agent::AssistantAgent> {
-    members
-        .iter()
-        .filter(|m| m.available)
-        .map(|m| m.agent.clone())
-        .collect()
+fn roster(members: Vec<groups::Member>) -> Vec<groups::Member> {
+    members.into_iter().filter(|m| m.available).collect()
 }
 
 pub async fn post(
@@ -46,7 +42,7 @@ pub async fn post(
             "Ambiguous agent name; mention its exact agent ID".into(),
         ));
     }
-    let roster = roster(&members);
+    let roster = roster(members);
     let mut recipients = groups::mentions(text, &all);
     recipients.retain(|id| roster.iter().any(|a| &a.id == id) && id != &chat.agent_id);
     if recipients.is_empty() && groups::mentions(text, &all).is_empty() {
@@ -86,7 +82,7 @@ pub async fn post(
             };
             let request = group.followers[index].automation.as_mut().expect("bound follower");
             if request.dispatches.len() + recipients.len() > continuation::DISPATCH_LIMIT as usize { return Err(AppError::Conflict("automation_dispatch_limit".into())); }
-            for agent in recipients { request.dispatches.push(Dispatch {org_use_revision:roster.iter().find(|a| &a.id == agent).ok_or(AppError::AssistantTurnRequired)?.org_use_revision, id: Uuid::new_v4().to_string(), agent_id: agent.clone(), state: "queued".into(), thread_id: None, turn_id: None}); }
+            for agent in recipients { request.dispatches.push(Dispatch {member_use:roster.iter().find(|a| &a.id == agent).ok_or(AppError::AssistantTurnRequired)?.member_use, id: Uuid::new_v4().to_string(), agent_id: agent.clone(), state: "queued".into(), thread_id: None, turn_id: None}); }
             let request_id = request.id.clone();
             let message = message(&group, &request_id, "agent", Some(&chat.agent_id), Some(&chat.agent_name), text, recipients);
             db.collection::<GroupMessage>(MESSAGES).insert_one(&message).session(&mut *session).await?;
@@ -202,7 +198,7 @@ pub async fn admit(
                 }
         })
         .ok_or(AppError::AssistantTurnRequired)?;
-    if dispatch.org_use_revision != row.org_use_revision {
+    if dispatch.member_use != row.member_use {
         return Err(AppError::AssistantTurnRequired);
     }
     dispatch.state = "running".into();
@@ -249,7 +245,7 @@ pub async fn transcript(
 /// Recover saved replies for this discovered group only. There is no global
 /// receipt sweep and a settled callback cannot create a quiescence gap.
 pub async fn recover(db: &Database, group: &AssistantGroup) -> AppResult<()> {
-    let roster = roster(&groups::members(db, &group.user_id, group).await?);
+    let roster = roster(groups::members(db, &group.user_id, group).await?);
     let settings = super::super::assistant_settings_service::get(db, &group.user_id).await?;
     for request in group.followers.iter().filter_map(|f| f.automation.as_ref()) {
         for dispatch in request.dispatches.iter().filter(|d| d.state != "settled") {
@@ -263,9 +259,9 @@ pub async fn recover(db: &Database, group: &AssistantGroup) -> AppResult<()> {
             };
             #[cfg(test)]
             super::super::durable_wake_tests::after("automation_group_member_read").await;
-            let unavailable = !roster.iter().any(|a| {
-                a.id == dispatch.agent_id && a.org_use_revision == dispatch.org_use_revision
-            });
+            let unavailable = !roster
+                .iter()
+                .any(|a| a.id == dispatch.agent_id && a.member_use == dispatch.member_use);
             let suspected_loss = if reply.is_none()
                 && !unavailable
                 && let (Some(thread), Some(turn)) = (&dispatch.thread_id, &dispatch.turn_id)
@@ -350,7 +346,7 @@ pub async fn recover(db: &Database, group: &AssistantGroup) -> AppResult<()> {
                     }
                     let run = db.collection::<TriggerRun>(RUNS).find_one_and_update(doc! {"_id": &request.work.run_id, "user_id": owner, "coordinator.protocol": 2, "outcome": {"$in": ["started", "waiting"]}}, doc! {"$inc": {"coordinator.version": 1_i64}}).return_document(ReturnDocument::After).session(&mut *session).await?;
                     let Some(run) = run else { return Ok(()); };
-                    let mut mentions = if error.is_none() { groups::mentions(text, roster) } else {Vec::new()};
+                    let mut mentions = if error.is_none() { groups::mentions(text, &roster.iter().map(|m| m.agent.clone()).collect::<Vec<_>>()) } else {Vec::new()};
                     mentions.retain(|id| id != &dispatch.agent_id && group.member_agent_ids.contains(id));
                     let mut accepted = Vec::new();
                     let mut refused = Vec::new();
@@ -365,7 +361,7 @@ pub async fn recover(db: &Database, group: &AssistantGroup) -> AppResult<()> {
                     }
                     db.collection::<Document>(RUNS).update_one(doc! {"_id": &run.id}, doc! {"$inc": {"coordinator.dispatches": accepted.len() as i64}}).session(&mut *session).await?;
                     request.dispatches[di].state = "settled".into();
-                    for id in &accepted { request.dispatches.push(Dispatch {org_use_revision:roster.iter().find(|a| &a.id == id).ok_or(AppError::AssistantTurnRequired)?.org_use_revision, id: Uuid::new_v4().to_string(), agent_id: id.clone(), state: "queued".into(), thread_id: None, turn_id: None}); }
+                    for id in &accepted { request.dispatches.push(Dispatch {member_use:roster.iter().find(|a| &a.id == id).ok_or(AppError::AssistantTurnRequired)?.member_use, id: Uuid::new_v4().to_string(), agent_id: id.clone(), state: "queued".into(), thread_id: None, turn_id: None}); }
                     group.message_count += 1;
                     let name = roster.iter().find(|a| a.id == dispatch.agent_id).map(|a| a.name.as_str()).unwrap_or("unavailable member");
                     let text = if let Some(error) = error {format!("{name} failed ({error}).")} else if refused.is_empty() {text.into()} else {format!("{text}\nNyxID: handoffs refused by automation/group limits: {}", refused.join(", "))};

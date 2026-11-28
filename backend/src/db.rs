@@ -3012,6 +3012,8 @@ async fn ensure_service_indexes(db: &Database) -> Result<(), mongodb::error::Err
         )
         .await?;
 
+    crate::services::openclaw_channel_service::ensure_mapping_index(db).await?;
+
     // ── channel_bots ──
     db.collection::<mongodb::bson::Document>(crate::models::channel_guest_policy::COLLECTION_NAME)
         .create_index(

@@ -678,8 +678,19 @@ async fn load(
     agent_id: &str,
     id: &str,
 ) -> AppResult<(AssistantAgent, AssistantAgentLearningProposal)> {
+    let (agent, row, _) = load_with_revision(db, actor, agent_id, id).await?;
+    Ok((agent, row))
+}
+
+async fn load_with_revision(
+    db: &Database,
+    actor: &str,
+    agent_id: &str,
+    id: &str,
+) -> AppResult<(AssistantAgent, AssistantAgentLearningProposal, i64)> {
     gate(db, actor).await?;
-    let agent = team::maintained_agent(db, actor, agent_id).await?;
+    let agent = team::agent(db, actor, agent_id).await?;
+    let eligibility_revision = org_agent_service::maintenance_revision(db, actor, &agent).await?;
     if agent.destroyed_at.is_some() {
         return Err(not_found());
     }
@@ -688,7 +699,7 @@ async fn load(
         .find_one(doc! {"_id":id,"agent_id":agent_id,"owner_id":&agent.user_id})
         .await?
         .ok_or_else(not_found)?;
-    Ok((agent, row))
+    Ok((agent, row, eligibility_revision))
 }
 
 async fn current(
@@ -711,6 +722,13 @@ async fn current(
     };
     if run.org_maintain_revision != agent.org_maintain_revision || row.evidence.is_empty() {
         return Ok(false);
+    }
+    if run.actor_id != agent.user_id {
+        match org_agent_service::maintenance_revision(db, &run.actor_id, agent).await {
+            Ok(revision) if revision == run.eligibility_revision => {}
+            Ok(_) | Err(AppError::Forbidden(_) | AppError::NotFound(_)) => return Ok(false),
+            Err(error) => return Err(error),
+        }
     }
     run.evidence = row.evidence.clone();
     learning::all_evidence_current(db, &run, agent).await
@@ -2379,14 +2397,14 @@ async fn approve_core(
         .write_concern(mongodb::options::WriteConcern::majority())
         .and_run2(async move |session| {
             let result: AppResult<LearningPublication> = async {
-                super::org_agent_service::fence_maintenance(&db,session,&actor_for_claim,&agent_for_claim).await?;
+                let eligibility_revision = super::org_agent_service::fence_maintenance_revision(&db,session,&actor_for_claim,&agent_for_claim).await?;
                 super::erasure_admission::fence_in_session(&db, &agent_for_claim.user_id, session).await?;
                 let fresh = db.collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME)
                     .find_one(doc! {"_id":&proposal_id,"revision":revision_filter(proposal_revision),"publication.operation_id":&operation_id})
                     .session(&mut *session).await?.ok_or_else(conflict)?;
                 let mut next = fresh.publication.clone().ok_or_else(conflict)?;
                 super::assistant_skill_authoring::fence_proposal_in_session(&db,session,&fresh).await?;
-                if next.approved_by.is_some() && next.org_maintain_revision != agent_for_claim.org_maintain_revision {
+                if next.approved_by.is_some() && (next.eligibility_revision != eligibility_revision || next.org_maintain_revision != agent_for_claim.org_maintain_revision) {
                     return Err(conflict());
                 }
                 if fresh.scope_digest.is_some() && next.reduced_scope_acceptance.as_ref().is_some_and(|consent| consent.revision != fresh.revision || consent.approval_digest != digest) { return Err(conflict()); }
@@ -2438,6 +2456,7 @@ async fn approve_core(
                 next.approved_by = Some(actor_for_claim.clone());
                 next.acknowledgement_id = card.clone();
                 next.approval_digest = Some(digest.clone());
+                next.eligibility_revision = eligibility_revision;
                 next.org_maintain_revision = agent_for_claim.org_maintain_revision;
                 next.skills_revision = agent_for_claim.skills_revision;
                 next.lease_id = Some(lease.clone());
@@ -2449,7 +2468,7 @@ async fn approve_core(
                     .collection::<bson::Document>(PROPOSALS_COLLECTION_NAME)
                     .update_one(
                         doc! {"_id":&proposal_id,"revision":revision_filter(proposal_revision),"publication.operation_id":&operation_id,"status":{"$in":["pending","publishing","publication_failed","published_unpinned"]},"$or":[{"publication.lease_expires_at":bson::Bson::Null},{"publication.lease_expires_at":{"$lte":bson::DateTime::now()}}]},
-                        doc! {"$set":{"status":"publishing","publication.invocation_id":&next.invocation_id,"publication.approved_by":&next.approved_by,"publication.acknowledgement_id":&next.acknowledgement_id,"publication.approval_digest":&next.approval_digest,"publication.skills_revision":next.skills_revision,"publication.org_maintain_revision":next.org_maintain_revision,"publication.lease_id":&next.lease_id,"publication.lease_expires_at":next.lease_expires_at.map(bson::DateTime::from_chrono),"publication.attempt":next.attempt,"publication.last_stage":"claimed","publication.last_registry_status":bson::Bson::Null,"failure_rules":[],"failure_code":bson::Bson::Null,"updated_at":bson::DateTime::now()}},
+                        doc! {"$set":{"status":"publishing","publication.invocation_id":&next.invocation_id,"publication.approved_by":&next.approved_by,"publication.acknowledgement_id":&next.acknowledgement_id,"publication.approval_digest":&next.approval_digest,"publication.skills_revision":next.skills_revision,"publication.org_maintain_revision":next.org_maintain_revision,"publication.eligibility_revision":next.eligibility_revision,"publication.lease_id":&next.lease_id,"publication.lease_expires_at":next.lease_expires_at.map(bson::DateTime::from_chrono),"publication.attempt":next.attempt,"publication.last_stage":"claimed","publication.last_registry_status":bson::Bson::Null,"failure_rules":[],"failure_code":bson::Bson::Null,"updated_at":bson::DateTime::now()}},
                     )
                     .session(&mut *session)
                     .await?;
@@ -2679,7 +2698,12 @@ async fn fence_pin_authority(
     if publication.org_maintain_revision != target.org_maintain_revision {
         return Err(conflict());
     }
-    org_agent_service::fence_maintenance(db, session, approver, target).await
+    if org_agent_service::fence_maintenance_revision(db, session, approver, target).await?
+        != publication.eligibility_revision
+    {
+        return Err(conflict());
+    }
+    Ok(())
 }
 
 /// Re-validates the claimed operation against live state. Returns the agent
@@ -2694,11 +2718,13 @@ async fn recheck(
     body: &GeneratedProposal,
     stage: PublicationStage,
 ) -> AppResult<(AssistantAgent, Option<PublicationFailureCode>)> {
-    let (agent, latest) = load(&state.db, actor, &row.agent_id, &row.id).await?;
+    let (agent, latest, eligibility_revision) =
+        load_with_revision(&state.db, actor, &row.agent_id, &row.id).await?;
     let evidence_current = evidence_allows_pin(&state.db, &agent, &latest).await?;
     if latest.revision != row.revision
         || latest.fingerprint != row.fingerprint
         || agent.skills_revision != p.skills_revision
+        || eligibility_revision != p.eligibility_revision
         || agent.org_maintain_revision != p.org_maintain_revision
         || latest.publication.as_ref().is_none_or(|v| {
             v.lease_id != p.lease_id || v.lease_expires_at.is_none_or(|t| t <= Utc::now())

@@ -748,7 +748,7 @@ pub(crate) async fn decide(
             row.status=if input.approved{"approved"}else{"rejected"}.into();row.decided_at=Some(now);row.decision_channel=Some("web".into());row.decision_idempotency_key=Some(input.idempotency_key.clone());row.execution_proposal=Some(version.envelope(updated));
             if collection.replace_one(version.selector(doc!{"_id":&row.id,"status":"pending","execution_proposal.v1.revision":p.revision}),&row).session(&mut *session).await?.matched_count!=1{return Err(conflict());}
             let mut event=super::super::assistant_team_service::event("permission_decided",if input.approved{"An execution permission was saved. NyxID will execute the retained operation and report its result; do not reconstruct or repeat it."}else{"The person denied the execution permission. Nothing was sent; do not repeat this request."}.into(),None).bound_to(p.report_to.as_deref()).for_invocation(p.invocation_id.as_deref());
-            event.org_use_revision = source.org_use_revision;
+            event.member_use = source.member_use;
             event.execution_task=Some(p.task.clone());event.id=format!("execution-decision:{}",row.id);
             let entry=bson::to_bson(&event).map_err(encoding)?;
             if conversations.update_one(doc!{"_id":&p.conversation_id,"user_id":*actor,"credential_api_key_id":&p.key_id,"pending_events.63":{"$exists":false}},doc!{"$push":{"pending_events":entry},"$inc":{"execution_dispatch_fence":1_i64}}).session(&mut *session).await?.matched_count!=1{return Err(conflict());}

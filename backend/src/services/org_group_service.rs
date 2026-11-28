@@ -431,6 +431,7 @@ pub async fn create(
             last_recipient_ids_by_actor: std::collections::HashMap::new(),
             created_by: created_by.into(),
             message_count: 0,
+            pending_eligibility_revisions: Default::default(),
             pending_org_use_revisions: Default::default(),
             pending_agent_ids: Vec::new(),
             hops_remaining: 0,
@@ -907,7 +908,7 @@ pub(crate) async fn append_with_hook(
                     if let Some(id) = request.as_deref() {
                         let record = db.collection::<crate::models::assistant_group::GroupRequest>(crate::models::assistant_group::REQUESTS_COLLECTION_NAME)
                             .find_one(doc! {"_id":id,"group_id":&access.group.id,"actor_user_id":&access.actor}).session(&mut *session).await?.ok_or_else(missing)?;
-                        if record.org_use_revisions.get(&agent.id).copied().unwrap_or(0) != current {return Err(missing());}
+                        if record.org_use_revisions.get(&agent.id).copied().unwrap_or(0) != current.org_use_revision || record.eligibility_revision != current.eligibility_revision {return Err(missing());}
                     }
                 }
                 let now = Utc::now();
@@ -977,7 +978,8 @@ pub(crate) async fn append_with_hook(
                     for target in targets {
                         if snapshot.permits_agent(&access.actor,&target) {
                             let revision = org::fence_member_use(&db,session,&access.actor,&group.user_id,&target.id,false).await?;
-                            request.org_use_revisions.insert(target.id,revision);
+                            request.org_use_revisions.insert(target.id,revision.org_use_revision);
+                            request.eligibility_revision = revision.eligibility_revision;
                         }
                     }
                     if request.pending_agent_ids.iter().any(|id|!request.org_use_revisions.contains_key(id)) {return Err(missing());}

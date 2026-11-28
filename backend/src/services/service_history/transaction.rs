@@ -10,6 +10,9 @@ pub(super) fn retryable(error: &mongodb::error::Error) -> bool {
         || error
             .get_custom::<crate::services::node_service::BindingCreationRace>()
             .is_some()
+        || error
+            .get_custom::<crate::services::mcp_session_storage::ConcurrentMcpClaim>()
+            .is_some()
         || error.contains_label("TransientTransactionError")
         || error
             .get_custom::<crate::services::erasure_admission::OwnerFenceCreationRace>()

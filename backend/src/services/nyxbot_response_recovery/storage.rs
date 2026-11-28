@@ -15,7 +15,7 @@ use zeroize::Zeroizing;
 const FIELD: &str = "payload_ciphertext";
 const VERSION: &str = "payload_context_version";
 
-fn field(row: &GatewayResponse) -> [&str; 4] {
+pub(in crate::services) fn field(row: &GatewayResponse) -> [&str; 4] {
     [FIELD, &row.channel_id, &row.binding_id, &row.response_id]
 }
 
@@ -73,7 +73,7 @@ pub(super) async fn revision_update(
     Ok(update)
 }
 
-fn checked(row: &GatewayResponse, bytes: &[u8]) -> AppResult<()> {
+pub(in crate::services) fn checked(row: &GatewayResponse, bytes: &[u8]) -> AppResult<()> {
     let body = decode(bytes)?;
     let identity = super::conversation_identity(&row.channel_id, &row.binding_id, &row.partition);
     let status = body.snapshot["status"].as_str();

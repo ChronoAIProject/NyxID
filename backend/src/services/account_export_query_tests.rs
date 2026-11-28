@@ -86,6 +86,46 @@ async fn joined_views_resolve_indexed_parent_and_child_scopes_without_lookups() 
 }
 
 #[tokio::test]
+async fn mcp_export_parent_scope_survives_a_session_migration() {
+    use crate::models::mcp_notification::COLLECTION_NAME;
+    use crate::models::mcp_session::{MCP_SESSION_COLLECTION, McpSessionStore};
+    use crate::services::mcp_session_storage::{READINESS, migrate_batch};
+    let db = crate::test_utils::connect_transaction_test_database("export_mcp_migration").await;
+    let store = McpSessionStore::with_db(db.clone());
+    let wire = store.create("person").await.unwrap().unwrap();
+    store
+        .send_notification(&wire, serde_json::json!({"private": true}))
+        .await
+        .unwrap();
+    let (ids, truncated) =
+        joined_parent_ids(&db, MCP_SESSION_COLLECTION, doc! {"user_id":"person"})
+            .await
+            .unwrap();
+    assert!(!truncated);
+    db.collection::<Document>(crate::models::security_capability_activation::COLLECTION_NAME).insert_one(doc!{
+        "_id":uuid::Uuid::new_v4().to_string(), "record_kind":crate::models::security_capability_activation::RECORD_KIND,
+        "capability": READINESS, "active_since":bson::DateTime::now()
+    }).await.unwrap();
+    assert_eq!(migrate_batch(&db, &mut None).await.unwrap(), 1);
+    let view = rows(
+        &db,
+        COLLECTION_NAME,
+        doc! {"session_id":{"$in":ids}},
+        fields_for(COLLECTION_NAME).unwrap(),
+        doc! {"created_at":-1},
+        &mut ExportBudget::new(MAX_BYTES),
+    )
+    .await
+    .unwrap();
+    assert_eq!(view.total_count, 1);
+    let exported = serde_json::to_string(&view).unwrap();
+    assert!(!exported.contains(&wire));
+    assert!(!exported.contains(&crate::services::mcp_session_storage::hash(&wire)));
+    assert!(!exported.contains("private"));
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn parent_scope_resolution_caps_ids_and_marks_the_incomplete_scope() {
     let db = crate::test_utils::connect_transaction_test_database("export_parent_cap").await;
     db.collection::<Document>("mcp_sessions")

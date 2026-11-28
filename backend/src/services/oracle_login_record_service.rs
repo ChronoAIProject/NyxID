@@ -18,10 +18,10 @@ fn invalid() -> AppError {
     AppError::Internal("Oracle login outer envelope requires authenticated repair".into())
 }
 
-struct Outer {
-    binding: OracleOuter,
-    ciphertext: Vec<u8>,
-    size: u64,
+pub(super) struct Outer {
+    pub(super) binding: OracleOuter,
+    pub(super) ciphertext: Vec<u8>,
+    pub(super) size: u64,
     expired_profile: bool,
 }
 
@@ -31,6 +31,14 @@ fn generated_id(value: &str) -> bool {
 }
 
 fn outer(collection: &str, source: &Document) -> AppResult<Outer> {
+    outer_at(collection, source, chrono::Utc::now())
+}
+
+pub(super) fn outer_at(
+    collection: &str,
+    source: &Document,
+    as_of: chrono::DateTime<chrono::Utc>,
+) -> AppResult<Outer> {
     let result = match collection {
         "oracle_login_profiles" => {
             let row: OracleLoginProfile =
@@ -51,7 +59,7 @@ fn outer(collection: &str, source: &Document) -> AppResult<Outer> {
                 binding: OracleOuter::profile(&row),
                 ciphertext: row.encrypted_envelope,
                 size: row.envelope_size,
-                expired_profile: row.expires_at <= chrono::Utc::now(),
+                expired_profile: row.expires_at <= as_of,
             }
         }
         "oracle_login_snapshots" => {

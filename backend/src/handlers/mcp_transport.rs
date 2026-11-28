@@ -21,6 +21,7 @@ use crate::crypto::jwt;
 use crate::models::mcp_session::{MCP_SESSION_COLLECTION, McpSessionRecord};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::{self, AuthMethod};
+use crate::mw::rate_limit::AuditIp;
 use crate::services::{
     approval_service, audit_service, connect_link_service, mcp_service, notification_service,
     operation_descriptor, proxy_service, ssh_service, user_service_service,
@@ -985,22 +986,6 @@ impl McpAuthContext {
     }
 }
 
-fn mcp_extract_ip(headers: &HeaderMap) -> Option<String> {
-    if let Some(forwarded) = headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .map(|v| v.split(',').next().unwrap_or("").trim().to_string())
-        .filter(|s| !s.is_empty())
-    {
-        return Some(forwarded);
-    }
-    headers
-        .get("x-real-ip")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-}
-
 fn mcp_extract_user_agent(headers: &HeaderMap) -> Option<String> {
     headers
         .get(axum::http::header::USER_AGENT)
@@ -1035,18 +1020,34 @@ async fn authenticate_mcp(
     headers: &HeaderMap,
     session_fallback: bool,
 ) -> Result<McpAuthContext, Box<Response>> {
-    authenticate_mcp_for_method(state, headers, session_fallback, axum::http::Method::POST).await
+    authenticate_mcp_for_method(
+        state,
+        headers,
+        None,
+        session_fallback,
+        axum::http::Method::POST,
+    )
+    .await
 }
 
 async fn authenticate_mcp_for_method(
     state: &AppState,
     headers: &HeaderMap,
+    request_ip: Option<String>,
     session_fallback: bool,
     method: axum::http::Method,
 ) -> Result<McpAuthContext, Box<Response>> {
-    match authenticate_mcp_or_public(state, headers, session_fallback, false, method, None)
-        .await
-        .map_err(Box::new)?
+    match authenticate_mcp_or_public(
+        state,
+        headers,
+        request_ip,
+        session_fallback,
+        false,
+        method,
+        None,
+    )
+    .await
+    .map_err(Box::new)?
     {
         McpAuthentication::Ordinary(auth) => Ok(*auth),
         McpAuthentication::Public(_) | McpAuthentication::ThreadInitialize => {
@@ -1059,12 +1060,12 @@ async fn authenticate_mcp_for_method(
 async fn authenticate_mcp_or_public(
     state: &AppState,
     headers: &HeaderMap,
+    request_ip: Option<String>,
     session_fallback: bool,
     allow_public: bool,
     method: axum::http::Method,
     thread_initialize: Option<&JsonRpcRequest>,
 ) -> Result<McpAuthentication, Response> {
-    let request_ip = mcp_extract_ip(headers);
     let request_ua = mcp_extract_user_agent(headers);
 
     // --- Try API key first (stateless auth for headless clients) ---
@@ -1809,6 +1810,8 @@ pub async fn mcp_post(
     request: Request<Body>,
 ) -> Response {
     let cancellation = crate::downstream_disconnect::request_cancellation(&request);
+    let AuditIp(request_ip) =
+        AuditIp::from_transport(request.headers(), request.extensions(), &state);
     let headers = request.headers().clone();
     let body = match super::body_limit::read_request_body(
         request,
@@ -1851,6 +1854,7 @@ pub async fn mcp_post(
     let mut auth = match authenticate_mcp_or_public(
         &state,
         &headers,
+        request_ip,
         !is_initialize,
         true,
         axum::http::Method::POST,
@@ -2127,12 +2131,23 @@ async fn resolve_session(
 // GET /mcp -- SSE notification stream
 // ---------------------------------------------------------------------------
 
-pub async fn mcp_get(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    let auth =
-        match authenticate_mcp_for_method(&state, &headers, true, axum::http::Method::GET).await {
-            Ok(a) => a,
-            Err(resp) => return *resp,
-        };
+pub async fn mcp_get(
+    State(state): State<AppState>,
+    AuditIp(ip): AuditIp,
+    headers: HeaderMap,
+) -> Response {
+    let auth = match authenticate_mcp_for_method(
+        &state,
+        &headers,
+        ip,
+        true,
+        axum::http::Method::GET,
+    )
+    .await
+    {
+        Ok(a) => a,
+        Err(resp) => return *resp,
+    };
 
     if let Err(e) = crate::mw::rate_limit::check_agent_rate_limit_raw(
         &state.per_agent_limiter,
@@ -2195,8 +2210,8 @@ pub async fn mcp_get(State(state): State<AppState>, headers: HeaderMap) -> Respo
                     }
                 }
                 Ok(None) => break,
-                Err(error) => {
-                    tracing::warn!(%error, session_id = %sid, "MCP notification poll failed");
+                Err(_) => {
+                    tracing::warn!(session_ref = %crate::services::mcp_session_storage::hash(&sid), "MCP notification poll failed");
                     tokio::time::sleep(poll_interval).await;
                 }
             }
@@ -2220,13 +2235,18 @@ pub async fn mcp_get(State(state): State<AppState>, headers: HeaderMap) -> Respo
 // DELETE /mcp -- session termination
 // ---------------------------------------------------------------------------
 
-pub async fn mcp_delete(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    let auth = match authenticate_mcp_for_method(&state, &headers, true, axum::http::Method::DELETE)
-        .await
-    {
-        Ok(a) => a,
-        Err(resp) => return *resp,
-    };
+pub async fn mcp_delete(
+    State(state): State<AppState>,
+    AuditIp(ip): AuditIp,
+    headers: HeaderMap,
+) -> Response {
+    let auth =
+        match authenticate_mcp_for_method(&state, &headers, ip, true, axum::http::Method::DELETE)
+            .await
+        {
+            Ok(a) => a,
+            Err(resp) => return *resp,
+        };
 
     if let Err(e) = crate::mw::rate_limit::check_agent_rate_limit_raw(
         &state.per_agent_limiter,
@@ -2259,11 +2279,12 @@ pub async fn mcp_delete(State(state): State<AppState>, headers: HeaderMap) -> Re
     let persisted_created_at = state
         .db
         .collection::<McpSessionRecord>(MCP_SESSION_COLLECTION)
-        .find_one(doc! { "_id": &sid })
+        .find_one(doc! {"_id": {"$in": crate::services::mcp_session_storage::keys_for_wire(&sid)}})
+        .sort(doc! {"_id": -1})
         .await
         .ok()
         .flatten()
-        .map(|rec| rec.created_at);
+        .map(|session| session.created_at);
 
     if let Err(error) = state.mcp_sessions.remove(&sid).await {
         tracing::error!(%error, "Failed to delete MCP session");
@@ -2275,7 +2296,7 @@ pub async fn mcp_delete(State(state): State<AppState>, headers: HeaderMap) -> Re
         state.db.clone(),
         Some(auth.user_id.clone()),
         "mcp_session_deleted".to_string(),
-        Some(serde_json::json!({ "session_id": &sid })),
+        Some(serde_json::json!({ "session_id": crate::services::mcp_session_storage::hash(&sid) })),
         auth.ip_address.clone(),
         auth.user_agent.clone(),
         auth.api_key_id.clone(),
@@ -2346,7 +2367,9 @@ async fn handle_initialize(
                     state.db.clone(),
                     Some(user_id.to_string()),
                     "mcp_session_created".to_string(),
-                    Some(serde_json::json!({ "session_id": &id })),
+                    Some(
+                        serde_json::json!({ "session_id": crate::services::mcp_session_storage::hash(&id) }),
+                    ),
                     ip_address.map(String::from),
                     user_agent.map(String::from),
                     api_key_id.map(String::from),
@@ -8225,13 +8248,13 @@ mod tests {
                 assert_eq!(authenticate_mcp(&state, &headers, true).await.is_ok(), allowed);
                 assert_eq!(state.mcp_sessions.get_for_auth(&sid).await.unwrap().is_some(), allowed);
                 let audit_count = db.collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
-                    .count_documents(doc! {"event_type": "mfa_unassured_session_rejected", "event_data.session_id": &sid}).await.unwrap();
+                    .count_documents(doc! {"event_type": "mfa_unassured_session_rejected", "event_data.session_id": crate::services::mcp_session_storage::hash(&sid)}).await.unwrap();
                 assert_eq!(audit_count, u64::from(!allowed));
                 if !allowed {
                     // A second replica may already have loaded the deleted row.
                     assert!(crate::services::session_authority::mcp_fallback_assurance(&db, &sid, &snapshot).await.is_err());
                     assert_eq!(db.collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
-                        .count_documents(doc! {"event_type": "mfa_unassured_session_rejected", "event_data.session_id": &sid}).await.unwrap(), 1);
+                        .count_documents(doc! {"event_type": "mfa_unassured_session_rejected", "event_data.session_id": crate::services::mcp_session_storage::hash(&sid)}).await.unwrap(), 1);
                     assert_eq!(db.collection::<bson::Document>(MCP_SESSION_SLOT_COLLECTION).count_documents(doc! {"session_id": &sid}).await.unwrap(), 0);
                     assert_eq!(notifications.count_documents(doc! {"session_id": &sid}).await.unwrap(), 0);
                 }
@@ -8384,6 +8407,7 @@ mod tests {
             let failure = authenticate_mcp_or_public(
                 &state,
                 &headers,
+                None,
                 true,
                 true,
                 axum::http::Method::POST,
@@ -10035,27 +10059,6 @@ mod tests {
         assert!(!record.session_fallback_allowed);
     }
 
-    #[test]
-    fn mcp_extract_ip_prefers_forwarded_for() {
-        let mut headers = HeaderMap::new();
-        headers.insert("x-forwarded-for", "1.2.3.4, 5.6.7.8".parse().unwrap());
-        headers.insert("x-real-ip", "9.9.9.9".parse().unwrap());
-        assert_eq!(mcp_extract_ip(&headers).as_deref(), Some("1.2.3.4"));
-    }
-
-    #[test]
-    fn mcp_extract_ip_falls_back_to_real_ip() {
-        let mut headers = HeaderMap::new();
-        headers.insert("x-real-ip", "9.9.9.9".parse().unwrap());
-        assert_eq!(mcp_extract_ip(&headers).as_deref(), Some("9.9.9.9"));
-    }
-
-    #[test]
-    fn mcp_extract_ip_returns_none_when_absent() {
-        let headers = HeaderMap::new();
-        assert!(mcp_extract_ip(&headers).is_none());
-    }
-
     #[tokio::test]
     async fn resolve_ssh_service_id_scopes_uuid_lookup_to_user() {
         let Some(db) = connect_test_database("mcp_ssh_resolve").await else {
@@ -10213,32 +10216,6 @@ mod tests {
     fn mcp_extract_user_agent_returns_none_when_absent() {
         let headers = HeaderMap::new();
         assert!(mcp_extract_user_agent(&headers).is_none());
-    }
-
-    // -----------------------------------------------------------------------
-    // mcp_extract_ip edge cases
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn mcp_extract_ip_ignores_empty_forwarded_for() {
-        let mut headers = HeaderMap::new();
-        headers.insert("x-forwarded-for", "".parse().unwrap());
-        headers.insert("x-real-ip", "10.0.0.1".parse().unwrap());
-        assert_eq!(mcp_extract_ip(&headers).as_deref(), Some("10.0.0.1"));
-    }
-
-    #[test]
-    fn mcp_extract_ip_trims_whitespace_in_real_ip() {
-        let mut headers = HeaderMap::new();
-        headers.insert("x-real-ip", "  8.8.8.8  ".parse().unwrap());
-        assert_eq!(mcp_extract_ip(&headers).as_deref(), Some("8.8.8.8"));
-    }
-
-    #[test]
-    fn mcp_extract_ip_single_forwarded_for() {
-        let mut headers = HeaderMap::new();
-        headers.insert("x-forwarded-for", "203.0.113.50".parse().unwrap());
-        assert_eq!(mcp_extract_ip(&headers).as_deref(), Some("203.0.113.50"));
     }
 
     // -----------------------------------------------------------------------
@@ -10685,6 +10662,83 @@ mod tests {
     #[test]
     fn jsonrpc_version_is_2_0() {
         assert_eq!(JSONRPC_VERSION, "2.0");
+    }
+
+    #[tokio::test]
+    async fn mcp_session_lifecycle_audits_store_only_the_hash() {
+        let db = crate::test_utils::connect_transaction_test_database("mcp_lifecycle_audit").await;
+        let mut state = test_app_state(db.clone());
+        state.mcp_sessions = std::sync::Arc::new(
+            crate::models::mcp_session::McpSessionStore::with_db(db.clone()),
+        );
+        let owner = uuid::Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&owner, crate::models::user::UserType::Person))
+            .await
+            .unwrap();
+        let request = JsonRpcRequest {
+            jsonrpc: JSONRPC_VERSION.into(),
+            id: Some(serde_json::json!(1)),
+            method: "initialize".into(),
+            params: None,
+        };
+        let response = handle_initialize(
+            &state,
+            &owner,
+            &request,
+            false,
+            true,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &TelemetryContext::default(),
+        )
+        .await;
+        let wire = response.headers()["mcp-session-id"]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let app = Router::new()
+            .route("/mcp", axum::routing::delete(mcp_delete))
+            .with_state(state);
+        let response = app
+            .oneshot(
+                Request::delete("/mcp")
+                    .header("mcp-session-id", &wire)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        let audits = db.collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME);
+        for event in ["mcp_session_created", "mcp_session_deleted"] {
+            let row = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                loop {
+                    if let Some(row) = audits
+                        .find_one(doc! {"user_id":&owner,"event_type":event})
+                        .await
+                        .unwrap()
+                    {
+                        break row;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(
+                row.get_document("event_data")
+                    .unwrap()
+                    .get_str("session_id")
+                    .unwrap(),
+                crate::services::mcp_session_storage::hash(&wire)
+            );
+            assert!(!row.to_string().contains(&wire));
+        }
+        db.drop().await.unwrap();
     }
 
     #[tokio::test]

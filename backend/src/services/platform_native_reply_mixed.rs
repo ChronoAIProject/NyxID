@@ -1,4 +1,5 @@
 use super::*;
+use crate::crypto::record_field::historical::HistoricalAad;
 use crate::{
     crypto::aes::EncryptionKeys,
     models::platform_entry_identity::NATIVE_RECEIPTS,
@@ -178,11 +179,9 @@ fn rewrap_captured_reply_handle() {
         assert!(!before.contains_key("ciphertext_context_version"));
         let keys = test_encryption_keys();
         let aad = binding_digest(&receipt).unwrap();
-        let original = keys
-            .decrypt_with_aad(
-                before.get_binary_generic("ciphertext").unwrap(),
-                aad.as_bytes(),
-            )
+        let original = HistoricalAad::native_reply(&aad)
+            .unwrap()
+            .open(&keys, before.get_binary_generic("ciphertext").unwrap())
             .await
             .unwrap();
         assert!(record::migrate(&state.db, &keys, &before).await.unwrap());
@@ -475,11 +474,9 @@ fn retained_expired_interaction_uses_its_original_shorter_deadline() {
                 .insert_one(&receipt)
                 .await
                 .unwrap();
-            let bytes = keys
-                .encrypt_with_aad(
-                    br#"{"application_id":"100","token":"fixture-old"}"#,
-                    digest.as_bytes(),
-                )
+            let bytes = HistoricalAad::native_reply(&digest)
+                .unwrap()
+                .seal(keys, br#"{"application_id":"100","token":"fixture-old"}"#)
                 .await
                 .unwrap();
             let expiry = interaction + Duration::minutes(14);

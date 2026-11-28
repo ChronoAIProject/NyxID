@@ -495,7 +495,9 @@ mod export_index_coverage {
                 "pub async fn upsert_mapping(",
                 "\"channel\": channel,",
                 "\"channel_user_id\": channel_user_id,",
-                "if let Some(existing) = existing"
+                "\"prepareUnique\": true",
+                "\"nyxid_user_id\": nyxid_user_id",
+                ".upsert(true)"
             ]
         ),
         resource!(
@@ -517,7 +519,8 @@ mod export_index_coverage {
             [
                 "pub(crate) async fn lane(",
                 "\"actor_id\":actor",
-                "let result=rows.update_one(filter.clone()",
+                "let mut writable = filter.clone();",
+                "rows.update_one(writable,",
                 ").upsert(true).await"
             ]
         ),

@@ -82,15 +82,16 @@ fn valid_partition(value: &str) -> bool {
             .all(|b| b.is_ascii_graphic() && b != b'/' && b != b'\\')
 }
 
-async fn target_agent(state: &AppState, actor: &str, id: &str) -> AppResult<AssistantAgent> {
+async fn target_agent(state: &AppState, actor: &str, id: &str) -> AppResult<(AssistantAgent, i64)> {
     let agent = assistant_team_service::agent(&state.db, actor, id).await?;
     if agent.destroyed_at.is_some() || agent.kind == AgentKind::Nyxbot && agent.user_id != actor {
         return Err(AppError::Forbidden("agent_target_unavailable".into()));
     }
     // This is stricter than ordinary read access: a custom channel is a
     // durable invocation authority and requires live owner/admin authority.
-    crate::services::org_agent_service::require_maintain(&state.db, actor, &agent).await?;
-    Ok(agent)
+    let revision =
+        crate::services::org_agent_service::maintenance_revision(&state.db, actor, &agent).await?;
+    Ok((agent, revision))
 }
 
 async fn destination(
@@ -180,7 +181,7 @@ pub(crate) async fn create(
     if !feature_enabled(state, owner).await? {
         return Err(AppError::Forbidden("gateway_feature_disabled".into()));
     }
-    let agent = target_agent(state, owner, agent_id).await?;
+    let (agent, eligibility_revision) = target_agent(state, owner, agent_id).await?;
     let (destination, destination_thread) = destination(
         state,
         owner,
@@ -218,7 +219,7 @@ pub(crate) async fn create(
     let producer_key_id = format!("nyxid-{}", &id[..8]);
     let now = Utc::now();
     let mut row = NyxbotEventBinding {
-        org_use_revision: agent.org_use_revision,
+        member_use: agent.member_use(eligibility_revision),
         id: id.clone(),
         user_id: owner.into(),
         agent_id: agent.id.clone(),
@@ -344,10 +345,10 @@ pub(crate) async fn create(
         let saved = if agent.user_id == owner {
             bindings.update_one(preparing.clone(), update).await?
         } else {
-            let context = (&state.db, owner, &agent, &bindings, &preparing, &update);
-            super::transaction_service::run_db_only(&state.db, &context, |tx, (db, owner, agent, bindings, filter, update)| {
+            let context = (&state.db, owner, eligibility_revision, &agent, &bindings, &preparing, &update);
+            super::transaction_service::run_db_only(&state.db, &context, |tx, (db, owner, eligibility_revision, agent, bindings, filter, update)| {
                 Box::pin(async move {
-                    super::org_agent_service::fence_maintenance(db, tx, owner, agent).await?;
+                    if super::org_agent_service::fence_maintenance_revision(db, tx, owner, agent).await? != *eligibility_revision { return Err(AppError::Forbidden("agent_target_unavailable".into())); }
                     Ok(bindings.update_one((*filter).clone(), (*update).clone()).session(tx).await?)
                 })
             }).await?
@@ -542,7 +543,7 @@ pub(crate) async fn authorize_provider(
     let agent = assistant_team_service::agent(&state.db, &row.user_id, &row.agent_id).await?;
     if agent.destroyed_at.is_some()
         || agent.user_id != row.agent_owner_id
-        || agent.org_use_revision != row.org_use_revision
+        || agent.org_use_revision != row.member_use.org_use_revision
     {
         return Err(AppError::Forbidden("agent_target_changed".into()));
     }
@@ -550,7 +551,9 @@ pub(crate) async fn authorize_provider(
         // Only an organization can own a foreign target on a custom binding.
         let access =
             super::org_agent_service::access(&state.db, &row.user_id, &agent.user_id).await?;
-        if !super::org_agent_service::specialist_rights(&row.user_id, &agent, &access).can_use {
+        if access.eligibility_revision() != row.member_use.eligibility_revision
+            || !super::org_agent_service::specialist_rights(&row.user_id, &agent, &access).can_use
+        {
             return Err(AppError::Forbidden("agent_target_unavailable".into()));
         }
     }

@@ -54,7 +54,9 @@ pub struct AgentEvent {
     #[serde(default)]
     pub source_org_use_revision: i64,
     #[serde(default)]
-    pub org_use_revision: i64,
+    pub source_eligibility_revision: i64,
+    #[serde(flatten)]
+    pub member_use: super::org_membership::MemberUse,
     /// Extended, JSON-quoted channel notice. Older readers receive an explicitly
     /// marked excerpt in `text` within their existing event-rendering budget.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -148,6 +150,11 @@ impl std::fmt::Debug for AgentEvent {
 }
 
 impl AgentEvent {
+    pub(crate) fn set_source_member_use(&mut self, revision: super::org_membership::MemberUse) {
+        self.source_org_use_revision = revision.org_use_revision;
+        self.source_eligibility_revision = revision.eligibility_revision;
+    }
+
     /// Carry the server-proven owner invocation family.
     pub fn for_invocation(mut self, id: Option<&str>) -> Self {
         self.invocation_id = id.map(str::to_owned);
@@ -942,8 +949,8 @@ pub struct AssistantConversation {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_owner_id: Option<String>,
     /// Specialist use revision at which the current thread credential was admitted.
-    #[serde(default)]
-    pub org_use_revision: i64,
+    #[serde(flatten)]
+    pub member_use: super::org_membership::MemberUse,
     /// Actor-owned private history survives withdrawal of personal-agent sharing.
     #[serde(default)]
     pub shared_agent_thread: bool,

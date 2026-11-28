@@ -16,11 +16,12 @@ use zeroize::Zeroizing;
 
 use super::transaction_service;
 use crate::{
-    crypto::aes::{EncryptionKeys, RecordContext},
+    crypto::aes::EncryptionKeys,
     errors::{AppError, AppResult},
 };
 
 pub(crate) mod replay;
+pub(crate) mod report;
 
 const LOG: &str = "encrypted_record_census_log";
 const PROTOCOL: i32 = 1;
@@ -38,6 +39,7 @@ fn malformed() -> AppError {
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct Scope {
+    #[serde(default)]
     pub registry_digest: String,
     pub restore_epoch: String,
     pub deployment_revision: String,
@@ -140,9 +142,11 @@ impl<'a> Census<'a> {
     async fn seal(&self, page: i64, batch: &Batch) -> AppResult<Bson> {
         let slot = page.to_string();
         let fields = ["journal", slot.as_str()];
-        let ctx = RecordContext::new(LOG, &self.id, "platform", &fields)?;
         let plain = Zeroizing::new(bson::to_vec(batch).map_err(|_| malformed())?);
-        let bytes = self.keys.encrypt_record(&plain, &ctx).await?;
+        let bytes = self
+            .keys
+            .seal_census_record(&self.id, &fields, &plain)
+            .await?;
         Ok(Bson::Binary(bson::Binary {
             subtype: bson::spec::BinarySubtype::Generic,
             bytes,
@@ -156,10 +160,12 @@ impl<'a> Census<'a> {
         };
         let slot = page.to_string();
         let fields = ["journal", slot.as_str()];
-        let ctx = RecordContext::new(LOG, &self.id, "platform", &fields)?;
         let opened = async {
             let ciphertext = row.get_binary_generic("batch").map_err(|_| malformed())?;
-            let plain = self.keys.decrypt_record(ciphertext, &ctx).await?;
+            let plain = self
+                .keys
+                .open_census_record(&self.id, &fields, ciphertext)
+                .await?;
             bson::from_slice(&plain).map_err(|_| malformed())
         }
         .await;
@@ -409,7 +415,7 @@ enum Change {
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;
 
 impl Census<'_> {
     /// Read one bounded page starting at the durable token. Discard the local

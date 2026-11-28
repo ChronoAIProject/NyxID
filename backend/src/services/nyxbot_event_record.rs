@@ -112,7 +112,10 @@ fn invalid() -> AppError {
     AppError::Internal("Invalid encrypted channel event".into())
 }
 
-fn stored<'a>(row: &'a Document, path: &str) -> AppResult<Option<&'a Bson>> {
+pub(in crate::services) fn stored<'a>(
+    row: &'a Document,
+    path: &str,
+) -> AppResult<Option<&'a Bson>> {
     let value = match path.split_once('.') {
         None => row.get(path),
         Some((parent, leaf)) => match row.get(parent) {
@@ -124,7 +127,11 @@ fn stored<'a>(row: &'a Document, path: &str) -> AppResult<Option<&'a Bson>> {
     Ok(value.filter(|v| **v != Bson::Null))
 }
 
-fn validate_plain(row: &Document, field: &str, bytes: &[u8]) -> AppResult<()> {
+pub(in crate::services) fn validate_plain(
+    row: &Document,
+    field: &str,
+    bytes: &[u8],
+) -> AppResult<()> {
     match field {
         CONTEXT => {
             let context: serde_json::Value =
@@ -215,6 +222,14 @@ fn validate_plain(row: &Document, field: &str, bytes: &[u8]) -> AppResult<()> {
     Ok(())
 }
 
+pub(in crate::services) const FIELDS: &[(&str, &str)] = &[
+    (TARGET, "delivery.target_context_version"),
+    (CONTEXT, "event_context_version"),
+    (GUEST, GUEST_VERSION),
+    (REPLY, "response_reply.context_version"),
+    (CHANNEL_GUEST, CHANNEL_GUEST_VERSION),
+];
+
 async fn inspect(keys: &EncryptionKeys, row: &Document, rewrap: bool) -> AppResult<Document> {
     if (stored(row, GUEST)?.is_some() || stored(row, GUEST_VERSION)?.is_some())
         && (stored(row, CHANNEL_GUEST)?.is_some() || stored(row, CHANNEL_GUEST_VERSION)?.is_some())
@@ -222,13 +237,7 @@ async fn inspect(keys: &EncryptionKeys, row: &Document, rewrap: bool) -> AppResu
         return Err(invalid());
     }
     let mut set = Document::new();
-    for (field, marker) in [
-        (TARGET, "delivery.target_context_version"),
-        (CONTEXT, "event_context_version"),
-        (GUEST, GUEST_VERSION),
-        (REPLY, "response_reply.context_version"),
-        (CHANNEL_GUEST, CHANNEL_GUEST_VERSION),
-    ] {
+    for &(field, marker) in FIELDS {
         let version = stored(row, marker)?
             .map(|v| bson::from_bson::<u8>(v.clone()))
             .transpose()
@@ -347,7 +356,17 @@ mod tests {
                 "sender_kind": "human", "guest": true, "original_message": true,
             },
         })).unwrap();
-        let bytes = keys.encrypt(&plain).await.unwrap();
+        let mut legacy = crate::test_utils::test_encryption_keys();
+        legacy.set_contextual_record_writes(false);
+        let bytes = seal(
+            &legacy,
+            "event",
+            "owner",
+            &[CHANNEL_GUEST, "channel"],
+            &plain,
+        )
+        .await
+        .unwrap();
         let source = doc! {
             "_id": "event", "user_id": "owner", "channel_id": "channel",
             "guest_setup_conversation_id": &conversation,
@@ -384,10 +403,17 @@ mod tests {
         let db = crate::test_utils::connect_transaction_test_database("event_generation").await;
         let keys = crate::test_utils::test_encryption_keys();
         let rows = db.collection::<Document>(EVENTS_COLLECTION_NAME);
-        let bytes = keys
-            .encrypt(br#"{"activity":{"event_id":"message"}}"#)
-            .await
-            .unwrap();
+        let mut legacy = crate::test_utils::test_encryption_keys();
+        legacy.set_contextual_record_writes(false);
+        let bytes = seal(
+            &legacy,
+            "retained",
+            "owner",
+            &[CONTEXT, "channel"],
+            br#"{"activity":{"event_id":"message"}}"#,
+        )
+        .await
+        .unwrap();
         let source = doc! {
             "_id":"retained", "channel_id":"channel", "user_id":"owner", "event_id":"message",
             CONTEXT: bson::Binary {subtype:bson::spec::BinarySubtype::Generic, bytes},

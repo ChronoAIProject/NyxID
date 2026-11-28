@@ -10,6 +10,7 @@ use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::handlers::channel_bots::hash_conversation_id;
 use crate::mw::auth::AuthUser;
+use crate::mw::rate_limit::AuditIp;
 use crate::services::{audit_service, openclaw_channel_service};
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event, should_sample_event};
 
@@ -62,6 +63,7 @@ pub struct MappingResponse {
 /// when no relay route exists. This keeps backward compatibility while
 /// allowing users to migrate to the unified channel bot relay incrementally.
 pub async fn handle_channel_message(
+    AuditIp(ip): AuditIp,
     State(state): State<AppState>,
     headers: HeaderMap,
     body: Bytes,
@@ -164,7 +166,7 @@ pub async fn handle_channel_message(
             "agent_id": &message.agent_id,
             "direction": &message.direction,
         })),
-        crate::handlers::admin_helpers::extract_ip(&headers),
+        ip,
         crate::handlers::admin_helpers::extract_user_agent(&headers),
         None,
         None,
@@ -458,9 +460,14 @@ mod tests {
             HeaderValue::from_static("secret"),
         );
 
-        let err = handle_channel_message(State(state), headers, Bytes::from_static(b"{}"))
-            .await
-            .expect_err("missing signature header should be unauthorized");
+        let err = handle_channel_message(
+            AuditIp(None),
+            State(state),
+            headers,
+            Bytes::from_static(b"{}"),
+        )
+        .await
+        .expect_err("missing signature header should be unauthorized");
 
         assert_eq!(err.0, StatusCode::UNAUTHORIZED);
         assert_eq!(
@@ -500,7 +507,7 @@ mod tests {
         let wrong_secret = "wrong-secret";
         let headers = webhook_headers(wrong_secret, &signature(wrong_secret, body.as_bytes()));
 
-        let err = handle_channel_message(State(state), headers, Bytes::from(body))
+        let err = handle_channel_message(AuditIp(None), State(state), headers, Bytes::from(body))
             .await
             .expect_err("wrong webhook secret should fail verification");
 
@@ -543,9 +550,10 @@ mod tests {
         .to_string();
         let headers = webhook_headers(&secret, &signature(&secret, body.as_bytes()));
 
-        let Json(response) = handle_channel_message(State(state), headers, Bytes::from(body))
-            .await
-            .unwrap();
+        let Json(response) =
+            handle_channel_message(AuditIp(None), State(state), headers, Bytes::from(body))
+                .await
+                .unwrap();
 
         assert_eq!(response.status, "resolved");
         assert_eq!(response.nyxid_user_id.as_deref(), Some(user_id.as_str()));

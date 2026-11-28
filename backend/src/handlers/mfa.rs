@@ -13,11 +13,12 @@ use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::handlers::auth::{
     AuthClientMode, LoginResponse, apply_browser_session_cookies, build_cookie_with_same_site,
-    clear_cookie_with_same_site, extract_ip, extract_user_agent, resolve_auth_client_mode,
+    clear_cookie_with_same_site, extract_user_agent, resolve_auth_client_mode,
 };
 use crate::models::mfa_factor::{COLLECTION_NAME as MFA_FACTORS, MfaFactor};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::AuthUser;
+use crate::mw::rate_limit::AuditIp;
 use crate::services::{audit_service, mfa_service, token_service};
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
@@ -301,7 +302,7 @@ pub async fn verify(
     let mut completion = factor.expect("verified factor");
 
     // Issue real session tokens
-    let ip = extract_ip(&headers, Some(peer));
+    let ip = AuditIp::resolve(&headers, Some(peer), &state.config.trusted_proxy_ips).0;
     let ua = extract_user_agent(&headers);
     let client_mode = resolve_auth_client_mode(&headers, body.client.as_deref());
     let secure = state.config.use_secure_cookies();

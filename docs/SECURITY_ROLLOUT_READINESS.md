@@ -552,3 +552,25 @@ Compare flag-off behavior and the full integrated backend suite against the
 current dev baseline. Record fixture results and authorized live Telegram,
 Lark/Feishu and Discord acceptance separately.
 [Channel guest access specification](CHANNEL_BOT_GUEST_ACCESS_SPEC.md)
+
+## MCP session identifier storage
+
+The release advertises `mcp:session-id-hash-v1`. Every upgraded reader accepts
+the client's existing wire ID and resolves its domain-separated hash first,
+with a literal fallback for legacy UUID rows. Until every observed live
+generation supports the capability and readiness records durable activation,
+issuance retains the raw key. Rollback before activation preserves compatibility.
+
+Activation and pre-activation issuance serialize on a shared fence in
+`security_rollouts`. Subsequent sessions use only hashed storage keys.
+A bounded sweep migrates each existing session, its slot and its notification
+keys in one transaction. Activity and migration can retry against the committed
+identity. The parent NyxID login keeps its own identifier. The client continues
+to use the original wire ID.
+
+New MCP session audit events use the hash. Historical chained events retain
+their original values. Every session issued before activation ends by seven
+days after the first activation timestamp, including sessions awaiting migration.
+A client then reinitializes with its live credential. Old binaries must not
+rejoin after activation. If the fleet rolls back below this release, older
+readers cannot resolve hash-only sessions and their clients must reinitialize.

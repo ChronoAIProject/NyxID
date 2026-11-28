@@ -400,3 +400,15 @@ full source paths are never persisted.
 The generated-artifact adapter handles pending files. Walks and privileged
 lookups for these files and mixed attachments reserve bytes before fetching BSON and
 process one large record per batch, retaining the budget through decrypt/rewrap/CAS.
+
+### Census control records
+
+An administrator starts a dated observational generation at
+`/api/v1/admin/encrypted-records/censuses` and advances it to publication.
+`encrypted_record_census_log` holds the protected journal. The
+`encrypted_record_census_reports` collection holds encrypted checkpoints,
+row contributions, prior dependency edges, findings and family summaries.
+Each child partition is addressed by its ciphertext digest. Both collections
+use the generation's seven-day deadline. Their purpose-bound sealing works
+during the compatible-writer rollout. Application-key retirement requires
+separate lifecycle authorization. The isolated-rig load gate remains open.

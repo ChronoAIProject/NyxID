@@ -2155,7 +2155,12 @@ per-minute limit. Verified members retain existing access and billing rules.
 
 Binding metadata lives on `org_specialist`, sender verification in
 `org_channel_sender_links`; optional `org_execution` origins carry the exact
-actor/revision through queueing, thread follow, recovery and late delivery.
+actor and binding revision through queueing, thread follow, recovery and late
+delivery. For verified members the challenge, sender link and execution origin
+also capture the member's eligibility revision. Returning to Member or Admin
+requires a fresh confirmation and starts a new hidden group lane. Old queued
+messages, origin-bound deliveries and cards keep the revision captured before
+the change. A member can start new work in their private home with a new key.
 First-party human endpoints under `/assistant/nyxagent/channels/{id}` are
 `GET/PUT org-specialist`, `POST/DELETE member-link`,
 `GET member-link/{challenge}`, and `POST member-link/{challenge}/confirm`.

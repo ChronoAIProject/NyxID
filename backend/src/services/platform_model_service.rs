@@ -755,12 +755,14 @@ pub async fn authorized_catalog_scope(
                     OwnerAccess::AsOrgAdmin {
                         org_user_id: row.user_id.clone(),
                         membership_id: member.id.clone(),
+                        eligibility_revision: member.eligibility_revision,
                         allowed_service_ids: scope,
                     }
                 } else {
                     OwnerAccess::AsOrgMember {
                         org_user_id: row.user_id.clone(),
                         membership_id: member.id.clone(),
+                        eligibility_revision: member.eligibility_revision,
                         role: member.role,
                         allowed_service_ids: scope,
                     }

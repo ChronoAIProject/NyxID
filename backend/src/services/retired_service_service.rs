@@ -104,7 +104,17 @@ mod tests {
         vendor.slug = "platform-telnyx".into();
         vendor.service_category = "internal".into();
         vendor.auth_method = "bearer".into();
-        vendor.credential_encrypted = keys.encrypt(b"legacy-fixture").await.unwrap();
+        use crate::services::catalog_credential_record_service as catalog_record;
+        let mut legacy = test_encryption_keys();
+        legacy.set_contextual_record_writes(false);
+        vendor.credential_encrypted = catalog_record::encrypt(
+            &legacy,
+            &vendor.id,
+            catalog_record::owner(&vendor).unwrap(),
+            b"legacy-fixture",
+        )
+        .await
+        .unwrap();
         db.collection::<DownstreamService>(COLLECTION_NAME)
             .insert_one(&vendor)
             .await
