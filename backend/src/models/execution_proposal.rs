@@ -25,6 +25,9 @@ impl std::fmt::Debug for ExecutionProposal {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Proposal {
+    /// Durable success-to-model handoff. Absent historical receipts never launch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_continuation: Option<OwnerContinuation>,
     pub revision: i64,
     pub gap_key: String,
     pub effect_id: String,
@@ -74,6 +77,35 @@ pub struct Proposal {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result_context_version: Option<u8>,
     pub failure_code: Option<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct OwnerContinuation {
+    /// 0 records admission intent only; 3 is an eligible, readiness-gated handoff.
+    pub version: u32,
+    /// Immutable original fresh-decision group. Missing historical proof never releases.
+    #[serde(default)]
+    pub batch: Option<Vec<String>>,
+    /// The server-admitted decision turn that atomically bound this group.
+    #[serde(default)]
+    pub batch_turn_id: Option<String>,
+    /// A separately fenced union; each member keeps its original decision proof.
+    #[serde(default)]
+    pub handoff: Option<OwnerContinuationHandoff>,
+    /// Admission intent only; it is not a fleet-ready model handoff.
+    #[serde(default)]
+    pub admission_handoff: Option<OwnerContinuationHandoff>,
+    #[serde(default)]
+    pub blocked: bool,
+    /// None is proven unreleased. A release is irreversible, even after a crash.
+    pub released_turn_id: Option<String>,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OwnerContinuationHandoff {
+    pub version: u32,
+    pub request_ids: Vec<String>,
+    pub turn_id: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

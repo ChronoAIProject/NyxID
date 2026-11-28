@@ -1296,10 +1296,10 @@ pub async fn history(
     )
     .await?;
     let chats = super::nyxbot::chats::thread_details(&state, &user_id, &[&conversation]).await?;
-    let reply = conversation
-        .active_turn
-        .as_mut()
-        .and_then(|turn| turn.reply.take());
+    let reply = conversation.active_turn.as_ref().and_then(|turn| {
+        crate::services::assistant_stream_checkpoint::reply_for_snapshot(&conversation, turn)
+            .cloned()
+    });
     let mut conversation = ConversationResponse::from(conversation)
         .with_agent(agent_id.as_deref(), &agents)
         .with_chat(&chats);

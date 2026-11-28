@@ -69,16 +69,18 @@ fn turn_activity<'a>(
     Thinking
 }
 
-fn live_state(turn: &ActiveTurn, pending_owner_action: bool) -> ActivityState {
+fn live_state(
+    row: &AssistantConversation,
+    turn: &ActiveTurn,
+    pending_owner_action: bool,
+) -> ActivityState {
     turn_activity(
         Some(TurnFacts {
             stop_requested: turn.stop_requested,
             queued: turn.queued_at.is_some(),
             waiting_for_capacity: turn.waiting_for_capacity,
             activities: turn.activities.iter().map(|row| row.status.as_str()),
-            reply_present: turn
-                .reply
-                .as_ref()
+            reply_present: super::assistant_stream_checkpoint::reply_for_snapshot(row, turn)
                 .is_some_and(|reply| !reply.text.is_empty()),
             continuations: turn.continuations,
         }),
@@ -88,7 +90,7 @@ fn live_state(turn: &ActiveTurn, pending_owner_action: bool) -> ActivityState {
 }
 
 pub fn thread_state(row: &AssistantConversation, now: DateTime<Utc>) -> Option<ActivityState> {
-    super::assistant_nyxagent::live_turn(row, now).map(|turn| live_state(turn, false))
+    super::assistant_nyxagent::live_turn(row, now).map(|turn| live_state(row, turn, false))
 }
 
 impl ThreadActivity {
@@ -99,7 +101,7 @@ impl ThreadActivity {
     ) -> Option<(Self, bool)> {
         let live = super::assistant_nyxagent::live_turn(row, now);
         let state = match live {
-            Some(turn) => live_state(turn, pending_owner_action),
+            Some(turn) => live_state(row, turn, pending_owner_action),
             None if pending_owner_action => ActivityState::Approval,
             None => return None,
         };

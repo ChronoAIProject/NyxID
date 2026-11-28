@@ -206,6 +206,15 @@ pub(crate) async fn cancel(state: &AppState, row: &AssistantConversation) {
     }
 }
 
+#[cfg(test)]
+pub(crate) async fn take_one_for_test(
+    state: &AppState,
+    offered: &AssistantConversation,
+    worker: &EngineWorkerInstance,
+) -> AppResult<bool> {
+    take_one(state, offered, worker).await
+}
+
 pub(in crate::handlers) async fn take_one(
     state: &AppState,
     offered: &AssistantConversation,
@@ -242,9 +251,12 @@ pub(in crate::handlers) async fn take_one(
         let Some(row) = assistant_turn_restart::claim(&state.db, offered, worker).await? else {
             return Ok(false);
         };
-        let text = active
-            .reply
+        let text = row
+            .active_turn
             .as_ref()
+            .and_then(|turn| {
+                crate::services::assistant_stream_checkpoint::reply_for_snapshot(&row, turn)
+            })
             .map(|reply| reply.text.clone())
             .unwrap_or_default();
         if !admission.credential_ended {
@@ -439,9 +451,12 @@ pub(in crate::handlers) async fn take_one(
     {
         row.reply_channel = reply_channel.clone();
     }
-    let cursor = active
-        .reply
+    let cursor = row
+        .active_turn
         .as_ref()
+        .and_then(|turn| {
+            crate::services::assistant_stream_checkpoint::reply_for_snapshot(&row, turn)
+        })
         .map_or(0, |reply| reply.cursor.max(0) as u64);
     let (sender, _) = broadcast::channel(256);
     let events = Events {

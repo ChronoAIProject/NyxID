@@ -70,7 +70,7 @@ pub mod connections;
 pub mod consent;
 pub mod credential_accept;
 #[cfg(test)]
-mod credential_record_fixtures;
+pub(crate) mod credential_record_fixtures;
 pub mod credential_verification;
 pub mod delegation;
 pub mod demo;

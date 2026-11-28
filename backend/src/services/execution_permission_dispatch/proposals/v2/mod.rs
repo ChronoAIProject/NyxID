@@ -389,7 +389,7 @@ pub(in crate::services::execution_permission_dispatch) async fn create(
         requester_type: "api_key".into(),
         requester_id: key_row.id.clone(),
         requester_label: Some(label(&key_row.name)),
-        operation_summary: format!("{} {}", effect.method, label(effect.path)),
+        operation_summary: operation_label(effect.method, effect.path),
         action_description: Some("Review an execution permission".into()),
         http_method: Some(effect.method.into()),
         resource: Some(label(effect.path)),

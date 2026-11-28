@@ -1,9 +1,12 @@
 use super::*;
 
+const PROVIDER_PENDING_NOTICE: &str = "The provider accepted the operation (HTTP 202); completion is pending and unverified. It will not be sent again.";
+
 /// In-process capability created only after the stored source and live turn match.
 /// No public request deserializes this object.
 #[derive(Clone)]
 pub struct Resume {
+    pub(super) turn_authority: Option<super::batch::TurnAuthority>,
     pub(crate) connected_wait: Option<Arc<super::v2::blocking::WaitGuard>>,
     pub version: u32,
     pub request_id: String,
@@ -83,6 +86,9 @@ impl Resume {
         if version.number() != self.version {
             return Err(conflict());
         }
+        if let Some(authority) = &self.turn_authority {
+            authority.fence(db, session).await?;
+        }
         version.require_serving(db).await?;
         fence_endpoint(db, session, proposal(&row)?).await?;
 
@@ -102,32 +108,113 @@ pub(crate) async fn resume_turn(
     state: &crate::AppState,
     egress: &dyn super::super::super::platform_manager_contract::NyxAgentEgress,
     row: &AssistantConversation,
-) -> AppResult<Option<String>> {
+    credential: &crate::services::assistant_agent_credential_service::AssistantCredential,
+) -> AppResult<Option<ResumeOutcome>> {
     if let Some(note) = Box::pin(super::v2::resume_voice(state, row)).await? {
-        return Ok(Some(note));
+        return Ok(Some(ResumeOutcome::Receipt(note)));
     }
     let Some(turn) = row.active_turn.as_ref() else {
         return Ok(None);
     };
-    let ids: Vec<_> = turn
+    let ids: Vec<String> = turn
         .events
         .iter()
-        .filter_map(|e| e.id.strip_prefix("execution-decision:"))
+        .filter_map(|e| e.id.strip_prefix("execution-decision:").map(str::to_owned))
         .collect();
     if ids.is_empty() {
         return Ok(None);
     }
+    // Stored batch IDs are evidence only. They never add executable decisions
+    // to this admitted wake; an incomplete recovery remains receipt-only.
+    let mut batch = ids.clone();
+    batch.sort();
+    batch.dedup();
+    if batch.len() > 64 {
+        return Err(refused());
+    }
+    let outcome = resume_batch(state, egress, row, credential, &ids, &batch).await;
+    match super::local::expired_channel(state, row, credential, &batch).await? {
+        super::local::Outcome::Live => outcome,
+        super::local::Outcome::Receipt(text) => Ok(Some(ResumeOutcome::Receipt(text))),
+        super::local::Outcome::Withheld => Err(refused()),
+    }
+}
+
+async fn resume_batch(
+    state: &crate::AppState,
+    egress: &dyn super::super::super::platform_manager_contract::NyxAgentEgress,
+    row: &AssistantConversation,
+    credential: &crate::services::assistant_agent_credential_service::AssistantCredential,
+    ids: &[String],
+    batch: &[String],
+) -> AppResult<Option<ResumeOutcome>> {
+    let turn = row.active_turn.as_ref().ok_or_else(refused)?;
+    let typed_wake = super::batch::typed_wake(&turn.events);
+    let filter = assistant_selector(doc! {"_id":{"$in":batch}, "user_id":&row.user_id,
+    "execution_proposal.v1.conversation_id":&row.id,
+    "execution_proposal.v1.key_id":&row.credential_api_key_id});
+    let mut requests: Vec<ApprovalRequest> = state
+        .db
+        .collection::<ApprovalRequest>(REQUESTS)
+        .find(filter.clone())
+        .limit(64)
+        .await?
+        .try_collect()
+        .await?;
+    if requests.len() != batch.len() {
+        return Err(missing());
+    }
+    match super::local::expired_channel(state, row, credential, batch).await? {
+        super::local::Outcome::Live => {}
+        super::local::Outcome::Receipt(text) => return Ok(Some(ResumeOutcome::Receipt(text))),
+        super::local::Outcome::Withheld => return Err(refused()),
+    }
+    #[cfg(test)]
+    resume_boundary(&state.db, row, "after_preliminary_check").await;
+    let continuation_ready =
+        continuation::bind_batch(state, row, &requests, batch, typed_wake).await?;
+    if continuation_ready == Some(true) {
+        requests = state
+            .db
+            .collection::<ApprovalRequest>(REQUESTS)
+            .find(filter)
+            .limit(64)
+            .await?
+            .try_collect()
+            .await?;
+    }
+    #[cfg(test)]
+    if continuation::FAIL_BEFORE_SEND
+        .try_with(|fail| *fail)
+        .unwrap_or(false)
+    {
+        return Err(AppError::Internal("Injected pre-send interruption".into()));
+    }
     let mut notes = Vec::new();
+    let mut owner_source = None;
     let mut reviews = presentation::ReviewNotes::default();
     let mut seen = std::collections::HashSet::new();
-    for id in ids {
+    for id in ids.iter().map(String::as_str) {
         // Replayed wake IDs are the same receipt, never another operation.
         if !seen.insert(id) {
             continue;
         }
-        let request=state.db.collection::<ApprovalRequest>(REQUESTS).find_one(assistant_selector(doc!{"_id":id,"user_id":&row.user_id,"execution_proposal.v1.conversation_id":&row.id,"execution_proposal.v1.key_id":&row.credential_api_key_id})).await?.ok_or_else(missing)?;
-        let p = proposal(&request)?;
-        let version = AssistantVersion::of(&request)?;
+        #[cfg(test)]
+        if seen.len() > 1 {
+            resume_boundary(&state.db, row, "between_members").await;
+        }
+        match super::local::expired_channel(state, row, credential, batch).await? {
+            super::local::Outcome::Live => {}
+            super::local::Outcome::Receipt(text) => return Ok(Some(ResumeOutcome::Receipt(text))),
+            super::local::Outcome::Withheld => return Err(refused()),
+        }
+        let request = requests
+            .iter()
+            .find(|request| request.id == id)
+            .ok_or_else(missing)?;
+        let p = proposal(request)?;
+        let version = AssistantVersion::of(request)?;
+        let mut eligible = continuation::eligible(row, p, version);
         if turn.execution_task.as_ref().is_none_or(|t| {
             t.task != p.task.task
                 || t.epoch != p.task.epoch
@@ -141,11 +228,11 @@ pub(crate) async fn resume_turn(
             super::super::super::execution_permission_channel::check(&state.db, &p.task).await?;
         }
         if request.status != "approved" {
-            reviews.push(&request, p);
+            reviews.push(request, p);
             continue;
         }
         if p.state == "completed" {
-            notes.push(if matches!(p.contract.context.audience,Audience::Group{..}) {"The operation completed. Its private result is available on your permission card.".into()}else{result_for_human(state,&request).await?.unwrap_or_else(||"The operation completed; its retained result is no longer available.".into())});
+            notes.push(if matches!(p.contract.context.audience,Audience::Group{..}) {"The operation completed. Its private result is available on your permission card.".into()}else{result_for_human(state,request).await?.unwrap_or_else(||"The operation completed; its retained result is no longer available.".into())});
             continue;
         }
         if p.state == "dispatched"
@@ -157,9 +244,18 @@ pub(crate) async fn resume_turn(
             continue;
         }
         if matches!(p.state.as_str(), "dispatched" | "unknown") {
+            if p.failure_code.as_deref() == Some("provider_completion_pending") {
+                notes.push(PROVIDER_PENDING_NOTICE.into());
+                continue;
+            }
+            if p.state == "unknown" {
+                notes.push("The operation's outcome is unknown. It will not be sent again.".into());
+                continue;
+            }
             let mut session = state.db.client().start_session().await?;
-            session.start_transaction().and_run((&state.db,id),move |session,(db,id)|Box::pin(async move {
+            session.start_transaction().and_run((&state.db,id,row),move |session,(db,id,row)|Box::pin(async move {
                 let result:AppResult<()>=async {
+                    super::batch::fence_turn(db, session, row).await?;
                     if db.collection::<Document>(REQUESTS).update_one(version.selector(doc!{"_id":*id,"execution_proposal.v1.state":{"$in":["dispatched","unknown"]}}),version.update(doc!{"$set":{"execution_proposal.v1.state":"unknown","execution_proposal.v1.failure_code":"provider_outcome_unknown"},"$unset":Slot::Assistant(version).unset(&[Field::Payload])})).session(&mut *session).await?.matched_count==1 {
                         lifecycle::retire_operations(db,session,&[(*id).to_owned()]).await?;
                     }
@@ -176,6 +272,14 @@ pub(crate) async fn resume_turn(
                 p.failure_code.as_deref().unwrap_or("unavailable")
             ));
             continue;
+        }
+        if continuation::owner_task(row).is_some()
+            && turn
+                .execution_task
+                .as_ref()
+                .is_none_or(|task| *task != p.task)
+        {
+            return Err(refused());
         }
         super::super::super::security_readiness_service::require_serving(&state.db, READINESS)
             .await?;
@@ -194,24 +298,128 @@ pub(crate) async fn resume_turn(
             {
                 return Err(error);
             }
+            let retirement_key_hash = super::local::credential_hash(row, credential)?;
+            #[cfg(test)]
+            resume_boundary(&state.db, row, "before_unsent_retirement").await;
+            let cancel_filter = doc! {
+                "_id":id,"user_id":&row.user_id,"status":"approved",
+                "execution_proposal.v1.conversation_id":&row.id,
+                "execution_proposal.v1.key_id":&row.credential_api_key_id,
+                "execution_proposal.v1.state":&p.state,
+                "execution_proposal.v1.claim_id":&p.claim_id,
+                "execution_proposal.v1.effect_id":&p.effect_id,
+                "execution_proposal.v1.grant_id":&p.grant_id,
+                "execution_proposal.v1.prepared_digest":&p.prepared_digest,
+            };
             let mut session = state.db.client().start_session().await?;
-            session.start_transaction().await?;
-            lifecycle::cancel_in_session(
-                &state.db,
-                &mut session,
-                doc! {"_id":id},
-                "authority_or_task_unavailable",
-            )
-            .await?;
-            session.commit_transaction().await?;
-            notes.push(
+            let cancelled = session
+                .start_transaction()
+                .and_run(
+                    (
+                        &state.db,
+                        row,
+                        &p.task,
+                        &cancel_filter,
+                        eligible,
+                        &retirement_key_hash,
+                        p.owner_continuation.is_some(),
+                    ),
+                    |session, (db, row, task, filter, eligible, key_hash, has_marker)| {
+                        Box::pin(async move {
+                            let result: AppResult<bool> = async {
+                                super::batch::fence_turn(db, session, row).await?;
+                                super::local::fence_actor(db, session, row, key_hash).await?;
+                                match tasks::fence(db, session, task).await {
+                                    Ok(()) => return Ok(false),
+                                    Err(error)
+                                        if error.is_forbidden()
+                                            || matches!(
+                                                error,
+                                                AppError::Conflict(_)
+                                                    | AppError::NotFound(_)
+                                                    | AppError::AssistantTurnRequired
+                                            ) => {}
+                                    Err(error) => return Err(error),
+                                }
+                                if continuation::owner_task(row).is_some() {
+                                    super::batch::fence_original_task(db, session, row).await?;
+                                }
+                                if db
+                                    .collection::<Document>(REQUESTS)
+                                    .find_one(assistant_selector((*filter).clone()))
+                                    .projection(doc! {"_id":1})
+                                    .session(&mut *session)
+                                    .await?
+                                    .is_none()
+                                {
+                                    return Ok(false);
+                                }
+                                super::local::fence_live_channel(db, session, row).await?;
+                                if *has_marker {
+                                    let blocked = db.collection::<Document>(REQUESTS)
+                                        .update_one(
+                                            version.selector((*filter).clone()),
+                                            version.update(doc! {"$set": {
+                                                "execution_proposal.v1.owner_continuation.blocked": true,
+                                            }}),
+                                        )
+                                        .session(&mut *session)
+                                        .await?;
+                                    if blocked.matched_count != 1 {
+                                        return Err(refused());
+                                    }
+                                }
+                                lifecycle::cancel_in_session(
+                                    db,
+                                    session,
+                                    (*filter).clone(),
+                                    "authority_or_task_unavailable",
+                                )
+                                .await?;
+                                if *eligible && task.channel_source.is_some() {
+                                    super::local::record_retirements(
+                                        db,
+                                        session,
+                                        row,
+                                        &[filter.get_str("_id").map_err(encoding)?.to_owned()],
+                                    )
+                                    .await?;
+                                }
+                                Ok(true)
+                            }
+                            .await;
+                            super::super::super::api_key_mutation_service::transaction_result(
+                                result,
+                            )
+                        })
+                    },
+                )
+                .await
+                .map_err(super::super::super::api_key_mutation_service::map_transaction_error)?;
+            notes.push(if cancelled {
                 "The operation was not sent because its authority or task is no longer available."
-                    .into(),
-            );
+            } else {
+                "The operation requires a fresh status check; no new operation was sent."
+            }.into());
             continue;
         }
+        // Optional continuation readiness is resolved only for a marked root
+        // by bind_batch. An authentic legacy retained effect keeps its send and
+        // receipt when that optional dependency is unavailable.
+        if eligible && continuation_ready == Some(true) {
+            let source = match owner_source {
+                Some(source) => source,
+                None => {
+                    let source = continuation::original_owner_source(&state.db, row).await?;
+                    owner_source = Some(source);
+                    source
+                }
+            };
+            eligible = source;
+        }
+        let key_hash = super::local::credential_hash(row, credential)?;
         let raw = Field::Payload
-            .open(&state.encryption_keys, &request)
+            .open(&state.encryption_keys, request)
             .await?
             .ok_or_else(conflict)?;
         if raw.len() > MAX_PAYLOAD {
@@ -219,11 +427,16 @@ pub(crate) async fn resume_turn(
         }
         let effect: PreparedEffect = serde_json::from_slice(&raw).map_err(encoding)?;
         let claim_id = Uuid::new_v4().to_string();
-        if !claim_preparation(&state.db, id, &claim_id, &turn.turn_id).await? {
+        #[cfg(test)]
+        if let Ok(hook) = continuation::BEFORE_EFFECT_CLAIM.try_with(Clone::clone) {
+            hook(state.db.clone(), request.clone()).await;
+        }
+        if !claim_preparation(&state.db, id, &claim_id, row).await? {
             notes.push("The approved operation is already being processed.".into());
             continue;
         }
         let resume = Resume {
+            turn_authority: Some(super::batch::TurnAuthority::capture(row)?),
             connected_wait: None,
             version: version.number(),
             source_credential_id: p.source_credential_id.clone(),
@@ -257,19 +470,31 @@ pub(crate) async fn resume_turn(
         let (state_name, text, code) = match outcome {
             Ok(response) if sent => {
                 let status = response.status();
-                match tokio::time::timeout(std::time::Duration::from_secs(120),axum::body::to_bytes(response.into_body(),MAX_PAYLOAD)).await {
+                if status == axum::http::StatusCode::ACCEPTED {
+                    activity_outcome = Some("pending");
+                    (
+                        "unknown",
+                        PROVIDER_PENDING_NOTICE.into(),
+                        Some("provider_completion_pending"),
+                    )
+                } else {
+                    match tokio::time::timeout(std::time::Duration::from_secs(120),axum::body::to_bytes(response.into_body(),MAX_PAYLOAD)).await {
                     Ok(Ok(bytes))=>{
                         let text=String::from_utf8_lossy(&bytes);
                         let text=match serde_json::from_slice::<serde_json::Value>(&bytes) {
                             Ok(mut value)=>{redact(&mut value);value.to_string()},
                             Err(_)=>text.into_owned(),
                         };
+                        let text = crate::services::assistant_agent_credential_service::redact_key(
+                            &text, credential.raw_key.as_str(),
+                        );
                         let result=format!("Operation finished (HTTP {}).\n{}",status.as_u16(),text.chars().take(16_384).collect::<String>());
                         private_result=Some(result.clone());
                         activity_outcome = Some(if status.is_success() { "completed" } else { "failed" });
                         ("completed",if row.group_id.is_some() || row.collaboration.is_some(){format!("Operation finished (HTTP {}). The private result is available on the requester's permission card.",status.as_u16())}else{result},None)
                     },
                     _=>("unknown","The response was incomplete or unavailable. The operation will not be sent again.".into(),Some("response_unavailable")),
+                }
                 }
             }
             Ok(response) => {
@@ -347,6 +572,15 @@ pub(crate) async fn resume_turn(
             "execution_proposal.v1.independent_request_id": independent_request,
             "execution_proposal.v1.independent_card_id": independent_card,
         };
+        let successful = state_name == "completed" && activity_outcome == Some("completed");
+        if p.owner_continuation.as_ref().is_some_and(|proof| {
+            !typed_wake
+                || !eligible
+                || !successful
+                || (proof.version == 0 && continuation_ready != Some(true))
+        }) {
+            set.insert("execution_proposal.v1.owner_continuation.blocked", true);
+        }
         if let Some(version) = marker {
             set.insert(
                 "execution_proposal.v1.result_context_version",
@@ -357,18 +591,39 @@ pub(crate) async fn resume_turn(
         }
         let update = doc! {"$set": set, "$unset": unset};
         let mut session = state.db.client().start_session().await?;
-        session.start_transaction().and_run((&state.db,id,&claim_id,&update,state_name),move |session,(db,id,claim,update,state_name)|Box::pin(async move {
+        session.start_transaction().and_run((&state.db,id,&claim_id,&update,state_name,sent,row,eligible,&key_hash),move |session,(db,id,claim,update,state_name,sent,row,eligible,key_hash)|Box::pin(async move {
             let result:AppResult<()>=async {
-                if db.collection::<Document>(REQUESTS).update_one(version.selector(doc!{"_id":*id,"execution_proposal.v1.claim_id":*claim,"execution_proposal.v1.delivery_abandoned":{"$ne":true},"execution_proposal.v1.state":{"$in":["preparing","dispatched"]}}),version.update((*update).clone())).session(&mut *session).await?.matched_count!=1{return Err(uncertain());}
+                if !*sent {
+                    super::batch::fence_turn(db, session, row).await?;
+                    super::local::fence_actor(db, session, row, key_hash).await?;
+                    super::local::fence_live_channel(db, session, row).await?;
+                }
+                if db.collection::<Document>(REQUESTS).update_one(version.selector(doc!{"_id":*id,"execution_proposal.v1.claim_id":*claim,"execution_proposal.v1.delivery_abandoned":{"$ne":true},"execution_proposal.v1.state":if *sent {"dispatched"} else {"preparing"}}),version.update((*update).clone())).session(&mut *session).await?.matched_count!=1{return Err(uncertain());}
                 if *state_name!="waiting" {lifecycle::retire_operations(db,session,&[(*id).to_owned()]).await?;}
+                if !*sent && *state_name == "not_sent" && *eligible
+                    && continuation::owner_task(row).is_some_and(|task| task.channel_source.is_some()) {
+                    super::local::record_retirements(db, session, row, &[(*id).to_owned()]).await?;
+                }
                 Ok(())
             }.await;
             super::super::super::api_key_mutation_service::transaction_result(result)
         })).await.map_err(super::super::super::api_key_mutation_service::map_transaction_error)?;
+        #[cfg(test)]
+        if successful
+            && continuation::FAIL_AFTER_RECEIPT
+                .try_with(|fail| *fail)
+                .unwrap_or(false)
+        {
+            return Err(AppError::Internal("Injected receipt interruption".into()));
+        }
         notes.push(text);
     }
     notes.extend(reviews.render());
-    Ok(Some(notes.join("\n\n")))
+    let text = notes.join("\n\n");
+    if let Some(continuation) = super::batch::reconcile(state, row, batch, typed_wake).await? {
+        return Ok(Some(ResumeOutcome::Continue(continuation)));
+    }
+    Ok(Some(ResumeOutcome::Receipt(text)))
 }
 /// Called only after first-party-human ownership checks. Public projections
 /// never decrypt the provider receipt.
@@ -405,10 +660,17 @@ pub(crate) async fn result_for_human(
 /// Reclaiming a stale preparer also releases its matching one-operation
 /// reservation. Both updates serialize against the old preparer's send CAS:
 /// once dispatched, neither the proposal nor the grant can be reset here.
-async fn claim_preparation(db: &Database, id: &str, claim: &str, turn: &str) -> AppResult<bool> {
+async fn claim_preparation(
+    db: &Database,
+    id: &str,
+    claim: &str,
+    row: &AssistantConversation,
+) -> AppResult<bool> {
+    let turn = &row.active_turn.as_ref().ok_or_else(refused)?.turn_id;
     let mut session = db.client().start_session().await?;
-    session.start_transaction().and_run((db,id,claim,turn),|session,(db,id,claim,turn)|Box::pin(async move {
+    session.start_transaction().and_run((db,id,claim,turn,row),|session,(db,id,claim,turn,row)|Box::pin(async move {
         let result:AppResult<bool>=async {
+            super::batch::fence_turn(db, session, row).await?;
             let filter=doc!{"_id":*id,"status":"approved","$or":[
                 {"execution_proposal.v1.state":"queued"},
                 {"execution_proposal.v1.state":"preparing","execution_proposal.v1.claimed_at":{"$lt":bson::DateTime::from_chrono(Utc::now()-Duration::minutes(2))}}
@@ -433,4 +695,25 @@ async fn claim_preparation(db: &Database, id: &str, claim: &str, turn: &str) -> 
         }.await;
         super::super::super::api_key_mutation_service::transaction_result(result)
     })).await.map_err(super::super::super::api_key_mutation_service::map_transaction_error)
+}
+
+#[cfg(test)]
+pub(crate) type ResumeBoundaryHook = std::sync::Arc<
+    dyn Fn(Database, AssistantConversation, &'static str) -> futures::future::BoxFuture<'static, ()>
+        + Send
+        + Sync,
+>;
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static RESUME_BOUNDARY: ResumeBoundaryHook;
+}
+#[cfg(test)]
+pub(super) async fn resume_boundary(
+    db: &Database,
+    row: &AssistantConversation,
+    boundary: &'static str,
+) {
+    if let Ok(hook) = RESUME_BOUNDARY.try_with(Clone::clone) {
+        hook(db.clone(), row.clone(), boundary).await;
+    }
 }

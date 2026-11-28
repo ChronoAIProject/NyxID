@@ -139,7 +139,30 @@ async fn resume(f: &Fixture, row: &AssistantConversation) -> String {
         f.state.clone(),
         test_utils::test_auth_user(&f.owner),
     );
-    proposals::resume_turn(&f.state, egress.as_ref(), row)
+    let credential = load_credential(f, row).await;
+    let outcome = proposals::resume_turn(&f.state, egress.as_ref(), row, &credential)
+        .await
+        .unwrap()
+        .unwrap();
+    // These are retained-effect tests, not model-runner acceptance. Consume
+    // the handoff so their explicit receipt settlement keeps its old meaning.
+    // The owner runner journeys exercise the actual model launch separately.
+    if let proposals::ResumeOutcome::Continue(continuation) = &outcome {
+        assert!(
+            continuation
+                .release(&f.state, row, &credential)
+                .await
+                .unwrap()
+        );
+    }
+    outcome.into_text()
+}
+
+async fn load_credential(
+    f: &Fixture,
+    row: &AssistantConversation,
+) -> credentials::AssistantCredential {
+    credentials::load_for_conversation(&f.state.db, &f.state.encryption_keys, &row.user_id, &row.id)
         .await
         .unwrap()
         .unwrap()
@@ -352,7 +375,20 @@ async fn execution_proposal_twenty_duplicate_decisions_and_resumes_send_once_eve
         (0..20).map(|_| proposals::decide(&f.state, &f.owner, &request.id, &input)),
     )
     .await;
-    assert!(results.iter().all(Result::is_ok));
+    let errors: Vec<_> = results
+        .iter()
+        .enumerate()
+        .filter_map(|(contender, result)| {
+            result
+                .as_ref()
+                .err()
+                .map(|error| (contender, error.status_code().as_u16(), error.error_code()))
+        })
+        .collect();
+    assert!(
+        results.iter().all(Result::is_ok),
+        "decide contenders (index,http,code): {errors:?}"
+    );
     assert_eq!(count(&f, "approval_grants").await, 1);
     let _ = f.call("/proxy/s/execution-fixture/status").await;
     assert!(
@@ -365,12 +401,27 @@ async fn execution_proposal_twenty_duplicate_decisions_and_resumes_send_once_eve
         f.state.clone(),
         test_utils::test_auth_user(&f.owner),
     );
+    let credential = load_credential(&f, &resumed).await;
     let results = futures::future::join_all(
-        (0..20).map(|_| proposals::resume_turn(&f.state, egress.as_ref(), &resumed)),
+        (0..20).map(|_| proposals::resume_turn(&f.state, egress.as_ref(), &resumed, &credential)),
     )
     .await;
-    assert!(results.iter().all(Result::is_ok));
-    assert_eq!(f.server.received_requests().await.unwrap().len(), 1);
+    let errors: Vec<_> = results
+        .iter()
+        .enumerate()
+        .filter_map(|(contender, result)| {
+            result
+                .as_ref()
+                .err()
+                .map(|error| (contender, error.status_code().as_u16(), error.error_code()))
+        })
+        .collect();
+    let provider_attempts = f.server.received_requests().await.unwrap().len();
+    assert!(
+        results.iter().all(Result::is_ok),
+        "resume contenders (index,http,code): {errors:?}; provider_attempts={provider_attempts}"
+    );
+    assert_eq!(provider_attempts, 1);
     let _ = f.call("/proxy/s/execution-fixture/status").await;
     assert_eq!(f.server.received_requests().await.unwrap().len(), 1);
     f.cleanup().await;

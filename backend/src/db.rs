@@ -1774,6 +1774,10 @@ async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error>
                 .build(),
         )
         .await?;
+    crate::services::execution_permission_dispatch::proposals::ensure_owner_continuation_indexes(
+        db,
+    )
+    .await?;
     // ── approval_grants ──
     let approval_grants = db.collection::<mongodb::bson::Document>("approval_grants");
     approval_grants

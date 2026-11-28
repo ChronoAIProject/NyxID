@@ -3138,6 +3138,43 @@ pub(crate) async fn begin_owner_turn_in_session(
     if row
         .pending_events
         .iter()
+        .any(|event| event.id.starts_with("execution-decision:"))
+    {
+        let before = row.pending_events.len();
+        let pending = std::mem::take(&mut row.pending_events);
+        row.pending_events = super::execution_permission_dispatch::proposals::filter_decisions(
+            db, session, &row, pending,
+        )
+        .await?;
+        if row.pending_events.len() != before {
+            let mut filter = owner_filter(user_id, &id)?;
+            filter.insert("credential_api_key_id", &row.credential_api_key_id);
+            if row.active_turn.is_some() {
+                filter.extend(WorkerFence::capture(&row)?.filter());
+            } else {
+                filter.insert("active_turn", bson::Bson::Null);
+            }
+            if collection
+                .update_one(
+                    filter,
+                    doc! {"$set":{"pending_events":bson::to_bson(&row.pending_events)
+                    .map_err(|_|AppError::Internal("Invalid events".into()))?}},
+                )
+                .session(&mut *session)
+                .await?
+                .matched_count
+                != 1
+            {
+                return Err(AppError::Conflict("Conversation admission changed".into()));
+            }
+            if start.origin == TurnOrigin::Event && row.pending_events.is_empty() {
+                return Ok(OwnerTurnAdmission::Drained);
+            }
+        }
+    }
+    if row
+        .pending_events
+        .iter()
         .any(|event| event.execution_task.is_some())
     {
         let before = row.pending_events.len();
@@ -3593,7 +3630,7 @@ pub(crate) async fn begin_owner_turn_in_session(
             seq: row.message_count,
             turn_id: lost.turn_id.clone(),
             role: "assistant".into(),
-            text: checkpoint_reply_text(&lost),
+            text: checkpoint_reply_text(&row, &lost),
             status: "failed".into(),
             error_code: Some("turn_lost".into()),
             upstream_error_code: None,
@@ -3836,6 +3873,8 @@ pub(crate) async fn begin_owner_turn_in_session(
         )
     };
     row.active_turn = Some(ActiveTurn {
+        execution_local_retirements: None,
+        execution_local_only: false,
         restart_offer: None,
         restart_eligibility: None,
         restart_admission: None,
@@ -4550,6 +4589,13 @@ pub(crate) async fn begin_owner_turn_in_session(
                 .await?;
         }
     }
+    super::execution_permission_dispatch::tasks::mark_effect_evidence(
+        db,
+        session,
+        &row,
+        &message_id,
+    )
+    .await?;
     if voice_request.is_some() {
         let source_conversation = voice_request
             .as_ref()
@@ -5485,6 +5531,14 @@ impl WorkerFence {
             filter.insert("active_turn.execution_attempt.claim_id", &attempt.claim_id);
         } else {
             filter.insert("active_turn.execution_attempt", bson::Bson::Null);
+            if super::execution_permission_dispatch::proposals::retained_turn(row) {
+                filter.insert(
+                    "active_turn.worker_instance.id",
+                    turn.worker_instance
+                        .as_ref()
+                        .map(|worker| worker.id.as_str()),
+                );
+            }
         }
         Ok(Self(filter))
     }
@@ -5524,10 +5578,11 @@ pub async fn stop_requested(
         .is_none_or(|turn| turn.turn_id != turn_id || turn.stop_requested))
 }
 
-fn checkpoint_reply_text(turn: &ActiveTurn) -> String {
-    turn.reply.as_ref().map_or_else(String::new, |reply| {
-        super::assistant_citation_markers::sanitize(&reply.text).into_owned()
-    })
+fn checkpoint_reply_text(row: &AssistantConversation, turn: &ActiveTurn) -> String {
+    super::assistant_stream_checkpoint::reply_for_snapshot(row, turn)
+        .map_or_else(String::new, |reply| {
+            super::assistant_citation_markers::sanitize(&reply.text).into_owned()
+        })
 }
 
 #[derive(Clone)]
@@ -5692,6 +5747,7 @@ artifact_recovery_target: None,
                         },
                     );
                 }
+                super::execution_permission_dispatch::proposals::fence_retained_settlement(&db,session,&row).await?;
                 let mut current = collection
                     .find_one(active_filter)
                     .session(&mut *session)
@@ -5924,7 +5980,7 @@ artifact_recovery_target: None,
                     turn_id: turn_id.clone(),
                     role: "assistant".into(),
                     text: if use_revoked { String::new() } else if result.text.is_empty() && error.as_ref().is_some_and(|error| matches!(error.code, "cancelled" | "turn_lost")) {
-                        settled_turn.as_ref().map(checkpoint_reply_text).unwrap_or_default()
+                        settled_turn.as_ref().map(|turn| checkpoint_reply_text(&row, turn)).unwrap_or_default()
                     } else {
                         result.text.clone()
                     },
@@ -8944,6 +9000,8 @@ pub fn upstream_body(model: &str, text: &str, session: Option<&str>, instruction
 pub struct TurnError {
     #[serde(skip)]
     pub(super) origin: TurnErrorOrigin,
+    #[serde(skip)]
+    pub(super) disposition: TurnFailureDisposition,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "upstream_error_code")]
     pub upstream_code: Option<Box<str>>,
@@ -8956,6 +9014,12 @@ pub struct TurnError {
     pub upstream_request_id: Option<Box<str>>,
     pub response_id: Option<Box<str>>,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum TurnFailureDisposition {
+    Ordinary,
+    PermissionRefusal,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum TurnErrorOrigin {
     NyxId,
@@ -9002,6 +9066,11 @@ impl TurnError {
         error.origin = TurnErrorOrigin::NyxId;
         error.upstream_code = None;
         error.stage = stage;
+        error
+    }
+    pub(crate) fn permission_refusal(stage: &'static str) -> Self {
+        let mut error = Self::internal("cancelled", stage);
+        error.disposition = TurnFailureDisposition::PermissionRefusal;
         error
     }
     pub fn at_stage(mut self, stage: &'static str) -> Self {
@@ -9173,6 +9242,7 @@ impl TurnError {
             metadata: None,
             upstream_code,
             origin: TurnErrorOrigin::NyxAgent,
+            disposition: TurnFailureDisposition::Ordinary,
             stage: "stream",
             http_status: None,
             upstream_request_id: None,

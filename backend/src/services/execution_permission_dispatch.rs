@@ -490,20 +490,27 @@ async fn require_enrolled(
     {
         return Err(refused());
     }
-    // Keep the existing account-disable fence, not a flag-change fence. The
-    // rollout flag can race dispatch; exact permission/claim fences cannot.
     if let Some(session) = session {
-        let filter = doc! {"_id":actor,"is_active":true,"user_type":"person","platform_personal_deleting":{"$ne":true}};
-        if db
-            .collection::<Document>("users")
-            .update_one(filter, doc! {"$inc":{"execution_dispatch_fence":1_i64}})
-            .session(session)
-            .await?
-            .matched_count
-            != 1
-        {
-            return Err(refused());
-        }
+        fence_active_account(db, session, actor).await?;
+    }
+    Ok(())
+}
+
+async fn fence_active_account(
+    db: &Database,
+    session: &mut ClientSession,
+    actor: &str,
+) -> AppResult<()> {
+    let filter = doc! {"_id":actor,"is_active":true,"user_type":"person","platform_personal_deleting":{"$ne":true}};
+    if db
+        .collection::<Document>("users")
+        .update_one(filter, doc! {"$inc":{"execution_dispatch_fence":1_i64}})
+        .session(session)
+        .await?
+        .matched_count
+        != 1
+    {
+        return Err(refused());
     }
     Ok(())
 }
@@ -817,6 +824,7 @@ pub(crate) fn prepare<'a>(
                 context,
                 chat,
                 effect.connection,
+                effect.method,
                 &digest,
                 &state.config.frontend_url,
             )
@@ -1342,6 +1350,10 @@ impl Permit {
         Box::pin(async move {
             self.revalidate(target).await?;
             self.reserve().await?;
+            #[cfg(test)]
+            if let Ok(barrier) = proposals::effects::BEFORE_SEND.try_with(Arc::clone) {
+                barrier.wait().await;
+            }
             let mut session = self.db.client().start_session().await?;
             session
                 .start_transaction()
@@ -1628,6 +1640,22 @@ impl Permit {
                 resume.fence(&self.db, session, dispatch).await?;
             }
             if dispatch {
+                // All covered proxy/MCP/specialized transports share this actual
+                // send barrier, even when no approval request was authored.
+                if !matches!(self.method.as_str(), "GET" | "HEAD" | "OPTIONS")
+                    && let Some(chat) = &self.chat
+                {
+                    proposals::effects::record(
+                        &self.db,
+                        session,
+                        chat,
+                        &self.binding.connection_id,
+                        &self.digest,
+                        &self.operation_id,
+                        &current.id,
+                    )
+                    .await?;
+                }
                 self.db
                     .collection::<Document>("approval_grants")
                     .update_one(

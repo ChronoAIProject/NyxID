@@ -126,6 +126,48 @@ beforeEach(() => {
 });
 
 describe("ApprovalHistoryPage", () => {
+  it.each(["pending", "approved"] as const)(
+    "opens %s execution proposals at their supported review destination on desktop and mobile",
+    (status) => {
+      const reviewPath = "/assistant?c=original&card=request-execution";
+      fixtures.requests = [makeRequest({
+        id: "request-execution",
+        status,
+        execution_proposal: {
+          version: 4, supported: true, revision: 1, state: status === "pending" ? "pending" : "completed",
+          can_decide: status === "pending", review_path: reviewPath, review: null,
+          choices: [], grant_id: null, failure_code: null,
+        },
+      })];
+      fixtures.total = 1;
+      render(<ApprovalHistoryPage />);
+      const links = screen.getAllByRole("link", { name: "Review" });
+      expect(links).toHaveLength(2);
+      for (const link of links) expect(link).toHaveAttribute("href", reviewPath);
+      expect(screen.queryByRole("button", { name: "Approve" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Reject" })).not.toBeInTheDocument();
+      expect(mockDecideMutateAsync).not.toHaveBeenCalled();
+    },
+  );
+
+  it("keeps legacy decisions available alongside execution review links", async () => {
+    fixtures.requests = [makeRequest({
+      id: "execution", execution_proposal: {
+        version: 4, supported: true, revision: 1, state: "pending", can_decide: true,
+        review_path: "/assistant/approvals", review: null, choices: [], grant_id: null, failure_code: null,
+      },
+    }), makeRequest({ id: "legacy", service_name: "Legacy service" })];
+    fixtures.total = 2;
+    render(<ApprovalHistoryPage />);
+    expect(screen.getAllByRole("link", { name: "Review" })).toHaveLength(2);
+    expect(screen.getAllByRole("button", { name: "Approve" })).toHaveLength(2);
+    expect(screen.getAllByRole("button", { name: "Reject" })).toHaveLength(2);
+    await userEvent.click(screen.getAllByRole("button", { name: "Approve" })[0]!);
+    const dialog = await screen.findByRole("dialog");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Approve" }));
+    expect(mockDecideMutateAsync).toHaveBeenCalledWith({ requestId: "legacy", approved: true });
+  });
+
   it("can discover a new request after an empty page and refresh its expiry", async () => {
     const view = render(<ApprovalHistoryPage />);
     expect(screen.getByText("No Approval Requests")).toBeInTheDocument();

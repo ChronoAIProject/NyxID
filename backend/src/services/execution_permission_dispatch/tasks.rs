@@ -295,6 +295,7 @@ pub(crate) fn admit<'a>(
             fence(db, session, &task).await?;
         }
         row.active_turn.as_mut().unwrap().execution_task = Some(task);
+        proposals::record_owner_admission(db, session, row).await?;
         Ok(())
     })
 }
@@ -446,16 +447,79 @@ pub(crate) fn settle<'a>(
             return Ok(());
         };
         channel::deliveries::enqueue(db, session, row, turn, message).await?;
-        let receipts: Vec<_> = turn
+        let admitted: Vec<_> = turn
             .events
             .iter()
-            .filter_map(|e| e.id.strip_prefix("execution-decision:"))
+            .filter_map(|event| event.id.strip_prefix("execution-decision:"))
             .collect();
+        let receipts: Vec<_> = if turn.execution_local_only {
+            let ids = turn
+                .execution_local_retirements
+                .as_ref()
+                .ok_or_else(refused)?;
+            if task.channel_source.is_none()
+                || ids.is_empty()
+                || ids.len() > 64
+                || !ids.windows(2).all(|pair| pair[0] < pair[1])
+                || !ids.iter().all(|id| admitted.contains(&id.as_str()))
+            {
+                return Err(refused());
+            }
+            ids.iter().map(String::as_str).collect()
+        } else {
+            admitted
+        };
         if !receipts.is_empty() && message.status == "completed" {
             for version in proposals::v3::AssistantVersion::ALL {
-                db.collection::<Document>("approval_requests").update_many(version.selector(doc!{"_id":{"$in":&receipts},"user_id":&row.user_id,
-                    "execution_proposal.v1.state":{"$in":["completed","not_sent","unknown","denied","expired","cancelled"]}}),
-                    version.update(doc!{"$set":{"execution_proposal.v1.delivered_turn_id":&turn.turn_id}})).session(&mut *session).await?;
+                db.collection::<Document>("approval_requests")
+                    .update_many(
+                        version.selector(doc! {
+                            "_id": {"$in": &receipts},
+                            "user_id": &row.user_id,
+                            "execution_proposal.v1.delivered_turn_id": null,
+                            "$or": [
+                                {"execution_proposal.v1.owner_continuation": null},
+                                {"execution_proposal.v1.owner_continuation.blocked": true},
+                                {"execution_proposal.v1.owner_continuation.released_turn_id": {"$ne": null}},
+                            ],
+                            "execution_proposal.v1.state": {"$in": [
+                                "completed", "not_sent", "unknown", "denied", "expired", "cancelled",
+                            ]},
+                        }),
+                        version.update(doc! {
+                            "$set": {"execution_proposal.v1.delivered_turn_id": &turn.turn_id},
+                        }),
+                    )
+                    .session(&mut *session)
+                    .await?;
+                if !turn.execution_local_only {
+                    // A reconciled release can include successful receipts absent
+                    // from this wake. Settle that exact atomically released batch,
+                    // so maintenance cannot publish an extra sibling notice later.
+                    db.collection::<Document>("approval_requests")
+                        .update_many(
+                            version.selector(doc! {
+                                "user_id": &row.user_id,
+                                "status": "approved",
+                                "activity_outcome": "completed",
+                                "execution_proposal.v1.conversation_id": &row.id,
+                                "execution_proposal.v1.key_id": &row.credential_api_key_id,
+                                "execution_proposal.v1.task.task": bson::to_bson(&task.task).map_err(encoding)?,
+                                "execution_proposal.v1.task.epoch": task.epoch,
+                                "execution_proposal.v1.task.actor_user_id": &task.actor_user_id,
+                                "execution_proposal.v1.state": "completed",
+                                "execution_proposal.v1.owner_continuation.version": 3,
+                                "execution_proposal.v1.owner_continuation.batch_turn_id": {"$type": "string"},
+                                "execution_proposal.v1.owner_continuation.released_turn_id": &turn.turn_id,
+                                "execution_proposal.v1.delivered_turn_id": null,
+                            }),
+                            version.update(doc! {
+                                "$set": {"execution_proposal.v1.delivered_turn_id": &turn.turn_id},
+                            }),
+                        )
+                        .session(&mut *session)
+                        .await?;
+                }
             }
         }
         let v2_receipts: Vec<_> = turn
@@ -463,7 +527,7 @@ pub(crate) fn settle<'a>(
             .iter()
             .filter_map(|e| e.id.strip_prefix("execution-decision-v2:"))
             .collect();
-        if !v2_receipts.is_empty() && message.status == "completed" {
+        if !turn.execution_local_only && !v2_receipts.is_empty() && message.status == "completed" {
             db.collection::<Document>("approval_requests").update_many(doc!{"_id":{"$in":v2_receipts},"user_id":&row.user_id,"execution_proposal.v2.state":{"$in":["completed","not_sent","unknown","denied","expired","cancelled"]}},doc!{"$set":{"execution_proposal.v2.delivered_turn_id":&turn.turn_id}}).session(&mut *session).await?;
         }
         if task.task.root_kind != TaskRootKind::Message
@@ -489,7 +553,14 @@ pub(crate) fn settle<'a>(
             .is_some();
         let pending_effect = db.collection::<Document>("approval_requests").find_one(proposals::v3::source_selector(doc! {
             "user_id":&row.user_id,"execution_proposal.v1.task.task":&reference,
-            "execution_proposal.v1.state":{"$in":["pending","queued","preparing","dispatched","waiting"]},
+            "$or":[
+                {"execution_proposal.v1.state":{"$in":["pending","queued","preparing","dispatched","waiting"]}},
+                {"execution_proposal.v1.state":"completed",
+                    "execution_proposal.v1.delivered_turn_id":null,
+                    "execution_proposal.v1.owner_continuation.version":{"$in":[1,2,3]},
+                    "execution_proposal.v1.owner_continuation.blocked":{"$ne":true},
+                    "execution_proposal.v1.owner_continuation.released_turn_id":null}
+            ],
             "execution_proposal.v1.task.hard_deadline":{"$gt":bson::DateTime::now()}
         })).session(&mut *session).await?.is_some();
         let mut background = false;
@@ -665,4 +736,44 @@ pub(crate) fn partition_events(
             });
     pending.extend(deferred);
     selected_events
+}
+
+/// Only a newly inserted root admitted under the complete observed v2 fleet
+/// can prove its dispatch history. Never backfill a preexisting task.
+pub(crate) async fn mark_effect_evidence(
+    db: &Database,
+    session: &mut ClientSession,
+    row: &AssistantConversation,
+    message_id: &str,
+) -> AppResult<()> {
+    let Some(task) = proposals::continuation::owner_task(row) else {
+        return Ok(());
+    };
+    if task.task.root_id != message_id
+        || row.active_turn.as_ref().is_none_or(|turn| {
+            !matches!(
+                turn.origin,
+                crate::models::assistant_conversation::TurnOrigin::User
+                    | crate::models::assistant_conversation::TurnOrigin::Channel
+            )
+        })
+    {
+        return Ok(());
+    }
+    // This capability is optional for ordinary admission. A dependency failure
+    // leaves the new root unmarked, with no automatic v2 continuation authority.
+    if !matches!(super::super::security_readiness_service::serving_report(
+        db, proposals::continuation::READINESS).await, Ok(report) if report.serving_ready)
+    {
+        return Ok(());
+    }
+    db.collection::<Document>("assistant_messages")
+        .update_one(
+            doc! {"_id": message_id, "user_id": &row.user_id,
+            "conversation_id": &row.id, "execution_task.epoch": task.epoch},
+            doc! {"$set": {"execution_dispatch_evidence_version": 2}},
+        )
+        .session(session)
+        .await?;
+    Ok(())
 }

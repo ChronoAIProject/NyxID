@@ -449,6 +449,9 @@ pub struct EngineWorkerInstance {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StreamReply {
+    /// Exact retained permission identity; absent on ordinary/historical streams.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retained_authority: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstream: Option<SubscriberCheckpoint>,
     pub message_id: String,
@@ -480,6 +483,12 @@ pub struct OutputPartLength {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ActiveTurn {
+    /// Durable provisional unsent IDs, retained across a later batch expiry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_local_retirements: Option<Vec<String>>,
+    /// Only an observed, fenced whole-batch expiry makes delivery exclusive.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub execution_local_only: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channel_guest: Option<super::channel_guest_access::GuestTurn>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -737,6 +746,8 @@ pub struct ThreadSecretFence {
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReattachWindow {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retained_authority: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub channel_capacity_retry: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]

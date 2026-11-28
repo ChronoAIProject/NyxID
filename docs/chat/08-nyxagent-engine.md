@@ -1714,6 +1714,18 @@ of settling as `turn_lost`. See
 [graceful drain](../DEPLOYMENT.md#rolling-deploys-and-graceful-drain).
 Delete stops and cancels before removing the row, and a late worker settlement against
 the deleted row is a quiet no-op. All late settlement is fenced by the exact turn ID.
+Retained execution-permission turns also bind their original worker, including
+legacy turns without an execution attempt, and the complete admitted decision
+proof before message settlement. A changed worker or decision set relinquishes
+settlement without a reply or after-turn queue work. Permission authority refusal
+is distinct from explicit human Stop and cannot cancel conversation machine jobs.
+Lease loss reports `turn_lost`/`lease_expiry`; only a persisted Stop authorizes
+driver job cleanup. Scoped automation Stop cleanup stays with the handler's
+protected job set through node cancellation. Retained stream checkpoints bind
+the admitted identity during writes and again during final text recovery, so
+changed decisions cannot publish an obsolete checkpoint through failure fallback.
+Ordinary stream checkpoints and restart behavior retain their existing contract. See
+[exact resume and recovery](../EXECUTION_PERMISSIONS.md#exact-resume-and-recovery).
 
 A detached task owns the shared
 `DirectChatPermit`, upstream stream and settlement. Browser SSE is a broadcast
@@ -1735,8 +1747,14 @@ safe for subscribers into `active_turn.reply` at most once a second. Writes
 coalesce through a watch channel, are bounded by the relay's output limit,
 and fence the owner, turn ID, Stop flag and increasing text cursor. Database
 delays cannot block the token reader. Settlement removes the checkpoint with
-the active turn; forced Stop and orphan reclamation retain its partial text.
+the active turn; forced Stop and orphan reclamation retain only authorized
+partial text. Retained permission checkpoints additionally follow
+[exact resume and recovery](../EXECUTION_PERMISSIONS.md#exact-resume-and-recovery).
 Only transcript history includes the checkpoint, not the conversation index.
+History projects retained text and cursor together only when the checkpoint and
+any replay window match the complete authority on that saved turn snapshot.
+Reconnect and activity projection apply the same validation; an obsolete
+fragment cannot seed a replay cursor or a failed terminal transcript.
 The POST response also identifies its conversation in `X-NyxID-Conversation-Id`,
 so a new thread remains recoverable if its first SSE event is lost.
 
@@ -1835,6 +1853,14 @@ The survivor takes over the turn's capacity slot and attaches to the existing
 upstream execution: it looks up the background response by the saved window key
 and continues reading its events after the saved reply checkpoint. The first
 handoff emits a `turn.notice` with code `continued_after_restart`.
+For retained permission turns, both the restart offer and successor claim
+transaction verify the original worker and exact decision proofs before
+transferring the saved checkpoint and encrypted replay-window authority to the
+new epoch/claim. The survivor restores text, upstream cursor and replay input
+only from that validated transfer, including its direct terminal/deadline
+settlement path. An incompatible or historical unproved retained window remains
+unavailable for replay, even if it has no saved text. See
+[exact resume and recovery](../EXECUTION_PERMISSIONS.md#exact-resume-and-recovery).
 
 Turn survival keeps the no-replay guarantee. The survivor sends the request again
 only when NyxAgent's answer proves the original was never admitted or never
@@ -1873,6 +1899,7 @@ separate stable session instructions from volatile turn facts:
 | Current setup-handoff client capability | Input context |
 | Current upload listing, expired uploads and image fallback notices | Input context |
 | Event-turn payload and automatic continuation request | Input, as before |
+| Successful retained owner-operation continuation | Original human task input and quoted operation results; see [permission resume](../EXECUTION_PERMISSIONS.md#exact-resume-and-recovery) |
 | Bounded prior-history recap | Initial instructions after a reset only |
 
 First-party human clients advertise setup-card support on `POST /turns` through
