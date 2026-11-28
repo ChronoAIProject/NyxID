@@ -38,6 +38,28 @@ pub(crate) async fn bind_in_session(
         .session(&mut *session)
         .await?
         .ok_or_else(|| AppError::Conflict("Channel event already admitted".into()))?;
+    if let Ok(id) = bound.get_str("custom_binding_id") {
+        use crate::models::nyxbot_event_binding::{COLLECTION_NAME, NyxbotEventBinding};
+        let binding = db
+            .collection::<NyxbotEventBinding>(COLLECTION_NAME)
+            .find_one(doc! {"_id":id,"user_id":owner,"status":"ready","revoked_at":null})
+            .session(&mut *session)
+            .await?
+            .ok_or_else(super::org_channel_service::denied)?;
+        if binding.agent_owner_id != owner
+            && !super::org_agent_service::use_revision_is_live(
+                db,
+                session,
+                owner,
+                &binding.agent_owner_id,
+                &binding.agent_id,
+                binding.member_use,
+            )
+            .await?
+        {
+            return Err(super::org_channel_service::denied());
+        }
+    }
     if let Some(value) = bound.get("meta_grant") {
         let grant: crate::models::channel_meta::GrantRef = bson::from_bson(value.clone())
             .map_err(|_| super::channel_meta_service::grants::incomplete())?;
@@ -438,7 +460,7 @@ pub(crate) async fn enqueue_in_session(
         .and_then(|o| o.org_execution.as_deref())
         .filter(|e| !e.guest)
     {
-        event.org_use_revision = member.org_use_revision;
+        event.member_use = member.member_use;
     }
     let rows = db.collection::<AssistantConversation>(CONVERSATIONS);
     let mut row = rows

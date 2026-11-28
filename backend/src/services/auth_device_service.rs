@@ -2522,14 +2522,37 @@ mod tests {
         let encryption_keys = test_encryption_keys();
         let access = "eyJ.access.jwt";
         let refresh = "eyJ.refresh.jwt";
-        let encrypted_access = encryption_keys.encrypt(access.as_bytes()).await.unwrap();
-        let encrypted_refresh = encryption_keys.encrypt(refresh.as_bytes()).await.unwrap();
-
         let mut row = make_debug_row();
-        row.approved_user_id = Some("owner".into());
-        row.approved_session_id = Some("session".into());
-        row.delivery_access_token_encrypted = Some(encrypted_access);
-        row.delivery_refresh_token_encrypted = Some(encrypted_refresh);
+        let owner = "owner";
+        let session = "session";
+        row.approved_user_id = Some(owner.into());
+        row.approved_session_id = Some(session.into());
+        let [access_path, refresh_path] = record::session_paths(session);
+        row.delivery_access_token_encrypted = Some(
+            record::seal(
+                &encryption_keys,
+                AUTH_DEVICE_CODES,
+                &row.id,
+                owner,
+                &access_path,
+                access.as_bytes(),
+            )
+            .await
+            .unwrap(),
+        );
+        row.delivery_refresh_token_encrypted = Some(
+            record::seal(
+                &encryption_keys,
+                AUTH_DEVICE_CODES,
+                &row.id,
+                owner,
+                &refresh_path,
+                refresh.as_bytes(),
+            )
+            .await
+            .unwrap(),
+        );
+        row.delivery_context_version = encryption_keys.contextual_record_writes().then_some(3);
         let (decrypted_access, decrypted_refresh) =
             record::open_session(&encryption_keys, AUTH_DEVICE_CODES, &row)
                 .await

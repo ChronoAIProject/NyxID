@@ -3894,7 +3894,7 @@ async fn relay_recovery_keeps_images_and_replays_without_resending_them() {
     add_images(&f).await;
     mock_sends(&server, "telegram", false, Duration::ZERO).await;
     let payload = recovery::Payload::new("resp_images", "nyxbot_images", Default::default());
-    let stored = GatewayResponse {
+    let mut stored = GatewayResponse {
         id: Uuid::new_v4().to_string(),
         response_id: "resp_images".into(),
         user_id: OWNER.into(),
@@ -3908,10 +3908,13 @@ async fn relay_recovery_keeps_images_and_replays_without_resending_them() {
         answer_delivery: None,
         revision: 0,
         payload_context_version: None,
-        payload_ciphertext: payload.seal_legacy(&f.state.encryption_keys).await.unwrap(),
+        payload_ciphertext: Vec::new(),
         created_at: Utc::now(),
         expires_at: Utc::now() + ChronoDuration::hours(1),
     };
+    recovery::storage::install(&f.state.encryption_keys, &mut stored, &payload)
+        .await
+        .unwrap();
     f.state
         .db
         .collection::<GatewayResponse>(RESPONSES)

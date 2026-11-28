@@ -115,7 +115,16 @@ pub(crate) async fn validate_parent(db: &Database, page: &PdfPage) -> AppResult<
     let parent = db.collection::<AssistantUpload>(COLLECTION_NAME)
         .find_one(doc! {"_id":&page.parent_attachment_id,"origin":"user_upload","user_id":&page.user_id,"content_type":"application/pdf"})
         .await?.ok_or_else(missing)?;
-    if page.origin != ORIGIN
+    check_parent(page, &parent)?;
+    Ok(parent)
+}
+
+pub(crate) fn check_parent(page: &PdfPage, parent: &AssistantUpload) -> AppResult<()> {
+    if parent.id != page.parent_attachment_id
+        || parent.user_id != page.user_id
+        || parent.origin != "user_upload"
+        || parent.content_type != "application/pdf"
+        || page.origin != ORIGIN
         || page.page == 0
         || page.page as usize > parent.pages
         || page.render_version != renderer::VERSION
@@ -127,7 +136,7 @@ pub(crate) async fn validate_parent(db: &Database, page: &PdfPage) -> AppResult<
     {
         return Err(missing());
     }
-    Ok(parent)
+    Ok(())
 }
 
 pub(crate) async fn for_chat(db: &Database, chat: &ChatAuthority, id: &str) -> AppResult<PdfPage> {

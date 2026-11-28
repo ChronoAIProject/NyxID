@@ -29,6 +29,11 @@ pub enum Lane {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Authority {
+    #[serde(
+        default,
+        skip_serializing_if = "super::org_membership::is_initial_revision"
+    )]
+    pub eligibility_revision: i64,
     pub owner_id: String,
     pub lane: Lane,
     /// Sharing-policy revision or exact group/agent guest opt-in revision.
@@ -147,6 +152,8 @@ pub struct ExecutionBinding {
 pub const PROPOSALS: &str = "assistant_group_agent_proposals";
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AgentProposal {
+    #[serde(default)]
+    pub eligibility_revision: i64,
     #[serde(rename = "_id")]
     pub id: String,
     pub group_id: String,

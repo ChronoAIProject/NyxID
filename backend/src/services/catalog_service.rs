@@ -1104,6 +1104,7 @@ mod tests {
 
     fn membership(org_user_id: &str, allowed: Option<Vec<String>>) -> OrgMembership {
         OrgMembership {
+            eligibility_revision: 0,
             id: format!("mem-{org_user_id}"),
             org_user_id: org_user_id.to_string(),
             member_user_id: "bob".to_string(),

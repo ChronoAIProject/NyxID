@@ -130,5 +130,5 @@ threads-required = "num-cpus"
 
 # These exact-time census tests temporarily change MongoDB's snapshot-history window.
 [[profile.ci.overrides]]
-filter = "test(services::encrypted_record_census::tests::stream_replays_) | test(services::encrypted_record_census::tests::ttl_deletes_) | test(services::encrypted_record_census::tests::expired_baseline_)"
+filter = "test(::encrypted_record_census::report::tests::) | test(::router::census_router_authorizes_) | test(services::encrypted_record_census::tests::stream_replays_) | test(services::encrypted_record_census::tests::ttl_deletes_) | test(services::encrypted_record_census::tests::expired_baseline_) | test(::retained::missing_root_edge_) | test(::deliveries::historical_refresh_issuance_) | test(::channels::independent_key_digest_is_read_)"
 threads-required = "num-cpus"

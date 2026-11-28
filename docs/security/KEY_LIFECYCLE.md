@@ -175,6 +175,75 @@ For `POST /evidence`, replace the enrollment's `deployment_revision` field with 
 4. **Restore or deployment change.** Submit `advance_restore_epoch` for the complete ring after an announced restore/import, or `change_deployment_revision` with the new release revision when that scope changes. Reread status, start a fresh census and record fresh scoped reviews and attestations. A detected database or lifecycle collection identity change opens a durable restore blocker. Only an explicit epoch advance clears it. NyxID cannot independently prove that an unannounced restore or import did not occur. A restore can roll back the database, journal and evidence together.
 5. **Verification and rollback.** Submit `verify_ring` for the complete scope to challenge the enrolled layout again. The previous release can continue serving under the enrolled configuration and ignores the new collections. Enrollment authorizes neither a key removal nor a second rotation. The census runner and release rehearsal must repeat the fixed-load throughput and tail-latency gate on an isolated rig before enabling certification.
 
+## Running a dated census
+
+A census reports which encryption formats and keys the registered families use
+at a specific MongoDB cluster time. It reads application records even when
+contextual application writes are disabled. Use a first-party human session or
+access token. A full admin can start and advance a census. Full admins and
+operators can read its status, family counts and findings.
+
+1. Send `POST /api/v1/admin/encrypted-records/censuses` with no body. Save the
+   UUID in the returned status field `generation`. Use it as `{id}` in the
+   paths below, relative to `/api/v1/admin/encrypted-records/censuses`.
+2. Send `POST /{id}/advance` with no body. Each call performs bounded work and
+   returns status. Repeat until `phase` is `published`. Use `GET /{id}` to
+   check progress between calls. The runner scans at the baseline snapshot S,
+   follows the database change stream through a witnessed marker W, reconciles
+   affected rows and their dependencies at W, and authenticates the report
+   partitions before publication.
+3. Read `GET /{id}/families` and `GET /{id}/findings` after publication.
+   Both return `items` and `next`. Pass each non-null `next` as `?after=` on
+   the same route and generation, even if the current page has no items.
+
+### Reading the report
+
+Published status gives the cluster times `baseline` (S) and `as_of` (W),
+registry digest, lifecycle scope revision, restore epoch, deployment revision,
+reader and writer settings, opaque key references, row totals and blockers.
+Every status includes `certification_enabled: false` and the blocker
+`isolated_load_gate_unmet`. The isolated-rig load gate remains unmet. A
+published census provides dated observations and cannot authorize key retirement.
+
+The families list includes families with zero rows. Within a family, each
+examined row counts once as `absent` (no material), `homogeneous` (one
+combination of material attributes), `mixed` (several combinations) or
+`unresolved` (at least one finding). Buckets group observations by static
+field path, storage version, envelope version, binding, key reference and
+route. A null `field` groups the same observations across the family.
+`rows_with` counts each matching row once per bucket, so a row can appear
+in several buckets. `material_instances` counts each authenticated envelope,
+including repeated entries in one row. `empty_envelopes` counts the subset
+with empty payloads. An unresolved row retains the counts for its fields that
+authenticate successfully.
+
+Each finding names the `family`, `collection`, static `field` path, `reason`
+code (such as `MissingParent` or `Authentication`) and `state` of
+`unresolved`. Use the opaque `record_token` to group findings for the same
+source record within this generation. The database record ID stays private.
+
+### Retrying, invalidation and retention
+
+If an advance loses its lease or another worker holds it, retry the same
+generation from its last committed checkpoint. Loss of snapshot history, a
+change-stream gap, a missing or unreadable journal page, journal exhaustion,
+or a change to the database identity, watched collection identity or lifecycle
+scope invalidates unfinished work. Start a fresh generation after resolving
+the cause. A registry, reader/writer policy or ring-proof mismatch also blocks
+advance. A damaged report partition blocks publication or fails authentication
+on read. A published report with an older registry digest keeps its dated
+totals and carries `registry_digest_mismatch`.
+
+The report, journal and partitions share a seven-day TTL measured from
+generation creation, including unreferenced partitions left by an interrupted
+advance. Publication uses that original expiry. Start a new census if the
+generation expires.
+
+NyxID cannot independently prove that an unannounced restore or import did
+not occur. A restore can roll back the data and the evidence together. For an
+announced restore or import, a full admin advances the restore epoch, starts a
+fresh census and records restore-continuity evidence for the new scope.
+
 ## Process admission and survivor-preserving writers
 
 Every server start and every database-using one-shot command performs a

@@ -81,28 +81,16 @@ impl Fixture {
             .unwrap()
             .unwrap();
         let hash = hash_token(&code);
-        let bytes = delivery.get_binary_generic("ciphertext").unwrap();
-        let plaintext = if delivery.contains_key("ciphertext_context_version") {
+        let stored: MobileSocialDelivery = bson::from_document(delivery.clone()).unwrap();
+        if app.encryption_keys.contextual_record_writes() {
             assert_eq!(delivery.get_i32("ciphertext_context_version"), Ok(3));
-            let path = ["ciphertext", &hash, &challenge];
-            let ctx = crate::crypto::record_field::RecordContext::new(
-                DELIVERIES,
-                delivery.get_str("_id").unwrap(),
-                &user,
-                &path,
-            )
-            .unwrap();
-            app.encryption_keys
-                .decrypt_record(bytes, &ctx)
-                .await
-                .unwrap()
         } else {
-            let aad = format!("mobile-social-delivery-v1:{hash}:{challenge}:{user}");
-            app.encryption_keys
-                .decrypt_with_aad(bytes, aad.as_bytes())
-                .await
-                .unwrap()
-        };
+            assert!(!delivery.contains_key("ciphertext_context_version"));
+        }
+        let plaintext = record::Binding::new(&stored.id, &user, &hash, &challenge)
+            .open(&app.encryption_keys, &stored)
+            .await
+            .unwrap();
         assert_eq!(digest(&plaintext), plaintext_hash);
         Self {
             delivery,
@@ -220,12 +208,9 @@ async fn rewrap_preserves_bson_and_http_response() {
     let hash = hash_token(&fixture.code);
     let challenge = oauth_flow::generate_code_challenge(&fixture.verifier);
     let user = before.get_str("user_id").unwrap();
-    let aad = format!("mobile-social-delivery-v1:{hash}:{challenge}:{user}");
-    let original = keys
-        .decrypt_with_aad(
-            before.get_binary_generic("ciphertext").unwrap(),
-            aad.as_bytes(),
-        )
+    let stored: MobileSocialDelivery = bson::from_document(before.clone()).unwrap();
+    let original = record::Binding::new(&stored.id, user, &hash, &challenge)
+        .open(&keys, &stored)
         .await
         .unwrap();
     assert_eq!(digest(&original), fixture.plaintext_hash);

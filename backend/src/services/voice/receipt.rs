@@ -176,6 +176,7 @@ mod tests {
 
     fn request(state: RequestState, id: &str, message_id: &str) -> VoiceRequest {
         VoiceRequest {
+            eligibility_revision: 0,
             execution_enrolled: false,
             model_task: None,
             progress: None,

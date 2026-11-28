@@ -274,7 +274,7 @@ pub async fn set_schedule_job(
 pub fn new_run(trigger: &Trigger, at: DateTime<Utc>, deadline: DateTime<Utc>) -> TriggerRun {
     TriggerRun {
         org_specialist_owner_id: None,
-        org_use_revision: 0,
+        member_use: Default::default(),
         coordinator: None,
         work: None,
         trigger_generation: None,
@@ -437,7 +437,16 @@ pub(crate) async fn insert_run(
             )
             .await
             {
-                Ok(revision) => run.org_use_revision = revision,
+                Ok(revision)
+                    if revision.eligibility_revision
+                        == trigger
+                            .assistant_target_owner
+                            .as_ref()
+                            .map_or(0, |t| t.eligibility_revision) =>
+                {
+                    run.member_use = revision
+                }
+                Ok(_) => run.reason = Some("target_unavailable".into()),
                 Err(AppError::Forbidden(_) | AppError::NotFound(_)) => {
                     run.reason = Some("target_unavailable".into())
                 }
@@ -1150,19 +1159,13 @@ pub fn admit_turn<'a>(
     claim: &'a TurnClaim,
     thread: &'a str,
     turn: &'a str,
-    org_use_revision: i64,
+    member_use: crate::models::org_membership::MemberUse,
     session: &'a mut ClientSession,
 ) -> futures::future::BoxFuture<'a, AppResult<Option<crate::models::trigger_run::AutomationWork>>> {
     // Keep the schedule's transaction state out of the enclosing owner-turn
     // admission future, which also carries the assistant's authority fences.
     Box::pin(admit_turn_inner(
-        db,
-        owner,
-        claim,
-        thread,
-        turn,
-        org_use_revision,
-        session,
+        db, owner, claim, thread, turn, member_use, session,
     ))
 }
 
@@ -1172,7 +1175,7 @@ async fn admit_turn_inner(
     claim: &TurnClaim,
     thread: &str,
     turn: &str,
-    org_use_revision: i64,
+    member_use: crate::models::org_membership::MemberUse,
     session: &mut ClientSession,
 ) -> AppResult<Option<crate::models::trigger_run::AutomationWork>> {
     let now = Utc::now();
@@ -1225,9 +1228,7 @@ async fn admit_turn_inner(
         .session(&mut *session)
         .await?
         .ok_or_else(|| AppError::Conflict("trigger_paused".into()))?;
-    if run.org_use_revision != org_use_revision
-        || run.reason.as_deref() == Some("target_unavailable")
-    {
+    if run.member_use != member_use || run.reason.as_deref() == Some("target_unavailable") {
         return Err(AppError::Forbidden("Specialist use access changed".into()));
     }
     if let Some(blocking_run_id) = find_running_blocker(db, &run, Some(session)).await? {
@@ -1441,7 +1442,7 @@ async fn run_thread_inner(
     };
     let agent = super::assistant_team_service::agent(db, &trigger.user_id, agent_id).await?;
     let policy = thread_policy.unwrap_or_else(|| default_thread_policy(trigger.source, &agent));
-    let home = if policy == ThreadPolicy::Home {
+    let home = if policy == ThreadPolicy::Home && run.org_specialist_owner_id.is_none() {
         Some(
             super::assistant_team_service::home_thread_for(db, keys, &trigger.user_id, &agent)
                 .await?,
@@ -1489,8 +1490,22 @@ pub(crate) async fn run_thread_in_session(
         .session(&mut *session)
         .await?
         .ok_or(AppError::TriggerDeliveryRecordNotFound)?;
-    if current.org_use_revision != agent.org_use_revision
+    if current.member_use.org_use_revision != agent.org_use_revision
         || current.reason.as_deref() == Some("target_unavailable")
+    {
+        return Err(AppError::Forbidden("Specialist use access changed".into()));
+    }
+    if let Some(org) = &current.org_specialist_owner_id
+        && super::org_agent_service::fence_member_use(
+            db,
+            session,
+            &current.user_id,
+            org,
+            &agent.id,
+            false,
+        )
+        .await?
+            != current.member_use
     {
         return Err(AppError::Forbidden("Specialist use access changed".into()));
     }
@@ -1525,6 +1540,15 @@ pub(crate) async fn run_thread_in_session(
     };
     let row = if let Some(row) = existing.or_else(|| home.cloned()) {
         row
+    } else if policy == ThreadPolicy::Home && current.org_specialist_owner_id.is_some() {
+        super::assistant_team_service::member_home_in_session(
+            db,
+            keys,
+            &run.user_id,
+            agent,
+            session,
+        )
+        .await?
     } else {
         super::assistant_team_service::create_automation_thread(
             db,

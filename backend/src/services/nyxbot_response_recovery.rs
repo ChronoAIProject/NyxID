@@ -124,10 +124,6 @@ impl Payload {
         }
         Ok(bytes)
     }
-    #[cfg(test)]
-    pub async fn seal_legacy(&self, keys: &EncryptionKeys) -> AppResult<Vec<u8>> {
-        keys.encrypt(&self.encoded()?).await
-    }
 }
 pub async fn payload(keys: &EncryptionKeys, row: &GatewayResponse) -> AppResult<Payload> {
     decode(&storage::open(keys, row).await?)

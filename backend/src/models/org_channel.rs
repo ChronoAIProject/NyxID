@@ -13,6 +13,11 @@ pub const HOLDS: &str = "org_channel_guest_holds";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Binding {
+    #[serde(
+        default,
+        skip_serializing_if = "super::org_membership::is_initial_revision"
+    )]
+    pub eligibility_revision: i64,
     pub version: u8,
     pub org_id: String,
     pub revision: String,
@@ -43,8 +48,8 @@ pub struct GuestPolicy {
 /// `guest` identities execute as the org, never as the linking administrator.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Execution {
-    #[serde(default, skip_serializing_if = "is_zero")]
-    pub org_use_revision: i64,
+    #[serde(flatten, skip_serializing_if = "is_zero")]
+    pub member_use: super::org_membership::MemberUse,
     pub version: u8,
     pub org_id: String,
     pub revision: String,
@@ -60,6 +65,8 @@ pub struct Execution {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SenderLink {
+    #[serde(default)]
+    pub eligibility_revision: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channel_bot_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -84,6 +91,6 @@ pub struct GuestUsage {
     pub sender_hash: String,
 }
 
-fn is_zero(value: &i64) -> bool {
-    *value == 0
+fn is_zero(value: &super::org_membership::MemberUse) -> bool {
+    *value == Default::default()
 }

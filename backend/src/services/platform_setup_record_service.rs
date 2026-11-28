@@ -16,7 +16,11 @@ const FIELD: &str = "facts_ciphertext";
 fn invalid() -> AppError {
     AppError::Internal("Setup facts require authenticated repair".into())
 }
-fn identity<'a>(id: &str, owner: Option<&'a str>, scope: &str) -> AppResult<&'a str> {
+pub(in crate::services) fn identity<'a>(
+    id: &str,
+    owner: Option<&'a str>,
+    scope: &str,
+) -> AppResult<&'a str> {
     if uuid::Uuid::parse_str(id).is_err() || scope.is_empty() {
         return Err(invalid());
     }
@@ -80,18 +84,22 @@ pub(super) async fn bytes(
         &row.facts_ciphertext,
     )
     .await?;
+    validate_plain(row, &bytes)?;
+    Ok(bytes)
+}
+
+pub(super) fn validate_plain(row: &PlatformSetup, bytes: &[u8]) -> AppResult<()> {
     if bytes.len() > super::platform_setup_service::MAX_FACT_BYTES {
         return Err(invalid());
     }
-    let facts = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
+    let facts = serde_json::from_slice(bytes).map_err(|_| invalid())?;
     super::platform_setup_service::validate_facts(row.template, &facts, false)
-        .map_err(|_| invalid())?;
-    Ok(bytes)
+        .map_err(|_| invalid())
 }
 pub(crate) async fn decrypt(keys: &EncryptionKeys, row: &PlatformSetup) -> AppResult<SetupFacts> {
     serde_json::from_slice(&bytes(keys, row).await?).map_err(|_| invalid())
 }
-fn row(source: &Document) -> AppResult<PlatformSetup> {
+pub(in crate::services) fn row(source: &Document) -> AppResult<PlatformSetup> {
     let row: PlatformSetup = bson::from_document(source.clone()).map_err(|_| invalid())?;
     identity(
         &row.id,

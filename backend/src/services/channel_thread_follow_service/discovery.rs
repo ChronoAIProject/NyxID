@@ -206,15 +206,25 @@ pub(crate) async fn actor_conversations(
         .await?
         .try_collect()
         .await?;
+    let orgs: Vec<_> = candidates
+        .iter()
+        .map(|(_, _, org, _)| &org.org_id)
+        .collect();
+    let memberships: Vec<crate::models::org_membership::OrgMembership> = db
+        .collection(crate::models::org_membership::COLLECTION_NAME)
+        .find(doc! {"member_user_id":viewer,"org_user_id":{"$in":orgs},"revoked_at":null,"role":{"$in":["admin","member"]}})
+        .await?.try_collect().await?;
     let filters: Vec<_> = candidates
         .iter()
         .filter(|(_, _, _, agent)| live.iter().any(|a| a.get_str("_id").ok() == Some(*agent)))
-        .map(|(child, channel, org, agent)| {
-            doc! {
+        .filter_map(|(child, channel, org, agent)| {
+            let membership = memberships.iter().find(|m| m.org_user_id == org.org_id)?;
+            Some(doc! {
                 "channel_id":&channel.id,"partition":&child.partition,"actor_id":viewer,
                 "agent_id":*agent,"binding_revision":&org.revision,
-                "guest_revision":bson::Bson::Null,"sender_hash":""
-            }
+                "guest_revision":bson::Bson::Null,"sender_hash":"",
+                "$expr":{"$eq":[{"$ifNull":["$eligibility_revision",0_i64]}, membership.eligibility_revision]}
+            })
         })
         .collect();
     if filters.is_empty() {

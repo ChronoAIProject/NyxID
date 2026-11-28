@@ -83,7 +83,10 @@ pub(crate) async fn encrypt_envelope(
     )
     .await
 }
-fn validate_envelope(row: &TriggerDeliveryRecord, plain: &[u8]) -> AppResult<()> {
+pub(in crate::services) fn validate_envelope(
+    row: &TriggerDeliveryRecord,
+    plain: &[u8],
+) -> AppResult<()> {
     let body: SecretJson = serde_json::from_slice(plain).map_err(|_| invalid())?;
     if body.get("trigger_id").and_then(serde_json::Value::as_str) != Some(row.trigger_id.as_str())
         || body.get("event_id").and_then(serde_json::Value::as_str) != Some(row.event_id.as_str())
@@ -135,7 +138,7 @@ pub(crate) async fn envelope(
     validate_envelope(row, &plain)?;
     Ok(plain)
 }
-fn validate_versions(
+pub(in crate::services) fn validate_versions(
     source: &Document,
     fields: &[&str],
 ) -> AppResult<std::collections::BTreeMap<String, u8>> {

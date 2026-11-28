@@ -572,7 +572,16 @@ async fn schedule_records_the_owned_overlap_found_at_dispatch() {
         .start_transaction()
         .and_run2(async move |session| {
             crate::services::api_key_mutation_service::transaction_result(
-                schedules::admit_turn(&db, OWNER, &claim, "thread", "turn", 0, session).await,
+                schedules::admit_turn(
+                    &db,
+                    OWNER,
+                    &claim,
+                    "thread",
+                    "turn",
+                    Default::default(),
+                    session,
+                )
+                .await,
             )
         })
         .await
@@ -1347,8 +1356,16 @@ async fn confirmation_waits_and_resumes(kind: &str) {
         .start_transaction()
         .and_run2(async move |session| {
             crate::services::api_key_mutation_service::transaction_result(
-                schedules::admit_turn(&db, OWNER, &claim, &thread_id, &user_run.id, 0, session)
-                    .await,
+                schedules::admit_turn(
+                    &db,
+                    OWNER,
+                    &claim,
+                    &thread_id,
+                    &user_run.id,
+                    Default::default(),
+                    session,
+                )
+                .await,
             )
         })
         .await
@@ -1359,6 +1376,8 @@ async fn confirmation_waits_and_resumes(kind: &str) {
         .collection::<AssistantAcknowledgement>(ACKS)
         .insert_one(AssistantAcknowledgement {
             meta_contexts: Vec::new(),
+            eligibility_revision: 0,
+            target_eligibility_revisions: Default::default(),
             org_maintenance_targets: Default::default(),
             org_maintain_revision: 0,
             activity_execution: None,
@@ -2282,7 +2301,16 @@ async fn schedule_queue_one_busy_grace_and_edit_fence() {
         .start_transaction()
         .and_run2(async move |session| {
             crate::services::api_key_mutation_service::transaction_result(
-                schedules::admit_turn(&db, OWNER, &claim, "thread", "turn", 0, session).await,
+                schedules::admit_turn(
+                    &db,
+                    OWNER,
+                    &claim,
+                    "thread",
+                    "turn",
+                    Default::default(),
+                    session,
+                )
+                .await,
             )
         })
         .await;

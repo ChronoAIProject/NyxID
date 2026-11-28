@@ -1,4 +1,7 @@
 //! Real Graph exchange, progress and selection on each side of the rollout.
+#[path = "historical_assets.rs"]
+mod historical;
+
 use super::*;
 use crate::{AppState, crypto::aes::EncryptionKeys, test_utils};
 use bson::Document;
@@ -219,10 +222,6 @@ async fn rewrap_preserves_exchange_bytes() {
         let active = keys(true, true);
         let before = attempt.row(&app).await;
         assert!(!before.contains_key("assets_context_version"));
-        let original = active
-            .decrypt(before.get_binary_generic("assets_encrypted").unwrap())
-            .await
-            .unwrap();
         assert!(
             asset_record::migrate(&app.db, &active, &before)
                 .await
@@ -254,6 +253,14 @@ async fn rewrap_preserves_exchange_bytes() {
         ];
         let ctx =
             crate::crypto::aes::RecordContext::new(SESSIONS, &s.id, &s.owner_id, &path).unwrap();
+        let original = crate::crypto::record_field::decrypt_context(
+            &active,
+            &ctx,
+            None,
+            before.get_binary_generic("assets_encrypted").unwrap(),
+        )
+        .await
+        .unwrap();
         let decrypted = active
             .decrypt_record(after.get_binary_generic("assets_encrypted").unwrap(), &ctx)
             .await
@@ -364,35 +371,23 @@ async fn ambiguous_legacy_assets_block_the_walk_with_metadata_only() {
     let (app, server, attempt) = consent("messenger", false).await;
     let active = keys(true, true);
     let source = attempt.row(&app).await;
-    let bytes = active
-        .decrypt(source.get_binary_generic("assets_encrypted").unwrap())
+    let source_session: OAuthSession = bson::from_document(source.clone()).unwrap();
+    let source_subject = source_session.grant_subject_id.as_deref().unwrap();
+    let assets = asset_record::open(&active, &source_session, source_subject)
         .await
         .unwrap();
-    let assets: Vec<AssetCredential> = serde_json::from_slice(&bytes).unwrap();
     let mut ambiguous = source.clone();
-    for (index, change) in [
-        json!({"id": assets[1].id}),
-        json!({"id":"invalid"}),
-        json!({"token":""}),
-        json!({"grant_subject_id":"901"}),
-        json!({"expires_at":{"$date":{"$numberLong":"2000000000"}}}),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let mut list = serde_json::to_value(&assets).unwrap();
-        list[0]
-            .as_object_mut()
-            .unwrap()
-            .extend(change.as_object().unwrap().clone());
-        let raw = Zeroizing::new(serde_json::to_vec(&list).unwrap());
-        ambiguous.insert(
-            "assets_encrypted",
-            binary(active.encrypt(&raw).await.unwrap()),
-        );
+    for (case, ciphertext) in [
+        ("duplicate asset ID", historical::DUPLICATE_ID),
+        ("invalid asset ID", historical::INVALID_ID),
+        ("empty token", historical::EMPTY_TOKEN),
+        ("wrong grant subject", historical::WRONG_SUBJECT),
+        ("unexpected expiry", historical::UNEXPECTED_EXPIRY),
+    ] {
+        ambiguous.insert("assets_encrypted", binary(hex::decode(ciphertext).unwrap()));
         assert!(
             matches!(asset_record::migrate(&app.db,&active,&ambiguous).await,Err(AppError::Conflict(s)) if s == asset_record::AMBIGUOUS),
-            "case {index}"
+            "{case}"
         );
     }
     for update in [

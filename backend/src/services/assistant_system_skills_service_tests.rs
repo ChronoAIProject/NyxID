@@ -2560,11 +2560,19 @@ async fn catalog_pin_dispatch_check(via_node: bool) {
         if via_node {
             for priority in 0..if change == "http_fallback" { 1 } else { 2 } {
                 let node_id = uuid::Uuid::new_v4().to_string();
+                let material = crate::services::node_service::prepare_managed_credentials(
+                    &f.state.encryption_keys,
+                    &node_id,
+                    &f.owner,
+                )
+                .await
+                .unwrap();
                 let node: crate::models::node::Node = bson::from_document(doc! {
                     "_id":&node_id,"user_id":&f.owner,"name":"skill-node",
-                    "status":"online","auth_token_hash":"test",
-                    "signing_secret_hash":crate::crypto::token::hash_token(&"11".repeat(32)),
-                    "signing_secret_encrypted":bson::to_bson(&f.state.encryption_keys.encrypt("11".repeat(32).as_bytes()).await.unwrap()).unwrap(),
+                    "status":"online","auth_token_hash":crate::crypto::token::hash_token(&material.auth_token),
+                    "signing_secret_hash":crate::crypto::token::hash_token(&material.signing_secret),
+                    "signing_secret_encrypted":bson::to_bson(&material.signing_secret_encrypted).unwrap(),
+                    "signing_secret_context_version":bson::to_bson(&material.signing_secret_context_version).unwrap(),
                     "is_active":true,"created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now(),
                     "last_heartbeat_at":bson::DateTime::now(),"connected_at":bson::DateTime::now(),
                 }).unwrap();

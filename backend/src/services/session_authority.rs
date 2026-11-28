@@ -1,4 +1,5 @@
 //! Shared query boundaries between completed logins and first-factor challenges.
+use super::mcp_session_storage;
 use crate::models::mcp_notification::COLLECTION_NAME as MCP_NOTIFICATIONS;
 use crate::models::mcp_session::{MCP_SESSION_COLLECTION, MCP_SESSION_SLOT_COLLECTION};
 use crate::models::refresh_token::COLLECTION_NAME as REFRESH_TOKENS;
@@ -117,21 +118,22 @@ pub async fn mcp_fallback_assurance(
         let context = (db.clone(), user.id.clone(), mcp_session_id.to_owned());
         super::transaction_service::run_db_only(db, &context, |tx, c| Box::pin(async move {
             let (db, user, id) = c;
+            let storage_ids = mcp_session_storage::keys_for_wire(id);
             let removed = db.collection::<Document>(MCP_SESSION_COLLECTION)
-                .delete_one(doc! {"_id": id, "user_id": user, "parent_session_id": null,
+                .delete_one(doc! {"_id": {"$in": &storage_ids}, "user_id": user, "parent_session_id": null,
                     "session_fallback_allowed": true, "created_at": {"$lte": bson::DateTime::from_chrono(
                         chrono::Utc::now() - chrono::Duration::seconds(super::token_service::SESSION_TTL_SECS))}})
                 .session(&mut *tx).await?;
             if removed.deleted_count == 0 { return Ok(()); }
             for collection in [MCP_SESSION_SLOT_COLLECTION, MCP_NOTIFICATIONS] {
-                db.collection::<Document>(collection).delete_many(doc! {"session_id": id})
+                db.collection::<Document>(collection).delete_many(doc! {"session_id": {"$in": &storage_ids}})
                     .session(&mut *tx).await?;
             }
             super::audit_service::log_actor_event_in_transaction(db, tx,
                 &super::audit_service::AuditActor {user_id: user.clone(), ip_address: None,
                     user_agent: None, api_key_id: None, api_key_name: None},
                 "mfa_unassured_session_rejected",
-                serde_json::json!({"session_id": id, "source": "mcp_legacy_expired"})).await
+                serde_json::json!({"session_id": mcp_session_storage::hash(id), "source": "mcp_legacy_expired"})).await
         })).await?;
         return Err(AppError::Unauthorized(
             "MFA verification required; sign in again".into(),

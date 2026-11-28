@@ -812,6 +812,7 @@ mod tests {
                 OwnerAccess::AsOrgAdmin {
                     org_user_id: "org".into(),
                     membership_id: "member".into(),
+                    eligibility_revision: 0,
                     allowed_service_ids: None,
                 },
             ),

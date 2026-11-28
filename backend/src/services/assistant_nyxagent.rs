@@ -2749,7 +2749,7 @@ pub(crate) async fn begin_owner_turn_in_session(
             automation_thread: false,
             voice_parent_conversation_id: None,
             guest_model_setup: false,
-            org_use_revision: 0,
+            member_use: Default::default(),
             shared_agent_thread: false,
             agent_owner_id: (agent.user_id != user_id).then(|| agent.user_id.clone()),
             id: id.clone(),
@@ -2977,14 +2977,19 @@ pub(crate) async fn begin_owner_turn_in_session(
         }
         let mut filter = doc! {"_id":request,"group_id":&row.group_id,"actor_user_id":user_id,"pending_agent_ids":&row.agent_id};
         if let Some(id) = row.agent_id.as_ref() {
+            let revision = authority.member_use().eligibility_revision;
+            filter.insert(
+                "$expr",
+                doc! {"$eq":[{"$ifNull":["$eligibility_revision",0_i64]},revision]},
+            );
             let field = format!("org_use_revisions.{id}");
-            if authority.org_use_revision() == 0 {
+            if authority.member_use().org_use_revision == 0 {
                 filter.insert(
                     "$or",
                     bson::bson!([{&field:0},{"org_use_revisions":{"$exists":false}}]),
                 );
             } else {
-                filter.insert(field, authority.org_use_revision());
+                filter.insert(field, authority.member_use().org_use_revision);
             }
         }
         let claimed = db
@@ -3007,7 +3012,7 @@ pub(crate) async fn begin_owner_turn_in_session(
             claim,
             &id,
             &turn_id,
-            authority.org_use_revision(),
+            authority.member_use(),
             session,
         )
         .await?;
@@ -3016,7 +3021,17 @@ pub(crate) async fn begin_owner_turn_in_session(
         if start.origin != TurnOrigin::User || start.guest {
             return Err(AppError::Forbidden("Invalid voice turn".into()));
         }
-        Some(super::assistant_voice::claim(db, &row, request_id, &start.text, session).await?)
+        Some(
+            super::assistant_voice::claim(
+                db,
+                &row,
+                authority.member_use().eligibility_revision,
+                request_id,
+                &start.text,
+                session,
+            )
+            .await?,
+        )
     } else {
         None
     };
@@ -3044,7 +3059,7 @@ pub(crate) async fn begin_owner_turn_in_session(
     let before = row.pending_events.len();
     if super::org_agent_service::ordinary_member_org(&row).is_some() {
         row.pending_events
-            .retain(|e| e.org_use_revision == authority.org_use_revision());
+            .retain(|e| e.member_use == authority.member_use());
     }
     if row.pending_events.iter().any(|e| {
         e.source_owner_id.is_some()
@@ -3361,8 +3376,8 @@ pub(crate) async fn begin_owner_turn_in_session(
     // generation at invocation boundaries so an old worker cannot authenticate
     // against a later turn's live authority. Continuations of the same family
     // retain their card/watch binding; ordinary untouched threads keep theirs.
-    let previous_use_revision = row.org_use_revision;
-    if authority.org_use_revision() != previous_use_revision {
+    let previous_use_revision = row.member_use;
+    if authority.member_use() != previous_use_revision {
         if !row.credential_api_key_id.is_empty() {
             super::api_key_mutation_service::update_one(
                 db,
@@ -3372,7 +3387,7 @@ pub(crate) async fn begin_owner_turn_in_session(
             )
             .await?;
         }
-        row.org_use_revision = authority.org_use_revision();
+        row.member_use = authority.member_use();
     }
     // Channel guests rotate per source so a late callback cannot borrow
     // authority from a later message by the same guest in the same room.
@@ -3616,7 +3631,7 @@ pub(crate) async fn begin_owner_turn_in_session(
             && super::assistant_delegated_images::text_report_target(&row, &lost_turn).is_some()
         {
             message.delegated_images.text_report_in_settlement = true;
-            if previous_use_revision == row.org_use_revision {
+            if previous_use_revision == row.member_use {
                 message.delegated_images.publication_refusal =
                     Box::pin(super::assistant_delegated_images::publish_in_session(
                         db, session, &row, &message, &lost_turn,
@@ -3690,7 +3705,12 @@ pub(crate) async fn begin_owner_turn_in_session(
             }
             Some(
                 Box::pin(retry_context_in_session(
-                    db, session, user_id, &id, retry_of,
+                    db,
+                    session,
+                    user_id,
+                    &id,
+                    retry_of,
+                    row.member_use.eligibility_revision,
                 ))
                 .await?,
             )
@@ -4077,6 +4097,9 @@ pub(crate) async fn begin_owner_turn_in_session(
             .session(&mut *session)
             .await?;
         if let Some(card) = card.as_ref() {
+            if card.eligibility_revision != row.member_use.eligibility_revision {
+                return Err(AppError::Forbidden("Specialist use access changed".into()));
+            }
             row.active_turn.as_mut().expect("turn").execution_task = card.execution_task.clone();
             if let Some(work) = card.automation_work.as_ref() {
                 row.automation_v2 = true;
@@ -4425,6 +4448,7 @@ pub(crate) async fn begin_owner_turn_in_session(
         media_bound: None,
         turn_metadata: row.active_turn.as_ref().map(|turn| {
             crate::models::assistant_message::TurnMetadata {
+                eligibility_revision: row.member_use.eligibility_revision,
                 channel_text_completeness: turn
                     .channel_context
                     .iter()
@@ -4810,7 +4834,7 @@ pub async fn append_events_in_session(
         )
         .await?
     } else {
-        0
+        Default::default()
     };
     for event in events {
         if !super::assistant_invocation_service::fence_in_session(
@@ -4860,13 +4884,13 @@ pub async fn append_events_in_session(
                 .ok_or_else(|| AppError::Conflict("Assistant event queue is full".into()))?;
             row.pending_events.remove(index);
         }
-        if row.org_use_revision != target_revision
+        if row.member_use != target_revision
             && super::org_agent_service::ordinary_member_org(&row).is_some()
         {
             return Err(AppError::Forbidden("Specialist use access changed".into()));
         }
         let mut queued = event.clone();
-        queued.org_use_revision = target_revision;
+        queued.member_use = target_revision;
         row.pending_events.push(queued);
     }
     rows.update_one(
@@ -5627,6 +5651,7 @@ pub(crate) async fn finish_turn_inner(
                             .and_then(|code| TurnError::new(code).upstream_code);
                         if let Some(detail) = saved.error_detail.as_ref() {
                             error.metadata = Some(Box::new(crate::models::assistant_message::TurnMetadata {
+                                eligibility_revision: saved.turn_metadata.as_ref().map_or(0, |m| m.eligibility_revision),
                                 channel_text_completeness: Default::default(),
                                 continued_after_restart: saved.turn_metadata.as_ref().is_some_and(|metadata| metadata.continued_after_restart),
                                 voice_link_publication: None,
@@ -5676,7 +5701,7 @@ artifact_recovery_target: None,
                 let mut use_revoked = false;
                 if let Some(org) = super::org_agent_service::ordinary_member_org(&current) {
                     use_revoked = !Box::pin(super::org_agent_service::settlement_use_is_live(
-                        &db,session,&current.user_id,org,current.agent_id.as_deref().ok_or_else(not_found)?,current.org_use_revision
+                        &db,session,&current.user_id,org,current.agent_id.as_deref().ok_or_else(not_found)?,current.member_use
                     )).await?;
                 }
                 let error = if use_revoked {
@@ -7463,6 +7488,7 @@ pub async fn retry_context_in_session(
     user_id: &str,
     conversation_id: &str,
     retry_of: &str,
+    eligibility_revision: i64,
 ) -> AppResult<RetryContext> {
     let messages = db.collection::<AssistantMessage>(MESSAGES);
     let failed = db
@@ -7485,6 +7511,14 @@ pub async fn retry_context_in_session(
         })
         .session(&mut *session)
         .await?;
+    if input
+        .as_ref()
+        .and_then(|m| m.turn_metadata.as_ref())
+        .map_or(0, |m| m.eligibility_revision)
+        != eligibility_revision
+    {
+        return Err(AppError::Forbidden("Specialist use access changed".into()));
+    }
     if let Some(input) = input
         .as_mut()
         .filter(|input| input.via.as_deref() == Some("voice"))

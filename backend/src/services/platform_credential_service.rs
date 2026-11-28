@@ -439,7 +439,7 @@ pub(crate) async fn decrypt_snapshot(
 // Plain metadata must never provide or mask a descriptor's secret input.
 // Apply the same contract to execution, readiness and migration, including
 // duplicates which would otherwise be hidden by the encrypted map merge.
-fn validate_plain_fields(row: &PlatformCredential) -> AppResult<()> {
+pub(super) fn validate_plain_fields(row: &PlatformCredential) -> AppResult<()> {
     static SECRET_FIELDS: std::sync::LazyLock<BTreeMap<&'static str, Vec<&'static str>>> =
         std::sync::LazyLock::new(|| {
             descriptors(&Arc::new(TokenExchangeCache::new()))

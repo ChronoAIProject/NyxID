@@ -377,6 +377,10 @@ async fn oversized_forwarded_ip_header_cannot_block_admin_action() {
                     "cookie",
                     format!("{}={raw_session}", crate::mw::auth::SESSION_COOKIE_NAME),
                 )
+                .extension(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                    [192, 0, 2, 1],
+                    443,
+                ))))
                 .header("x-forwarded-for", "p".repeat(64 * 1024))
                 .body(Body::empty())
                 .unwrap(),
@@ -389,10 +393,7 @@ async fn oversized_forwarded_ip_header_cannot_block_admin_action() {
         response.status()
     );
     let row = relayed_admin_event(&f, "admin.user.email_verified").await;
-    assert_eq!(
-        row.get_str("ip_address").unwrap(),
-        format!("{}...[truncated]", "p".repeat(242))
-    );
+    assert_eq!(row.get_str("ip_address").unwrap(), "192.0.2.1");
     assert!(
         f.state
             .db
