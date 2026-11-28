@@ -43,6 +43,10 @@ Android vitals 和 Apple 的平台报告各有分发、用户共享设置和聚�
 
 每个版本分别记录 CI 生成的 APK/AAB/IPA 字节数、指定设备经过拆分和压缩后的下载量、设备安装后的占用。每版用同一架构、签名方式、构建配置比较。Android 可对相同设备规格使用 `bundletool get-size total`，iOS 查看 App Thinning Size Report。同为 ARM64 的 NyxID QA build 8 到 9 从 63,062,771 增至 63,071,651 字节，增长 8,880 字节，Hermes 业务包的增量也是 8,880 字节。这是历史 QA 产物的实测示例，不是本次性能采集接入的包体积验证。[Android bundletool](https://developer.android.google.cn/tools/bundletool?hl=zh-cn) · [Apple 包体积](https://developer.apple.com/documentation/xcode/reducing-your-app-s-size)
 
+改动移动端打包输入并向 `dev` 提 PR 后，在 PR 的 **Checks → Mobile package size → Details → Summary** 查看本次构建。摘要按平台显示文件大小、精确字节数和预算。Android 构建多架构 Release AAB，iOS 把含 Watch 应用的未签名真机 Release 归档压成参考 IPA。比较两次 PR 的 iOS 体积时，选相同类型的参考包。正式出包走 `pnpm build:android` 或 `pnpm build:ios`，构建日志也会记录最终 AAB 或已签名 IPA 的大小。在 GitHub Actions 内运行这两个命令时，同一份结果会写进运行摘要。
+
+初始提醒线为 Android AAB 110 MiB、iOS 未签名参考 IPA 30 MiB、已签名 IPA 25 MiB。ARM64 单架构 QA APK 可在 `mobile/` 运行 `node scripts/ci-package-size.js android-arm64-apk /path/to/arm64.apk`，提醒线为 70 MiB。超过预算时 Actions 发出警告，构建可继续。这些值是团队可在 `mobile/scripts/ci-package-size.js` 调整的预算。报告直接读取构建产物，查看时无需配置 PostHog。
+
 稳定性与速度一同观察。Android 看用户感知 ANR（应用无响应）和崩溃，iOS 看 hangs 和崩溃。终止进程的会话可能来不及发最后一个业务事件。若看“无崩溃会话占比”，先确认数据源确实具备同口径的受影响会话数与会话总数。耗电和发热放在连续语音等长时间工作场景。
 
 ### 正式版与测试包的内存怎么查

@@ -1,0 +1,107 @@
+name: Mobile package size
+
+on:
+  pull_request:
+    branches: [dev]
+    paths:
+      - 'mobile/**'
+      - '!mobile/docs/**'
+      - '!mobile/release/**'
+      - '!mobile/**/*.md'
+      - '!mobile/**/*.test.*'
+      - 'shared/**'
+      - '.node-version'
+      - '.github/workflows/mobile-package-size.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mobile-package-size-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+    working-directory: mobile
+
+# Fixed public build inputs make successive measurements comparable.
+env:
+  APP_ENV: prod
+  PROD_API_BASE_URL: https://api.example.invalid/api/v1
+  PROD_FRONTEND_URL: https://example.invalid
+  PROD_IOS_BUNDLE_ID: fun.chrono-ai.nyxid
+  PROD_ANDROID_PACKAGE: fun.chronoai.nyxid
+
+jobs:
+  measure:
+    name: ${{ matrix.artifact }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - artifact: Android release AAB
+            runner: ubuntu-24.04
+          - artifact: iOS unsigned reference IPA
+            runner: macos-15
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.17.1
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+          cache-dependency-path: mobile/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+
+      - uses: actions/setup-java@v4
+        if: runner.os == 'Linux'
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Prepare Android native toolchain
+        if: runner.os == 'Linux'
+        run: |
+          # Free space for the four release ABIs on the disposable hosted runner.
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;27.1.12297006" "cmake;3.22.1"
+      - name: Build and measure Android AAB
+        if: runner.os == 'Linux'
+        env:
+          ANDROID_KEYSTORE_PATH: ${{ runner.temp }}/size-check.p12
+          ANDROID_KEYSTORE_PASSWORD: android
+          ANDROID_KEY_ALIAS: size-check
+          ANDROID_KEY_PASSWORD: android
+        run: |
+          keytool -genkeypair -noprompt -storetype PKCS12 -keystore "$ANDROID_KEYSTORE_PATH" \
+            -storepass:env ANDROID_KEYSTORE_PASSWORD -keypass:env ANDROID_KEY_PASSWORD \
+            -alias "$ANDROID_KEY_ALIAS" -keyalg RSA -keysize 2048 -validity 2 -dname "CN=Package Size CI"
+          pnpm build:android
+
+      - name: Archive unsigned iOS device app
+        if: runner.os == 'macOS'
+        env:
+          DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+        run: |
+          pnpm exec expo prebuild --platform ios --no-install
+          pod install --project-directory=ios
+          xcodebuild -quiet -workspace ios/NyxIDMobile.xcworkspace -scheme NyxIDMobile \
+            -configuration Release -destination 'generic/platform=iOS' \
+            -archivePath "$RUNNER_TEMP/NyxIDMobile.xcarchive" CODE_SIGNING_ALLOWED=NO archive
+      - name: Measure iOS reference IPA
+        if: runner.os == 'macOS'
+        run: |
+          app="$RUNNER_TEMP/NyxIDMobile.xcarchive/Products/Applications/NyxIDMobile.app"
+          test -s "$app/main.jsbundle"
+          test -d "$app/Watch/NyxIDWatch.app"
+          mkdir "$RUNNER_TEMP/Payload"
+          mv "$app" "$RUNNER_TEMP/Payload/"
+          ditto -c -k --norsrc --keepParent "$RUNNER_TEMP/Payload" "$RUNNER_TEMP/reference.ipa"
+          node scripts/ci-package-size.js ios-reference-ipa "$RUNNER_TEMP/reference.ipa"
