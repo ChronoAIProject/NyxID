@@ -12,6 +12,7 @@ use sha2::{Digest, Sha256};
 pub(crate) struct TransportFacts<'a> {
     pub sender_id: Option<&'a str>,
     pub audience: AnswerAudience,
+    pub shared_room_verified: bool,
 }
 
 impl Default for TransportFacts<'_> {
@@ -19,6 +20,7 @@ impl Default for TransportFacts<'_> {
         Self {
             sender_id: None,
             audience: AnswerAudience::Shared,
+            shared_room_verified: false,
         }
     }
 }
@@ -80,6 +82,8 @@ pub(crate) fn stored_facts<'a>(
         .map_or_else(TransportFacts::default, |audience| TransportFacts {
             sender_id: Some(sender_id),
             audience,
+            shared_room_verified: audience == AnswerAudience::Shared
+                && source.guest_transport_shared_room_verified,
         })
 }
 
@@ -111,12 +115,30 @@ fn discord_facts<'a>(
     }) else {
         return TransportFacts::default();
     };
-    verified(sender_id, discord.channel_type == 1)
+    discord_audience(sender_id, Some(u64::from(discord.channel_type)))
+}
+
+pub(crate) fn discord_shared_room(kind: Option<u64>, guild_id: &Value) -> bool {
+    match kind {
+        Some(3) => guild_id.is_null(),
+        Some(0 | 2 | 5 | 10 | 11 | 12 | 13) => guild_id
+            .as_str()
+            .is_some_and(crate::services::discord_gateway::valid_message_id),
+        _ => false,
+    }
+}
+
+fn discord_audience(sender_id: &str, kind: Option<u64>) -> TransportFacts<'_> {
+    let mut facts = verified(sender_id, kind == Some(1));
+    // The caller supplies the authenticated guild/group-DM relationship.
+    facts.shared_room_verified = false;
+    facts
 }
 
 fn verified(sender_id: &str, private: bool) -> TransportFacts<'_> {
     TransportFacts {
         sender_id: Some(sender_id),
+        shared_room_verified: false,
         audience: if private {
             AnswerAudience::Private
         } else {
@@ -166,7 +188,11 @@ fn authenticated_facts<'a>(
             {
                 return unknown;
             }
-            verified(sender_id, chat["type"] == "private" && chat_id == sender_id)
+            let mut facts = verified(sender_id, chat["type"] == "private" && chat_id == sender_id);
+            facts.shared_room_verified =
+                matches!(chat["type"].as_str(), Some("group" | "supergroup"))
+                    && chat["id"].as_i64().is_some_and(|id| id < 0);
+            facts
         }
         "lark" | "feishu" => {
             let message = &raw["event"]["message"];
@@ -183,7 +209,9 @@ fn authenticated_facts<'a>(
             {
                 return unknown;
             }
-            verified(sender_id, message["chat_type"] == "p2p")
+            let mut facts = verified(sender_id, message["chat_type"] == "p2p");
+            facts.shared_room_verified = message["chat_type"] == "group";
+            facts
         }
         "discord" => {
             use crate::services::discord_gateway::valid_message_id as snowflake;
@@ -192,7 +220,16 @@ fn authenticated_facts<'a>(
                 if raw["author"]["id"].as_str() != Some(sender_id) {
                     return unknown;
                 }
-                return discord_facts(bot_platform_id, chat_id, message_id, sender_id, facts);
+                let mut result =
+                    discord_facts(bot_platform_id, chat_id, message_id, sender_id, facts);
+                result.shared_room_verified = result.sender_id.is_some()
+                    && facts.discord_gateway.as_ref().is_some_and(|evidence| {
+                        discord_shared_room(
+                            Some(u64::from(evidence.channel_type)),
+                            &raw["guild_id"],
+                        )
+                    });
+                return result;
             }
             let user = if raw["guild_id"].is_null() {
                 &raw["user"]
@@ -212,13 +249,29 @@ fn authenticated_facts<'a>(
             {
                 return unknown;
             }
-            verified(
-                sender_id,
-                raw["guild_id"].is_null()
-                    && raw["member"].is_null()
-                    && raw["channel"]["id"].as_str() == Some(chat_id)
-                    && raw["channel"]["type"] == 1,
-            )
+            if raw["channel"]["id"].as_str() != Some(chat_id) {
+                let mut facts = verified(sender_id, false);
+                facts.shared_room_verified = false;
+                return facts;
+            }
+            let mut facts = discord_audience(sender_id, raw["channel"]["type"].as_u64());
+            if facts.audience == AnswerAudience::Private
+                && (!raw["guild_id"].is_null() || !raw["member"].is_null())
+            {
+                return unknown;
+            }
+            let guild = raw["guild_id"].as_str().is_some_and(snowflake)
+                && raw["member"]["user"]["id"].as_str() == Some(sender_id)
+                && raw["user"].is_null()
+                && (raw["channel"]["guild_id"].is_null()
+                    || raw["channel"]["guild_id"] == raw["guild_id"]);
+            facts.shared_room_verified =
+                discord_shared_room(raw["channel"]["type"].as_u64(), &raw["guild_id"])
+                    && (guild
+                        || (raw["guild_id"].is_null()
+                            && raw["member"].is_null()
+                            && raw["channel"]["guild_id"].is_null()));
+            facts
         }
         "slack" => {
             let event = &raw["event"];
@@ -237,10 +290,16 @@ fn authenticated_facts<'a>(
             {
                 return unknown;
             }
-            verified(
+            let mut facts = verified(
                 sender_id,
                 event["channel_type"] == "im" && provider_id(chat_id, "D"),
-            )
+            );
+            facts.shared_room_verified = match event["channel_type"].as_str() {
+                Some("channel") => provider_id(chat_id, "C"),
+                Some("group" | "mpim") => provider_id(chat_id, "G"),
+                _ => false,
+            };
+            facts
         }
         "whatsapp" => {
             // The adapter strips the envelope only after verifying the Meta
@@ -339,6 +398,7 @@ mod tests {
         raw["message"]["chat"] = json!({"id":-321,"type":"supergroup"});
         let mut group = parsed("telegram", &raw).await;
         assert_eq!(facts("telegram", "999", &group).sender_id, Some("123"));
+        assert!(facts("telegram", "999", &group).shared_room_verified);
         assert_eq!(
             facts("telegram", "999", &group).audience,
             AnswerAudience::Shared
@@ -377,6 +437,160 @@ mod tests {
         assert_eq!(facts("discord", "555", &direct).sender_id, None);
     }
 
+    #[test]
+    fn discord_shared_room_requires_positive_consistent_channel_evidence() {
+        let base = json!({"type":2,"id":"123","application_id":"999","channel_id":"321",
+            "user":{"id":"666","bot":false},"channel":{"id":"321","type":3}});
+        let check =
+            |raw: &Value| authenticated_facts("discord", "999", raw, "321", "123", "666", None);
+        assert!(check(&base).shared_room_verified);
+        for channel in [
+            Value::Null,
+            json!({"id":"321"}),
+            json!({"id":"321","type":99}),
+            json!({"id":"322","type":3}),
+            json!({"id":"321","type":0}),
+            json!({"id":"321","type":1}),
+        ] {
+            let mut raw = base.clone();
+            raw["channel"] = channel;
+            assert!(!check(&raw).shared_room_verified, "{raw}");
+        }
+        let mut guild = base.clone();
+        guild["guild_id"] = json!("444");
+        guild["member"] = json!({"user":{"id":"666","bot":false}});
+        guild.as_object_mut().unwrap().remove("user");
+        guild["channel"] = json!({"id":"321","type":11,"guild_id":"444"});
+        assert!(check(&guild).shared_room_verified);
+        for channel in [
+            json!({"id":"321","type":1}),
+            json!({"id":"321","type":3}),
+            json!({"id":"321","type":11,"guild_id":"445"}),
+        ] {
+            let mut raw = guild.clone();
+            raw["channel"] = channel;
+            assert!(!check(&raw).shared_room_verified, "{raw}");
+        }
+        guild["member"]["user"]["id"] = json!("667");
+        assert!(!check(&guild).shared_room_verified);
+    }
+
+    #[test]
+    fn shared_room_evidence_never_comes_from_the_private_fallback() {
+        assert!(!verified("sender", false).shared_room_verified);
+        for (platform, bot, chat, message, sender, raw, positive) in [
+            (
+                "telegram",
+                "999",
+                "-321",
+                "20",
+                "123",
+                json!({"message":{"message_id":20,"chat":{"id":-321,"type":"supergroup"},"from":{"id":123,"is_bot":false}}}),
+                true,
+            ),
+            (
+                "telegram",
+                "999",
+                "-321",
+                "20",
+                "123",
+                json!({"message":{"message_id":20,"chat":{"id":-321},"from":{"id":123,"is_bot":false}}}),
+                false,
+            ),
+            (
+                "telegram",
+                "999",
+                "123",
+                "20",
+                "123",
+                json!({"message":{"message_id":20,"chat":{"id":123,"type":"group"},"from":{"id":123,"is_bot":false}}}),
+                false,
+            ),
+            (
+                "slack",
+                "Ubot",
+                "G123",
+                "1.2",
+                "Uguest",
+                json!({"type":"event_callback","event":{"type":"message","channel":"G123","channel_type":"mpim","ts":"1.2","user":"Uguest"}}),
+                true,
+            ),
+            (
+                "slack",
+                "Ubot",
+                "D123",
+                "1.2",
+                "Uguest",
+                json!({"type":"event_callback","event":{"type":"message","channel":"D123","channel_type":"group","ts":"1.2","user":"Uguest"}}),
+                false,
+            ),
+            (
+                "lark",
+                "cli_bot",
+                "oc_chat",
+                "om_message",
+                "ou_person",
+                json!({"header":{"event_type":"im.message.receive_v1","app_id":"cli_bot"},"event":{"sender":{"sender_type":"user","sender_id":{"open_id":"ou_person"}},"message":{"message_id":"om_message","chat_id":"oc_chat","chat_type":"unknown"}}}),
+                false,
+            ),
+            (
+                "whatsapp",
+                "999",
+                "group",
+                "message",
+                "111",
+                json!({"from":"111","id":"message","group_id":"group"}),
+                false,
+            ),
+        ] {
+            assert_eq!(
+                authenticated_facts(platform, bot, &raw, chat, message, sender, None)
+                    .shared_room_verified,
+                positive,
+                "{platform} {raw}"
+            );
+        }
+        for guild in [json!("invalid"), json!(false), json!(42)] {
+            assert!(!discord_shared_room(Some(3), &guild));
+            assert!(!discord_shared_room(Some(11), &guild));
+        }
+    }
+
+    #[tokio::test]
+    async fn persisted_shared_audience_alone_never_proves_a_shared_room() {
+        let mut raw = json!({"type":2,"id":"123","application_id":"999","channel_id":"321",
+            "user":{"id":"666","bot":false},"data":{"name":"hello"}});
+        let inbound = parsed("discord", &raw).await;
+        let evidence = facts("discord", "999", &inbound);
+        assert_eq!(evidence.sender_id, Some("666"));
+        assert!(!evidence.shared_room_verified);
+        let bot: ChannelBot = bson::from_document(bson::doc! {
+            "_id":"bot", "user_id":"owner", "platform":"discord", "label":"Fixture",
+            "platform_bot_id":"999", "platform_bot_username":"fixture", "status":"active",
+            "is_active":true, "webhook_registered":true, "webhook_secret_hash":"fixture",
+            "bot_token_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:vec![]},
+            "created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()
+        }).unwrap();
+        let mut source: ChannelMessage = bson::from_document(bson::doc! {
+            "_id":"source", "channel_bot_id":&bot.id, "user_id":&bot.user_id,
+            "direction":"inbound", "platform":"discord", "conversation_id":"route",
+            "platform_conversation_id":"321", "sender_platform_id":"666", "content_type":"text",
+            "guest_transport_audience":"shared", "created_at":bson::DateTime::now()
+        })
+        .unwrap();
+        let mut document = bson::to_document(&source).unwrap();
+        document.remove("guest_transport_shared_room_verified");
+        let legacy: ChannelMessage = bson::from_document(document).unwrap();
+        assert!(!stored_facts(&bot, &legacy, "321", "666", None).shared_room_verified);
+        raw["channel"] = json!({"id":"321","type":3});
+        source.guest_transport_shared_room_verified =
+            facts("discord", "999", &parsed("discord", &raw).await).shared_room_verified;
+        assert!(stored_facts(&bot, &source, "321", "666", None).shared_room_verified);
+        assert!(!stored_facts(&bot, &source, "322", "666", None).shared_room_verified);
+        assert!(!stored_facts(&bot, &source, "321", "667", None).shared_room_verified);
+        assert!(!stored_facts(&bot, &source, "321", "666", Some("thread")).shared_room_verified);
+    }
+
     #[tokio::test]
     async fn channel_guest_transport_lark_and_feishu_bind_app_and_open_id() {
         let mut raw = json!({
@@ -401,6 +615,7 @@ mod tests {
         }
         raw["event"]["message"]["chat_type"] = json!("group");
         let group = parsed("feishu", &raw).await;
+        assert!(facts("feishu", "cli_bot", &group).shared_room_verified);
         assert_eq!(
             facts("feishu", "cli_bot", &group).audience,
             AnswerAudience::Shared

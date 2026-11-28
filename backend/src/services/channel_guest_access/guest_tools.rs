@@ -198,7 +198,7 @@ fn sheets_guidance(action: &str) -> String {
         )
     } else {
         format!(
-            "Append exactly one nonempty row in body.values with valueInputOption=RAW and insertDataOption=INSERT_ROWS once each. In a shared room, use the authorized named tab and column range, such as Sheet1!A:H, with up to {columns} columns. The write needs an effective approval policy that permits it, live grants and Google access. Google chooses placement within the tab."
+            "Append exactly one nonempty row in body.values with valueInputOption=RAW and insertDataOption=INSERT_ROWS once each. In a verified shared room, use the authorized named tab and column range, such as Sheet1!A:H, with up to {columns} columns. The write needs an effective approval policy that permits it, live grants and Google access. Google chooses placement within the tab."
         )
     }
 }
@@ -270,6 +270,7 @@ pub(crate) fn project_sheets_discovery(
                 }
             }
         }
+        tool.input_schema["additionalProperties"] = json!(false);
     }
 }
 
@@ -618,6 +619,7 @@ mod tests {
                     assurance: GuestAssurance::ProviderVerified,
                 },
                 audience: AnswerAudience::Shared,
+                shared_room_verified: true,
                 policy_revision: 3,
                 activation_epoch: 2,
                 bot_revision: 1,

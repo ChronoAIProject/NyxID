@@ -291,8 +291,11 @@ restriction for an append. Enrolled hosted bots using **Use guest access v1**
 also require exact resource grants and the narrower read and single-row append
 contract in the [channel guest access specification](CHANNEL_BOT_GUEST_ACCESS_SPEC.md#runtime-contract).
 Their tool list and search describe that contract on both Google Workspace and
-standalone Sheets, including when compact search omits the schema. Example
-ranges in discovery do not identify an authorized workbook or tab. If guests
+standalone Sheets, including when compact search omits the schema. Appends
+require positive authenticated shared-room evidence; a private or unknown room,
+or a legacy persisted shared audience alone, cannot supply it. Large authorized
+reads use the same exact-turn continuation reader as other service results.
+Example ranges in discovery do not identify an authorized workbook or tab. If guests
 should append questions, use an effective
 organization policy that allows that `POST` and path as a write without an
 approval prompt. Keep approval requirements for other writes in place. The

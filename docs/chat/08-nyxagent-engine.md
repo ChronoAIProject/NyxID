@@ -1364,7 +1364,12 @@ Google Docs `docs_get_document` (including `includeTabsContent=true`) and Drive
 
 Part reads are native, read-only and idempotent: no downstream re-call, billing,
 or action card in any access mode. Specialist guests can read only their own
-original result; NyxBot guests remain unable to call tools. Encrypted snapshots
+original result. Enrolled channel guest specialists discover the continuation
+reader in both `tools/list` and `nyx__search_tools`, with the same direct and
+wrapped call availability and paging instructions. Their restricted native
+allowlist excludes the owner resource reader. The original guest policy revision
+and enrollment remain live checks for every part. NyxBot guests remain unable
+to call tools. Encrypted snapshots
 bind the owner, authenticated actor, conversation, exact turn, key/authority fence,
 agent and guest lane. Reads recheck live authority and expiry before decryption
 and delivery. A Stop, ended/expired turn, changed key, removed participant or

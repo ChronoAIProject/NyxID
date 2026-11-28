@@ -23,6 +23,23 @@ pub(super) async fn start_guest_with_audience(
     event: &str,
     audience: AnswerAudience,
 ) -> crate::services::assistant_acknowledgement_service::ChatAuthority {
+    Box::pin(start_guest_with_evidence(
+        f,
+        sender,
+        event,
+        audience,
+        audience == AnswerAudience::Shared,
+    ))
+    .await
+}
+
+pub(super) async fn start_guest_with_evidence(
+    f: &crate::services::assistant_authority_tests::Fixture,
+    sender: &str,
+    event: &str,
+    audience: AnswerAudience,
+    shared_room_verified: bool,
+) -> crate::services::assistant_acknowledgement_service::ChatAuthority {
     use crate::models::{
         assistant_conversation::{
             COLLECTION_NAME as CONVERSATIONS, ChannelOrigin, ChannelTurnContext, TurnOrigin,
@@ -47,6 +64,7 @@ pub(super) async fn start_guest_with_audience(
             source_event_id: event,
             sender_id: Some(sender),
             audience,
+            shared_room_verified,
             meta_grant_id: None,
         },
     )
@@ -121,6 +139,29 @@ pub(super) async fn start_guest_with_audience(
     .await
     .unwrap();
     chat_for_row(&f.state, &f.owner, &row).await
+}
+
+/// Model an existing server-authored Shared turn from before room proof existed.
+pub(super) async fn legacy_shared_evidence(
+    db: &mongodb::Database,
+    chat: &crate::services::assistant_acknowledgement_service::ChatAuthority,
+) {
+    let turn = chat.channel_guest.as_ref().unwrap();
+    assert!(!turn.shared_room_verified);
+    assert_eq!(
+        db.collection::<Document>(super::WORK)
+            .update_one(
+                doc! {"turn.bot_id":&turn.bot_id,"turn.source_event_id":&turn.source_event_id},
+                doc! {"$unset":{"turn.shared_room_verified":""}}
+            )
+            .await
+            .unwrap()
+            .matched_count,
+        1
+    );
+    assert_eq!(db.collection::<Document>(crate::models::assistant_conversation::COLLECTION_NAME).update_one(
+        doc!{"_id":&chat.conversation_id,"active_turn.turn_id":&chat.turn_id},
+        doc!{"$unset":{"active_turn.channel_guest.shared_room_verified":"","active_turn.channel_context.channel_guest.shared_room_verified":""}}).await.unwrap().matched_count,1);
 }
 
 pub(super) async fn mcp_response(

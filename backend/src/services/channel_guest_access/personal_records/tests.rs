@@ -49,6 +49,7 @@ fn permit(
             assurance: GuestAssurance::ProviderVerified,
         },
         audience,
+        shared_room_verified: false,
         policy_revision: 1,
         activation_epoch: 1,
         bot_revision: 1,

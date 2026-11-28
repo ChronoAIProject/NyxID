@@ -2584,6 +2584,8 @@ async fn handle_tools_list(
                     definition.name.as_str(),
                     "nyx__search_tools" | "nyx__call_tool"
                 )
+                || (definition.name == crate::services::assistant_tool_result_service::TOOL_NAME
+                    && retained_results::chat(auth).is_some())
                 || mcp_service::resolve_tool_call(&definition.name, &services).is_some()
         });
         match Box::pin(guest_tools::definitions(
@@ -3315,6 +3317,8 @@ async fn dispatch_tools_call(
         }
         if !matches!(tool_name, "nyx__search_tools" | "nyx__call_tool")
             && !guest_sheets_tool_name(tool_name)
+            && !(tool_name == crate::services::assistant_tool_result_service::TOOL_NAME
+                && retained_results::chat(auth).is_some())
         {
             return guest_refused(request.id.clone());
         }
@@ -5827,7 +5831,9 @@ async fn handle_meta_call_tool(
         {
             return response;
         }
-        if !guest_sheets_tool_name(tool_name) || result_query.is_some() {
+        let retained_read = tool_name == crate::services::assistant_tool_result_service::TOOL_NAME
+            && retained_results::chat(auth).is_some();
+        if (!guest_sheets_tool_name(tool_name) && !retained_read) || result_query.is_some() {
             return guest_refused(request_id);
         }
     }
@@ -6481,7 +6487,13 @@ async fn handle_meta_search(
             .as_ref()
             .is_some_and(|chat| !chat.guest || !chat.is_orchestrator())
         {
-            candidates.push(crate::services::assistant_resource_service::definition());
+            if auth
+                .chat
+                .as_ref()
+                .is_some_and(|chat| chat.channel_guest.is_none())
+            {
+                candidates.push(crate::services::assistant_resource_service::definition());
+            }
             if retained_results::chat(auth).is_some() {
                 candidates.push(crate::services::assistant_tool_result_service::definition());
             }

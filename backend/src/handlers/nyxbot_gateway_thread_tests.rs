@@ -1179,6 +1179,33 @@ async fn hosted_guest_follow_keeps_the_ordinary_child_and_binds_the_original_sou
         .find(|row| guest::is_hosted_conversation(&row.id))
         .expect("hosted followed conversation");
     assert!(guest.guest_turn);
+    let turn = crate::services::channel_guest_access::admitted_turn(
+        &f.state.db,
+        &f.row.channel_bot_id,
+        &f.row.id,
+        &f.row.platform,
+        &f.state
+            .db
+            .collection::<NyxbotEvent>(EVENTS)
+            .find_one(doc! {"channel_id":&f.row.id,"event_id":&event_id})
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    // This personal follow fixture has no provider identity evidence. Its
+    // event-scoped actor still retains the authorized original-source read path.
+    assert_eq!(turn.actor.assurance, guest::GuestAssurance::Unverified);
+    assert!(turn.matches_sender("ou_visitor"));
+    let mut wrong_event = turn.clone();
+    wrong_event.source_event_id = "different-event".into();
+    assert!(!wrong_event.matches_sender("ou_visitor"));
+    let mut wrong_actor = turn.clone();
+    wrong_actor.actor.id = "different-actor".into();
+    assert!(!wrong_actor.matches_sender("ou_visitor"));
     let origin = guest.channel.as_ref().unwrap();
     let authorized = follow::validate_delivery(&f.state.db, OWNER, origin, &guest.id)
         .await

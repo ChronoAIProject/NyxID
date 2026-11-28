@@ -1,6 +1,9 @@
 use super::{
     AnswerAudience, policy,
-    test_support::{mcp_request, seeded_tools_list, start_guest_with_audience},
+    test_support::{
+        legacy_shared_evidence, mcp_request, seeded_tools_list, start_guest_with_audience,
+        start_guest_with_evidence,
+    },
 };
 use crate::{
     models::channel_guest_policy::GuestDataPolicy, services::channel_guest_access::google_sheets,
@@ -80,6 +83,7 @@ fn assert_read_schema(read: &Value) {
 
 fn assert_append_schema(append: &Value) {
     let schema = &append["inputSchema"];
+    assert_eq!(schema["additionalProperties"], false);
     let properties = &schema["properties"];
     assert_eq!(properties["valueInputOption"]["enum"], json!(["RAW"]));
     assert_eq!(
@@ -319,6 +323,7 @@ async fn enrolled_sheets_discovery_guides_both_catalogs_and_preserves_ordinary_t
             let long_label = catalog_label(slug);
             let name = format!("{slug}__sheets_append_values");
             let append = tool(&list, &name);
+            assert!(append["inputSchema"].get("additionalProperties").is_none());
             let properties = &append["inputSchema"]["properties"];
             assert_eq!(
                 properties["valueInputOption"]["enum"],
@@ -407,13 +412,18 @@ async fn enrolled_sheets_discovery_guides_both_catalogs_and_preserves_ordinary_t
         .await
         .unwrap();
 
-    for audience in [AnswerAudience::Shared, AnswerAudience::Private] {
-        let source = if audience == AnswerAudience::Shared {
-            "shared"
-        } else {
-            "private"
-        };
-        let chat = Box::pin(start_guest_with_audience(&f, source, source, audience)).await;
+    for (source, audience, proof) in [
+        ("shared", AnswerAudience::Shared, true),
+        ("private", AnswerAudience::Private, false),
+        ("ambiguous", AnswerAudience::Shared, false),
+    ] {
+        let chat = Box::pin(start_guest_with_evidence(
+            &f, source, source, audience, proof,
+        ))
+        .await;
+        if source == "ambiguous" {
+            legacy_shared_evidence(db, &chat).await;
+        }
         let key = credentials::load_for_conversation(
             db,
             &f.state.encryption_keys,
@@ -439,7 +449,7 @@ async fn enrolled_sheets_discovery_guides_both_catalogs_and_preserves_ordinary_t
                     .any(|tool| tool["name"] == format!("{slug}__sheets_update_values"))
             );
             let append_name = format!("{slug}__sheets_append_values");
-            if audience == AnswerAudience::Private {
+            if !proof {
                 assert!(
                     !list["tools"]
                         .as_array()
@@ -515,5 +525,10 @@ async fn enrolled_sheets_discovery_guides_both_catalogs_and_preserves_ordinary_t
         }
     }
     assert_effective_approval(db, &f.owner, &catalog_ids).await;
+    Box::pin(super::sheets_runtime_tests::exercise(
+        &f,
+        &chat.conversation_id,
+    ))
+    .await;
     db.drop().await.unwrap();
 }

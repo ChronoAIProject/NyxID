@@ -6,6 +6,9 @@ use crate::services::{feature_flag_service as flags, org_channel_service as org}
 #[path = "nyxbot_org_context_tests.rs"]
 mod context_2187;
 
+#[path = "nyxbot_org_followed_guest_tests.rs"]
+mod enrolled_follow;
+
 #[tokio::test]
 async fn org_channel_transport_moves_wait_for_member_and_guest_execution_actors() {
     let (state, _, server) = setup("org_channel_move_active_actors").await;
@@ -548,22 +551,24 @@ async fn ensure_org_partition(state: &AppState, key: &str) {
 
 #[tokio::test]
 async fn org_channel_cold_guest_model_setup_and_real_platform_model_bill_only_the_org() {
-    Box::pin(cold_guest_model_setup(false, false)).await;
+    Box::pin(cold_guest_model_setup(false, false, false)).await;
 }
 
 #[tokio::test]
 async fn native_discord_notification_releases_org_guest_for_next_paid_answer() {
-    Box::pin(cold_guest_model_setup(true, false)).await;
+    Box::pin(cold_guest_model_setup(true, false, false)).await;
 }
 
 #[tokio::test]
 async fn nyxbot_guest_runtime_organization_specialist_uses_cold_setup_and_org_billing() {
-    Box::pin(cold_guest_model_setup(false, true)).await;
+    Box::pin(cold_guest_model_setup(false, true, false)).await;
 }
 
-async fn cold_guest_model_setup(native: bool, addon: bool) {
+async fn cold_guest_model_setup(native: bool, addon: bool, followed: bool) {
     use tower::ServiceExt;
-    let db_name = if addon {
+    let db_name = if followed {
+        "org_guest_discord_enrolled_follow"
+    } else if addon {
         "org_channel_cold_model_addon"
     } else if native {
         "org_guest_discord_deleted"
@@ -643,8 +648,10 @@ async fn cold_guest_model_setup(native: bool, addon: bool) {
     let observations: Calls = Default::default();
     let sink = observations.clone();
     let db = state.db.clone();
+    let (_, mcp_router) = crate::routes::build_router_with_state(state.clone());
+    let mcp_router = mcp_router.with_state(state.clone());
     let upstream=Router::new().route("/v1/responses",post(move |headers:HeaderMap,Json(body):Json<Value>| {
-        let callbacks=callbacks.clone();let sink=sink.clone();let db=db.clone();
+        let callbacks=callbacks.clone();let sink=sink.clone();let db=db.clone();let mcp_router=mcp_router.clone();
         async move {
             // Setup may stop its engine response as soon as model admission succeeds.
             // Let the simulated provider finish and record settlement after that disconnect.
@@ -652,12 +659,15 @@ async fn cold_guest_model_setup(native: bool, addon: bool) {
             let bearer=headers["authorization"].clone();
             let (_,key,_)=key_service::validate_api_key(&db,bearer.to_str().unwrap().strip_prefix("Bearer ").unwrap()).await.unwrap();
             let conversation=db.collection::<AssistantConversation>(CONVERSATIONS).find_one(doc!{"credential_api_key_id":&key.id}).await.unwrap().unwrap();
+            let discovery = if followed && conversation.guest_turn {
+                enrolled_follow::live_discovery(mcp_router,&db,&conversation,bearer.clone()).await
+            } else {Value::Null};
             let response=callbacks.oneshot(axum::http::Request::builder().method("POST").uri("/api/v1/proxy/s/fixture-model/responses")
                 .header("authorization",bearer).header("content-type","application/json").header("accept","*/*")
                 .body(Body::from(json!({"model":"fixture-model","store":false,"input":body["input"],"stream":false}).to_string())).unwrap()).await.unwrap();
             let status=response.status();let bytes=axum::body::to_bytes(response.into_body(),1024*1024).await.unwrap();
             sink.lock().await.push(json!({"actor":conversation.user_id,"setup":conversation.guest_model_setup,"guest":conversation.guest_turn,"status":status.as_u16(),"body":String::from_utf8_lossy(&bytes),
-                 "contexts":turn_context_tests::contexts(&body),"input":body["input"],
+                 "discovery":discovery,"conversation_id":conversation.id,"api_key_id":key.id,"contexts":turn_context_tests::contexts(&body),"input":body["input"],
                 "instructions":body["instructions"], "persisted_context":conversation.active_turn.as_ref().unwrap().channel_context}));
             let session=format!("conv_{}",Uuid::new_v4().simple());
             let event=json!({"type":"response.completed","sequence_number":0,"response":{"id":format!("resp_{}_{}",&session[5..],Uuid::new_v4().simple()),
@@ -706,11 +716,79 @@ async fn cold_guest_model_setup(native: bool, addon: bool) {
         .await
         .unwrap();
     assert_eq!(settings["health"]["action"], "enable_billing");
+    let discord = if followed {
+        Some(wiremock::MockServer::start().await)
+    } else {
+        None
+    };
+    let _discord_guard =
+        followed.then(|| native_tests::NativeDiscordFixtureGuard(row.channel_bot_id.clone()));
+    if let Some(discord) = &discord {
+        native_tests::enable_thread_follow(&state).await;
+        crate::services::nyxbot_gateway_source::TEST_DISCORD_BASES
+            .lock()
+            .unwrap()
+            .insert(row.channel_bot_id.clone(), discord.uri());
+        thread_follow::TEST_ADAPTERS.lock().unwrap().insert(
+            row.channel_bot_id.clone(),
+            Arc::new(
+                crate::services::channel_adapters::discord::DiscordAdapter::media_test_adapter(
+                    &discord.uri(),
+                ),
+            ),
+        );
+        wiremock::Mock::given(wiremock::matchers::path("/channels/201"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(json!({"id":"201","type":11,"parent_id":"200","guild_id":"300","thread_metadata":{"archived":false,"locked":false}}))).mount(&discord).await;
+        wiremock::Mock::given(wiremock::matchers::path("/channels/201/messages"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(json!([])))
+            .mount(&discord)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::path_regex("^/channels/201/messages/[0-9]+$"))
+            .respond_with(|r:&wiremock::Request| {
+                let id=r.url.path().rsplit('/').next().unwrap();
+                wiremock::ResponseTemplate::new(200).set_body_json(json!({"id":id,"channel_id":"201","type":0,
+                    "author":{"id":"8","bot":false},"content":if id=="501" {"Hello without billing"} else {"Hello, first visitor"},
+                    "mentions":[{"id":"100"}],"mention_roles":[],"mention_everyone":false,"attachments":[]}))
+            }).mount(&discord).await;
+        let parent = chats::record_chat(
+            &state,
+            &row,
+            &chats::group_partition("200", None),
+            &chats::ChatFacts {
+                kind: "group",
+                chat_id: "200".into(),
+                thread_id: None,
+                owner: false,
+                title: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            state
+                .db
+                .collection::<bson::Document>(THREADS)
+                .update_one(
+                    doc! {"_id":&parent.id},
+                    doc! {"$set":{"members":"everyone","reply_mode":"mention","threads":"follow"}}
+                )
+                .await
+                .unwrap()
+                .matched_count,
+            1
+        );
+    }
     let message = |id: &str, text: &str| {
         if native {
             let mut request = native_tests::native_event(&row, id, text);
             request["event_context"]["activity"]["actor"]["id"] = json!("8");
             request["metadata"]["cmaeg.actor"] = json!("8");
+            if followed {
+                request["event_context"]["activity"]["conversation"] =
+                    json!({"kind":"group","id":"201","thread_id":"201"});
+                request["event_context"]["activity"]["kind"]["mentions_bot"] = json!(true);
+            }
             request
         } else {
             event(text, "7", id)
@@ -736,7 +814,7 @@ async fn cold_guest_model_setup(native: bool, addon: bool) {
         );
     }
     state.billing.ensure_wallet(&org_id).await.unwrap();
-    if native {
+    if native && !followed {
         let delete = native_tests::deletion(&row, "501", "8");
         let accepted = respond(&state, &key, &delete, "guest-delete").await;
         assert_eq!(accepted.status(), StatusCode::OK);
@@ -801,7 +879,10 @@ async fn cold_guest_model_setup(native: bool, addon: bool) {
         row.channel_bot_id
     );
     assert_eq!(contexts[0]["sender"]["classification"], "org_guest");
-    assert_eq!(contexts[0]["conversation"]["kind"], "private");
+    assert_eq!(
+        contexts[0]["conversation"]["kind"],
+        if followed { "group" } else { "private" }
+    );
     assert_eq!(
         seen[1]["persisted_context"]["channel_bot_id"],
         row.channel_bot_id
@@ -866,6 +947,9 @@ async fn cold_guest_model_setup(native: bool, addon: bool) {
         0,
         "transport principal must not become a payer"
     );
+    if followed {
+        Box::pin(enrolled_follow::assertions(&state, &row, &org_id, &seen[1])).await;
+    }
     server.abort();
     state.db.drop().await.unwrap();
 }
