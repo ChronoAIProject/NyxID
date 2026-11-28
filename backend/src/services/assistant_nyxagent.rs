@@ -3895,6 +3895,7 @@ pub(crate) async fn begin_owner_turn_in_session(
             .as_ref()
             .map(|retry| retry.digests.clone())
             .unwrap_or_default(),
+        retry_match: retry.as_ref().map(|retry| retry.matches.clone()),
         retry_of: start.retry_of.clone(),
         running_response: None,
         channel_event_id: start.channel_event_id.clone(),
@@ -7128,6 +7129,7 @@ const RETRY_NOTE_CHARS: usize = 6000;
 pub struct RetryContext {
     pub(crate) execution_task: Option<crate::models::execution_permission::TaskAdmission>,
     pub digests: Vec<String>,
+    pub matches: crate::models::assistant_conversation::RetryMatch,
     pub attachments: Vec<crate::models::assistant_conversation::TurnAttachment>,
     pub note: String,
     pub text: String,
@@ -7249,6 +7251,7 @@ fn retry_evidence(
         chain.push(ancestor);
     }
     let mut digests = Vec::new();
+    let mut matches = crate::models::assistant_conversation::RetryMatch::default();
     let mut completed_labels = Vec::new();
     let mut completed_keys = std::collections::HashSet::new();
     for turn in &chain {
@@ -7269,13 +7272,36 @@ fn retry_evidence(
                 .as_deref()
                 .filter(|digest| !digest.is_empty())
                 .ok_or("activity_evidence_incomplete")?;
+            let identity = activity.retry_identity.as_deref().filter(|d| !d.is_empty());
             if !digests.iter().any(|seen| seen == digest) {
                 digests.push(digest.to_owned());
             }
-            if let Some(identity) = activity.retry_identity.as_deref().filter(|d| !d.is_empty())
+            if let Some(identity) = identity
                 && !digests.iter().any(|seen| seen == identity)
             {
                 digests.push(identity.to_owned());
+            }
+            if let Some(identity) = identity.filter(|value| value.starts_with("v2:")) {
+                matches.identities.push(identity.to_owned());
+            } else {
+                matches.historical_digests.push(digest.to_owned());
+                if let Some(identity) = identity {
+                    matches.historical_digests.push(identity.to_owned());
+                }
+                // A legacy provider activity retains hashes, not the decoded
+                // request. Ignored wrapper extras cannot be reconstructed.
+                if matches!(
+                    activity.label.as_str(),
+                    "tool" | "service_tool" | "nyx__call_tool"
+                ) {
+                    matches.provider_review_required = true;
+                } else if !super::assistant_continuation::native_activity_names()
+                    .contains(&activity.label)
+                {
+                    matches
+                        .historical_provider_tools
+                        .push(activity.label.clone());
+                }
             }
             if completed_keys.insert(digest) {
                 completed_labels.push(activity.label.clone());
@@ -7307,6 +7333,7 @@ fn retry_evidence(
             task
         }),
         digests,
+        matches,
         attachments: input.attachments.clone(),
         note: excerpt(&note, RETRY_NOTE_CHARS),
         text: input.text.clone(),
@@ -7597,7 +7624,10 @@ pub async fn retry_duplicate(
     turn_id: &str,
     digest: &str,
 ) -> AppResult<bool> {
-    retry_duplicate_any(db, user_id, conversation_id, turn_id, &[digest]).await
+    retry_duplicate_any(db, user_id, conversation_id, turn_id, digest, None, || {
+        vec![digest.to_owned()]
+    })
+    .await
 }
 
 pub async fn retry_duplicate_any(
@@ -7605,18 +7635,65 @@ pub async fn retry_duplicate_any(
     user_id: &str,
     conversation_id: &str,
     turn_id: &str,
-    digests: &[&str],
+    identity: &str,
+    provider_tool: Option<&str>,
+    historical: impl FnOnce() -> Vec<String>,
 ) -> AppResult<bool> {
-    Ok(db
+    let row = db
         .collection::<bson::Document>(CONVERSATIONS)
         .find_one(doc! {
             "_id": conversation_id, "user_id": user_id,
             "active_turn.turn_id": turn_id,
-            "active_turn.retry_digests": {"$in": digests},
         })
-        .projection(doc! {"_id": 1})
-        .await?
-        .is_some())
+        .projection(doc! {"active_turn.retry_digests":1,"active_turn.retry_match":1})
+        .await?;
+    let Some(turn) = row
+        .as_ref()
+        .and_then(|row| row.get_document("active_turn").ok())
+    else {
+        return Ok(false);
+    };
+    let (identities, old, review) = match turn.get("retry_match") {
+        Some(bson::Bson::Document(value)) => {
+            let value: crate::models::assistant_conversation::RetryMatch =
+                bson::from_document(value.clone())
+                    .map_err(|_| AppError::Internal("Invalid retry evidence".into()))?;
+            let review = value.provider_review_required
+                || provider_tool.is_some_and(|name| {
+                    value.historical_provider_tools.iter().any(|label| {
+                        name == label
+                            || (label.chars().count() == MAX_ACTIVITY_LABEL_CHARS
+                                && name.starts_with(label))
+                    })
+                });
+            (value.identities, value.historical_digests, review)
+        }
+        None | Some(bson::Bson::Null) => {
+            let old = turn
+                .get_array("retry_digests")
+                .ok()
+                .into_iter()
+                .flatten()
+                .filter_map(|value| value.as_str().map(str::to_owned))
+                .collect::<Vec<_>>();
+            let review = !old.is_empty();
+            (vec![], old, review)
+        }
+        _ => return Err(AppError::Internal("Invalid retry evidence".into())),
+    };
+    if identities.iter().any(|value| value == identity) {
+        return Ok(true);
+    }
+    if !old.is_empty() {
+        let candidates = historical();
+        if candidates.iter().any(|value| old.contains(value)) {
+            return Ok(true);
+        }
+    }
+    if provider_tool.is_some() && review {
+        return Err(AppError::Conflict("Historical provider effects cannot be distinguished from this request. Review completed actions before starting new work; no provider call was sent.".into()));
+    }
+    Ok(false)
 }
 
 /// Record a refused duplicate on the live turn. It is listed as completed:
@@ -7629,6 +7706,7 @@ pub async fn record_retry_duplicate(
     turn_id: &str,
     label: &str,
     digest: &str,
+    retry_identity: Option<&str>,
 ) -> AppResult<()> {
     let now = bson::DateTime::now();
     let label: String = label.chars().take(MAX_ACTIVITY_LABEL_CHARS).collect();
@@ -7636,6 +7714,7 @@ pub async fn record_retry_duplicate(
         "id": Uuid::new_v4().to_string(),
         "label": label,
         "digest": digest,
+        "retry_identity": retry_identity,
         "status": "completed",
         // Retain the completed digest for retry ancestry, but make clear this
         // turn did not execute the action again. Additive metadata for readers.

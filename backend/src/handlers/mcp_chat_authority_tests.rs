@@ -16,6 +16,8 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
+#[path = "mcp_retry_defensive_tests.rs"]
+mod retry_defensive;
 #[path = "mcp_skill_source_tests.rs"]
 mod skill_source;
 

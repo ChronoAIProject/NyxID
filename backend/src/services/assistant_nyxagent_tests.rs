@@ -1658,6 +1658,7 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
             external_check_started: false,
             checking_notice_claimed: false,
             retry_digests: Vec::new(),
+            retry_match: None,
             retry_of: None,
             activity_count: None,
             running_response: None,
@@ -3646,6 +3647,7 @@ async fn turn_activities_are_metadata_only_bounded_and_retained_on_the_reply() {
         &old_turn_id,
         "stale__call",
         "stale-digest",
+        None,
     )
     .await
     .unwrap();
@@ -3654,9 +3656,17 @@ async fn turn_activities_are_metadata_only_bounded_and_retained_on_the_reply() {
     assert_eq!(turn.activity_total, 1);
     assert_eq!(turn.activity_count, Some(1));
     assert_eq!(turn.activities.len(), 1);
-    record_retry_duplicate(&db, &owner, &row.id, &turn.turn_id, "$$ROOT", "$digest")
-        .await
-        .unwrap();
+    record_retry_duplicate(
+        &db,
+        &owner,
+        &row.id,
+        &turn.turn_id,
+        "$$ROOT",
+        "$digest",
+        None,
+    )
+    .await
+    .unwrap();
     let after_duplicate = get(&db, &owner, &row.id)
         .await
         .unwrap()

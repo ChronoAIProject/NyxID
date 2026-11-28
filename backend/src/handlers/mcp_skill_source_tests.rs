@@ -829,3 +829,88 @@ async fn skill_read_recovery_targeted_pins_are_live_bounded_and_retry_reads_only
     assert!(revoked.get("pin").is_none());
     f.state.db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn skill_readback_authorizes_before_first_use_profile_creation() {
+    let f =
+        crate::services::assistant_authority_tests::direct_fixture("pin_readback_first_use").await;
+    let agents = f
+        .state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME);
+    // A direct specialist may exist before the acting person's personal NyxBot
+    // (e.g. an org specialist). Removing the fixture's personal profile models
+    // that first-use state without changing the live specialist/key/turn.
+    agents
+        .delete_many(doc! {"user_id":&f.owner,"kind":"nyxbot"})
+        .await
+        .unwrap();
+    let auth = authenticate(&f).await;
+    let skill = uuid::Uuid::new_v4().to_string();
+    let current = team::agent(&f.state.db, &f.owner, &f.chat.agent_id)
+        .await
+        .unwrap();
+    let mut other = current.clone();
+    other.id = uuid::Uuid::new_v4().to_string();
+    other.name = "other-specialist".into();
+    agents
+        .insert_one(bson::to_document(&other).unwrap())
+        .await
+        .unwrap();
+    let before = agents.count_documents(doc! {}).await.unwrap();
+    for wrapped in [false, true] {
+        for selector in [
+            "nyxbot".to_owned(),
+            "NyxBot".to_owned(),
+            " ".to_owned(),
+            other.id.clone(),
+            other.name.clone(),
+            "missing-specialist".to_owned(),
+            uuid::Uuid::new_v4().to_string(),
+        ] {
+            for targeted in [false, true] {
+                let mut args = json!({"agent":selector});
+                if targeted {
+                    args["skill_id"] = json!(skill);
+                }
+                let response = if wrapped {
+                    call(&f, &auth, "nyxid__get_agent_skills", args).await
+                } else {
+                    direct_call(&f, &auth, "nyxid__get_agent_skills", args).await
+                };
+                let refused = result(response, true).await;
+                assert!(refused.get("pin").is_none());
+                assert!(refused.get("skills").is_none());
+                assert_eq!(agents.count_documents(doc! {}).await.unwrap(), before);
+                assert_eq!(
+                    agents
+                        .count_documents(doc! {"user_id":&f.owner,"kind":"nyxbot"})
+                        .await
+                        .unwrap(),
+                    0
+                );
+            }
+        }
+        for selector in [&current.id, &current.name] {
+            let args = json!({"agent":selector,"skill_id":skill});
+            let response = if wrapped {
+                call(&f, &auth, "nyxid__get_agent_skills", args).await
+            } else {
+                direct_call(&f, &auth, "nyxid__get_agent_skills", args).await
+            };
+            let own = bounded(response, false).await;
+            assert_eq!(own["agent_id"], current.id);
+            assert_eq!(own["complete"], true);
+            assert!(own["pin"].is_null());
+        }
+    }
+    assert_eq!(agents.count_documents(doc! {}).await.unwrap(), before);
+    assert_eq!(
+        agents
+            .count_documents(doc! {"user_id":&f.owner,"kind":"nyxbot"})
+            .await
+            .unwrap(),
+        0
+    );
+    f.state.db.drop().await.unwrap();
+}

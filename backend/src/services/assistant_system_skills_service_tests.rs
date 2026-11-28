@@ -7,6 +7,9 @@ use crate::services::{
 use sha2::{Digest, Sha256};
 use std::io::Write;
 
+#[path = "assistant_system_skills_service_tests/source_defensive.rs"]
+mod source_defensive;
+
 const ID: &str = "00000000-0000-4000-8000-000000000001";
 const DEP: &str = "00000000-0000-4000-8000-000000000002";
 

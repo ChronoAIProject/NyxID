@@ -9,6 +9,31 @@ use mongodb::{
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+pub(crate) fn native_activity_names() -> &'static std::collections::HashSet<String> {
+    static NAMES: std::sync::LazyLock<std::collections::HashSet<String>> =
+        std::sync::LazyLock::new(|| {
+            let mut definitions = super::mcp_service::generate_tool_definitions(&[], None);
+            definitions.extend(crate::services::machine_tools::definitions());
+            definitions.push(crate::services::assistant_resource_service::definition());
+            definitions.push(crate::services::assistant_tool_result_service::definition());
+            definitions.push(crate::services::assistant_upload_service::definition());
+            definitions.push(crate::services::assistant_upload_service::list_definition());
+            definitions
+                .push(crate::services::assistant_nyxagent::conversation_history_definition());
+            let mut names: std::collections::HashSet<String> =
+                definitions.into_iter().map(|tool| tool.name).collect();
+            for name in crate::services::assistant_account_tools::TOOL_NAMES
+                .iter()
+                .chain(crate::services::assistant_team_tools::TOOL_NAMES)
+                .chain(crate::services::assistant_team_tools::AGENT_TOOL_NAMES)
+            {
+                names.insert(format!("nyxid__{name}"));
+            }
+            names
+        });
+    &NAMES
+}
+
 /// Object key order is irrelevant; array order (including call order) is not.
 pub fn canonical_digest(value: &Value) -> String {
     fn canonical(value: &Value) -> Value {

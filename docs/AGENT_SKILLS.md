@@ -109,6 +109,8 @@ The fingerprint binds the calling agent and exact root with its pinned closure,
 across paths and dependencies. Unrelated pin and preload edits do not invalidate
 it. Exact root and dependency GUIDs take precedence over name aliases. The
 bound download carries that selected root and closure through live revalidation.
+An effective built-in GUID is resolved before an attached UUID-shaped alias;
+ordinary file reads, outlines and download authority use that same selected root.
 Every call checks current attachment, access and archive integrity before
 comparing the fingerprint. Source changes return a content-free conflict with
 `details.reason: source_changed`, `complete: false`, `restart_required: true`
@@ -139,6 +141,9 @@ completion. A source or saved-state read that cannot be completed leaves setup
 explicitly incomplete. Large onboarding source
 packages do not expand authored-draft limits or justify an incomplete private copy;
 see [Owner-requested authoring](#owner-requested-authoring).
+Specialists' reserved NyxBot selectors are refused before lookup can create a
+first-use personal NyxBot profile. Self and other ordinary selectors retain
+their existing lookup, liveness and ACL checks.
 
 Skills are external, untrusted guidance. They never alter grants, operation
 scopes, approvals, models or machine permissions. Bundled scripts are text;

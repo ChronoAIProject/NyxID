@@ -1472,7 +1472,14 @@ pub(crate) async fn dispatch(
                 scopes: Some(&agent.operation_scopes),
                 chat: Some(std::sync::Arc::new(chat.clone())),
             };
-            let system = if system::resolve(&agent, None, arg(args, "skill")).is_some() {
+            // A UUID-shaped alias must not hide an exact built-in GUID. Exact
+            // attachments and non-GUID attached aliases can skip this read.
+            let selector = arg(args, "skill");
+            let exact_attachment = agent.skills.iter().any(|pin| pin.skill_id == selector);
+            let system = if exact_attachment
+                || (uuid::Uuid::parse_str(selector).is_err()
+                    && system::resolve(&agent, None, selector).is_some())
+            {
                 None
             } else {
                 system::for_person(db, &chat.user_id, chat.guest).await?
@@ -1511,6 +1518,11 @@ pub(crate) async fn dispatch(
         }
         _ => {
             let target = args["agent"].as_str().unwrap_or("nyxbot");
+            // Reject creation-capable reserved selectors before lookup. Every
+            // ordinary selector still uses the established target ACL/liveness.
+            if !chat.is_orchestrator() && matches!(target.trim(), "" | "nyxbot" | "NyxBot") {
+                return Err(AppError::Forbidden("Specialists may read or request only their own skills; skills are managed for them".into()));
+            }
             let agent = if uuid::Uuid::parse_str(target).is_ok() {
                 team::agent(db, &chat.user_id, target).await?
             } else {

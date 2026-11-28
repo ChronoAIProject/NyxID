@@ -298,7 +298,10 @@ pub(crate) async fn validate_download(
     if agent.destroyed_at.is_some() {
         return Err(denied());
     }
-    let attached = resolve(&agent, None, &root.skill_id);
+    let attached = agent
+        .skills
+        .iter()
+        .find(|pin| !pin.disabled && pin.skill_id == root.skill_id);
     if attached == Some(root) && allows_download(root, path) {
         return Ok(());
     }
