@@ -71,7 +71,7 @@ export function TelegramNew({
   const request = configuration.data?.request;
   const managerUsername = configuration.data?.manager_username;
   const recoveryReadsReady = configuration.isSuccess && configuration.data.available && !link?.recoveryUnavailable
-    && (!link?.isRecoveryCurrent || Boolean(request && link.isRecoveryCurrent(request.id, configuration.dataUpdatedAt)));
+    && (!link?.isRecoveryCurrent || Boolean(request && link.isRecoveryCurrent(request.id, configuration.data.hostedRecoveryGeneration)));
   const requestExpiresAt = request?.expires_at;
   const canOpenCreationForm = request?.can_open_creation_form;
   const [now, setNow] = useState(Date.now);

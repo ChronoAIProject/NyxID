@@ -70,7 +70,7 @@ it("checks submitted-form progress from the actual hosted full-page caller witho
   const reads = mocks.get.mock.calls.filter(([path]) => path === progressPath).length;
   fireEvent.click(progress);
   await waitFor(() => expect(mocks.get.mock.calls.filter(([path]) => path === progressPath).length).toBeGreaterThan(reads));
-  expect(view.client.getQueryData(["telegram-new", "owner", request.id, link.id])).toEqual(config(request));
+  expect(view.client.getQueryData(["telegram-new", "owner", request.id, link.id])).toEqual({ ...config(request), hostedRecoveryGeneration: 0 });
   expect(mocks.post.mock.calls).toEqual([["/channel-connect-links/preview", { token: "nyx_bcl_saved" }]]);
   expect(window.open).not.toHaveBeenCalled();
   expect(view.router.state.location.href).toBe("/connect/bot/nyx_bcl_saved");
@@ -150,7 +150,7 @@ it.each(["cached link", "in-flight response"])("blocks hosted recovery after a s
   });
   expect(await screen.findByText("Hosted status unavailable")).toBeVisible();
   expect(view.client.getQueryState(["telegram-new", "owner", request.id, link.id])?.status).toBe("success");
-  expect(view.client.getQueryData(["telegram-new", "owner", request.id, link.id])).toEqual(config(request));
+  expect(view.client.getQueryData(["telegram-new", "owner", request.id, link.id])).toEqual({ ...config(request), hostedRecoveryGeneration: 0 });
   if (stage === "in-flight response") await act(async () => settle({ request, creation_url: creationUrl }));
   await waitFor(() => expect(screen.getByRole("button", { name: "Open creation form" })).toBeDisabled());
   expect(screen.queryByRole("link", { name: "Open Telegram creation form" })).not.toBeInTheDocument();
@@ -162,10 +162,8 @@ it.each(["cached link", "in-flight response"])("blocks hosted recovery after a s
 
   // A successful saved response from before the hosted failure stays stale even
   // when the hosted query recovers; no cached link or new form is available yet.
-  const hostedErrorAt = view.client.getQueryState(["channel-connect-link", "owner", link.id])!.errorUpdatedAt;
   mocks.get.mockImplementation(async (path: string) => path === "/channel-connect-links/hosted-link" ? link : config(request));
   await act(async () => {
-    view.client.setQueryData(["telegram-new", "owner", request.id, link.id], config(request), { updatedAt: hostedErrorAt });
     await view.client.invalidateQueries({ queryKey: ["channel-connect-link"] });
   });
   await waitFor(() => expect(view.client.getQueryState(["channel-connect-link", "owner", link.id])?.status).toBe("success"));
@@ -196,12 +194,16 @@ it.each(["cached link", "in-flight response"])("blocks hosted recovery after a s
     `/channel-bots/telegram-new/requests/${request.id}/creation-link`,
   ]));
   expect(view.client.getQueryData(["channel-connect-link", "owner", link.id])).toEqual(link);
-  expect(view.client.getQueryData(["telegram-new", "owner", request.id, link.id])).toEqual(config(request));
+  expect(view.client.getQueryData(["telegram-new", "owner", request.id, link.id])).toEqual({ ...config(request),
+    hostedRecoveryGeneration: stage === "in-flight response" ? 2 : 1,
+  });
   expect(view.router.state.location.href).toBe("/connect/bot/nyx_bcl_saved");
   view.client.clear();
 });
 
 it.each(["hosted", "saved"])("discards an in-flight form after %s progress fails and recovers before the POST resolves", async (failedRead) => {
+  const sameClock = Date.now();
+  vi.spyOn(Date, "now").mockReturnValue(sameClock);
   vi.mocked(window.open).mockReturnValue(null);
   const view = mount();
   fireEvent.click(await screen.findByRole("button", { name: "Open creation form" }));
@@ -231,6 +233,8 @@ it.each(["hosted", "saved"])("discards an in-flight form after %s progress fails
   });
   expect(view.client.getQueryState(savedKey)?.status).toBe("success");
   expect(view.client.getQueryState(hostedKey)?.status).toBe("success");
+  expect(view.client.getQueryState(savedKey)?.dataUpdatedAt).toBe(sameClock);
+  expect(view.client.getQueryState(failedKey)?.errorUpdatedAt).toBe(sameClock);
   expect(mocks.replace).not.toHaveBeenCalled();
   await act(async () => settle({ request, creation_url: creationUrl }));
   await waitFor(() => expect(screen.getByRole("button", { name: "Open creation form" })).toBeEnabled());
@@ -246,8 +250,113 @@ it.each(["hosted", "saved"])("discards an in-flight form after %s progress fails
     ["/channel-connect-links/preview", { token: "nyx_bcl_saved" }],
     ...Array(3).fill([`/channel-bots/telegram-new/requests/${request.id}/creation-link`]),
   ]);
-  expect(view.client.getQueryData(savedKey)).toEqual(config(request));
+  expect(view.client.getQueryData(savedKey)).toEqual({ ...config(request), hostedRecoveryGeneration: failedRead === "hosted" ? 1 : 0 });
   expect(view.client.getQueryData(hostedKey)).toEqual(link);
+  expect(view.router.state.location.href).toBe("/connect/bot/nyx_bcl_saved");
+  view.client.clear();
+});
+
+it("distinguishes stale and fresh saved reads after a hosted failure at the same clock value", async () => {
+  const sameClock = Date.now();
+  vi.spyOn(Date, "now").mockReturnValue(sameClock);
+  vi.mocked(window.open).mockReturnValue(null);
+  const view = mount();
+  fireEvent.click(await screen.findByRole("button", { name: "Open creation form" }));
+  expect(await screen.findByRole("link", { name: "Open Telegram creation form" })).toHaveAttribute("href", creationUrl);
+  const hostedKey = ["channel-connect-link", "owner", link.id];
+  const savedKey = ["telegram-new", "owner", request.id, link.id];
+  const savedBeforeFailure = view.client.getQueryState(savedKey)!;
+  mocks.get.mockImplementation(async (path: string) => {
+    if (path === "/channel-connect-links/hosted-link") throw new Error("Hosted status unavailable");
+    return config(request);
+  });
+  await act(() => view.client.invalidateQueries({ queryKey: hostedKey, exact: true }));
+  expect(await screen.findByText("Hosted status unavailable")).toBeVisible();
+  expect(screen.queryByRole("link", { name: "Open Telegram creation form" })).not.toBeInTheDocument();
+  mocks.get.mockImplementation(async (path: string) => path === "/channel-connect-links/hosted-link" ? link : config(request));
+  await act(() => view.client.invalidateQueries({ queryKey: hostedKey, exact: true }));
+  expect(view.client.getQueryState(hostedKey)?.status).toBe("success");
+  expect(view.client.getQueryState(savedKey)?.status).toBe("success");
+  expect(view.client.getQueryState(savedKey)?.dataUpdateCount).toBe(savedBeforeFailure.dataUpdateCount);
+  expect(view.client.getQueryState(savedKey)?.dataUpdatedAt).toBe(sameClock);
+  expect(view.client.getQueryState(hostedKey)?.errorUpdatedAt).toBe(sameClock);
+  expect(screen.getByRole("button", { name: "Open creation form" })).toBeDisabled();
+
+  await act(() => view.client.invalidateQueries({ queryKey: savedKey, exact: true }));
+  expect(view.client.getQueryState(savedKey)?.dataUpdateCount).toBeGreaterThan(savedBeforeFailure.dataUpdateCount);
+  expect(view.client.getQueryState(savedKey)?.dataUpdatedAt).toBe(sameClock);
+  await waitFor(() => expect(screen.getByRole("button", { name: "Open creation form" })).toBeEnabled());
+  expect(screen.queryByRole("link", { name: "Open Telegram creation form" })).not.toBeInTheDocument();
+  expect(mocks.post).toHaveBeenCalledTimes(2);
+  vi.mocked(window.open).mockReturnValue({ opener: null, closed: false, location: { replace: mocks.replace }, close: mocks.close } as unknown as Window);
+  fireEvent.click(screen.getByRole("button", { name: "Open creation form" }));
+  await waitFor(() => expect(mocks.replace).toHaveBeenCalledExactlyOnceWith(creationUrl));
+  expect(screen.getByRole("link", { name: "Open Telegram creation form" })).toHaveAttribute("href", creationUrl);
+  expect(mocks.post.mock.calls).toEqual([
+    ["/channel-connect-links/preview", { token: "nyx_bcl_saved" }],
+    ...Array(2).fill([`/channel-bots/telegram-new/requests/${request.id}/creation-link`]),
+  ]);
+  expect(view.router.state.location.href).toBe("/connect/bot/nyx_bcl_saved");
+  view.client.clear();
+});
+
+it("keeps a saved GET started before a hosted failure stale when its delayed response arrives after recovery", async () => {
+  vi.spyOn(Date, "now").mockReturnValue(Date.now());
+  vi.mocked(window.open).mockReturnValue(null);
+  const view = mount();
+  fireEvent.click(await screen.findByRole("button", { name: "Open creation form" }));
+  expect(await screen.findByRole("link", { name: "Open Telegram creation form" })).toHaveAttribute("href", creationUrl);
+
+  let settleSaved: (value: unknown) => void = () => {};
+  const savedResponse = new Promise((resolve) => { settleSaved = resolve; });
+  let holdSaved = true;
+  let savedStarted = false;
+  let failHosted = false;
+  mocks.get.mockImplementation(async (path: string) => {
+    if (path === "/channel-connect-links/hosted-link") {
+      if (failHosted) throw new Error("Hosted status unavailable");
+      return link;
+    }
+    savedStarted = true;
+    return holdSaved ? savedResponse : config(request);
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Check progress" }));
+  await waitFor(() => expect(savedStarted).toBe(true));
+  failHosted = true;
+  // Foreground refresh retries hosted status without replacing the saved GET
+  // already in flight. Use the same event the query library observes in the app.
+  await act(async () => { window.dispatchEvent(new Event("visibilitychange")); });
+  expect(await screen.findByText("Hosted status unavailable")).toBeVisible();
+  expect(screen.queryByRole("link", { name: "Open Telegram creation form" })).not.toBeInTheDocument();
+  failHosted = false;
+  await act(async () => { window.dispatchEvent(new Event("visibilitychange")); });
+  await waitFor(() => expect(screen.queryByText("Hosted status unavailable")).not.toBeInTheDocument());
+  holdSaved = false;
+  await act(async () => settleSaved(config(request)));
+  await waitFor(() => expect(screen.getByRole("button", { name: "Check progress" })).toBeEnabled());
+  expect(screen.getByRole("button", { name: "Open creation form" })).toBeDisabled();
+  expect(screen.queryByRole("link", { name: "Open Telegram creation form" })).not.toBeInTheDocument();
+  expect(mocks.replace).not.toHaveBeenCalled();
+  expect(mocks.post.mock.calls).toEqual([
+    ["/channel-connect-links/preview", { token: "nyx_bcl_saved" }],
+    [`/channel-bots/telegram-new/requests/${request.id}/creation-link`],
+    ["/channel-connect-links/preview", { token: "nyx_bcl_saved" }],
+    ["/channel-connect-links/preview", { token: "nyx_bcl_saved" }],
+  ]);
+
+  fireEvent.click(screen.getByRole("button", { name: "Check progress" }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "Open creation form" })).toBeEnabled());
+  expect(screen.queryByRole("link", { name: "Open Telegram creation form" })).not.toBeInTheDocument();
+  vi.mocked(window.open).mockReturnValue({ opener: null, closed: false, location: { replace: mocks.replace }, close: mocks.close } as unknown as Window);
+  fireEvent.click(screen.getByRole("button", { name: "Open creation form" }));
+  await waitFor(() => expect(mocks.replace).toHaveBeenCalledExactlyOnceWith(creationUrl));
+  expect(mocks.post.mock.calls).toEqual([
+    ["/channel-connect-links/preview", { token: "nyx_bcl_saved" }],
+    [`/channel-bots/telegram-new/requests/${request.id}/creation-link`],
+    ["/channel-connect-links/preview", { token: "nyx_bcl_saved" }],
+    ["/channel-connect-links/preview", { token: "nyx_bcl_saved" }],
+    [`/channel-bots/telegram-new/requests/${request.id}/creation-link`],
+  ]);
   expect(view.router.state.location.href).toBe("/connect/bot/nyx_bcl_saved");
   view.client.clear();
 });
