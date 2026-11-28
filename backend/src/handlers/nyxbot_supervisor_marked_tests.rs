@@ -1897,9 +1897,13 @@ async fn supervisor_write_marked_autoallow_gap_and_policy_race_refuse_before_pro
             "gap",
             "policy_race",
             "ordinary",
+            "ordinary_empty",
             "node_required",
             "node_optional",
         ] {
+            if proxy && control == "ordinary_empty" {
+                continue;
+            }
             let j = Box::pin(marked_journey(proxy)).await;
             let connection = j
                 .state
@@ -1909,6 +1913,19 @@ async fn supervisor_write_marked_autoallow_gap_and_policy_race_refuse_before_pro
                 .await
                 .unwrap()
                 .unwrap();
+            if control == "ordinary_empty" {
+                let updated = j
+                    .state
+                    .db
+                    .collection::<Document>("user_services")
+                    .update_one(
+                        doc! {"_id":connection.get_str("_id").unwrap(),"user_id":OWNER},
+                        doc! {"$set":{"node_id":""}},
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(updated.modified_count, 1);
+            }
             let rules = if control == "node_required" {
                 vec![ApprovalRule {
                     mandatory_review: false,
@@ -1933,7 +1950,7 @@ async fn supervisor_write_marked_autoallow_gap_and_policy_race_refuse_before_pro
             )
             .await
             .unwrap();
-            if control == "ordinary" || control.starts_with("node_") {
+            if control.starts_with("ordinary") || control.starts_with("node_") {
                 full_access(&j).await;
             }
             let listing = marked_assign(
@@ -1972,10 +1989,30 @@ async fn supervisor_write_marked_autoallow_gap_and_policy_race_refuse_before_pro
                 0,
                 "{control}: no unbound v4 or ordinary approval may be authored"
             );
-            if control == "ordinary" {
+            if control.starts_with("ordinary") {
+                assert_row_report(&report, &j, "Pending", 2);
                 assert_row_report(&report, &j, "Approved", 3);
-                assert_eq!(j.ledger.lock().unwrap().writes.len(), 1);
+                assert_eq!(
+                    j.ledger.lock().unwrap().writes,
+                    [(
+                        j.script.selected.clone(),
+                        json!({"fields":{"Status":"Approved"}})
+                    )]
+                );
                 assert_eq!(j.ledger.lock().unwrap().control, "Untouched");
+                if control == "ordinary_empty" {
+                    assert_eq!(j.state.db.collection::<Document>("user_services")
+                        .count_documents(doc! {"_id":connection.get_str("_id").unwrap(),"user_id":OWNER,"node_id":""})
+                        .await.unwrap(), 1,
+                        "the actual MCP positive must retain its legacy empty-string direct route");
+                    assert!(
+                        !j.observed
+                            .lock()
+                            .await
+                            .iter()
+                            .any(|event| event["stage"] == "assigned_node_refused")
+                    );
+                }
             } else {
                 assert_eq!(report, NO_CONFIRMATION);
                 assert_no_write(&j);

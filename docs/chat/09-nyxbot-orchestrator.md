@@ -314,9 +314,10 @@ covered execution; an independent gap on this assigned operation refuses before
 creating an unbound retained proposal. A classified optional policy also refuses
 an early legacy return that lacks the real final-send protection; its supported
 ordinary path retains that protection. The verified assignment is identified
-before transport eligibility. A node-routed connection for that assignment
-refuses before authoring or dispatch; unrelated node operations retain their
-ordinary approval and routing rules. Historical retained rows without an
+before transport eligibility. Missing, null and legacy empty-string node IDs
+select direct transport; malformed values refuse. A nonempty node pin for that
+assignment refuses before authoring or dispatch; unrelated node operations
+retain their ordinary approval and routing rules. Historical retained rows without an
 authenticated assigning source never infer consent.
 The ordinary fallback described above applies only outside this marked bound.
 

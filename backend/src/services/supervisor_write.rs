@@ -736,8 +736,12 @@ pub(crate) async fn capture_marked(
         .projection(doc! {"_id":1,"node_id":1})
         .await?
         .ok_or_else(refused)?;
-    if !matches!(connection_row.get("node_id"), None | Some(bson::Bson::Null)) {
-        return Err(refused());
+    match connection_row.get("node_id") {
+        None | Some(bson::Bson::Null) => {}
+        // Match direct MCP routing and execution_authority's normalization of
+        // the legacy empty string, while refusing malformed BSON explicitly.
+        Some(bson::Bson::String(id)) if id.is_empty() => {}
+        _ => return Err(refused()),
     }
     if !required && retained.is_none() {
         return Ok(Some(MarkedWrite::Optional));
