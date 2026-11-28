@@ -6,6 +6,7 @@ const PROVIDER_PENDING_NOTICE: &str = "The provider accepted the operation (HTTP
 /// No public request deserializes this object.
 #[derive(Clone)]
 pub struct Resume {
+    pub(super) turn_authority: Option<super::batch::TurnAuthority>,
     pub(crate) connected_wait: Option<Arc<super::v2::blocking::WaitGuard>>,
     pub version: u32,
     pub request_id: String,
@@ -84,6 +85,9 @@ impl Resume {
         let version = AssistantVersion::of(&row)?;
         if version.number() != self.version {
             return Err(conflict());
+        }
+        if let Some(authority) = &self.turn_authority {
+            authority.fence(db, session).await?;
         }
         version.require_serving(db).await?;
         fence_endpoint(db, session, proposal(&row)?).await?;
@@ -211,9 +215,14 @@ pub(crate) async fn resume_turn(
                 notes.push(PROVIDER_PENDING_NOTICE.into());
                 continue;
             }
+            if p.state == "unknown" {
+                notes.push("The operation's outcome is unknown. It will not be sent again.".into());
+                continue;
+            }
             let mut session = state.db.client().start_session().await?;
-            session.start_transaction().and_run((&state.db,id),move |session,(db,id)|Box::pin(async move {
+            session.start_transaction().and_run((&state.db,id,row),move |session,(db,id,row)|Box::pin(async move {
                 let result:AppResult<()>=async {
+                    super::batch::fence_turn(db, session, row).await?;
                     if db.collection::<Document>(REQUESTS).update_one(version.selector(doc!{"_id":*id,"execution_proposal.v1.state":{"$in":["dispatched","unknown"]}}),version.update(doc!{"$set":{"execution_proposal.v1.state":"unknown","execution_proposal.v1.failure_code":"provider_outcome_unknown"},"$unset":Slot::Assistant(version).unset(&[Field::Payload])})).session(&mut *session).await?.matched_count==1 {
                         lifecycle::retire_operations(db,session,&[(*id).to_owned()]).await?;
                     }
@@ -257,19 +266,49 @@ pub(crate) async fn resume_turn(
                 return Err(error);
             }
             let mut session = state.db.client().start_session().await?;
-            session.start_transaction().await?;
-            lifecycle::cancel_in_session(
-                &state.db,
-                &mut session,
-                doc! {"_id":id},
-                "authority_or_task_unavailable",
-            )
-            .await?;
-            session.commit_transaction().await?;
-            notes.push(
+            let cancelled = session
+                .start_transaction()
+                .and_run(
+                    (&state.db, row, &p.task, id),
+                    |session, (db, row, task, id)| {
+                        Box::pin(async move {
+                            let result: AppResult<bool> = async {
+                                super::batch::fence_turn(db, session, row).await?;
+                                match tasks::fence(db, session, task).await {
+                                    Ok(()) => return Ok(false),
+                                    Err(error)
+                                        if error.is_forbidden()
+                                            || matches!(
+                                                error,
+                                                AppError::Conflict(_)
+                                                    | AppError::NotFound(_)
+                                                    | AppError::AssistantTurnRequired
+                                            ) => {}
+                                    Err(error) => return Err(error),
+                                }
+                                lifecycle::cancel_in_session(
+                                    db,
+                                    session,
+                                    doc! {"_id":*id},
+                                    "authority_or_task_unavailable",
+                                )
+                                .await?;
+                                Ok(true)
+                            }
+                            .await;
+                            super::super::super::api_key_mutation_service::transaction_result(
+                                result,
+                            )
+                        })
+                    },
+                )
+                .await
+                .map_err(super::super::super::api_key_mutation_service::map_transaction_error)?;
+            notes.push(if cancelled {
                 "The operation was not sent because its authority or task is no longer available."
-                    .into(),
-            );
+            } else {
+                "The operation remains queued for a fresh authority check; nothing was sent."
+            }.into());
             continue;
         }
         // Optional continuation readiness is resolved only for a marked root
@@ -298,11 +337,16 @@ pub(crate) async fn resume_turn(
         }
         let effect: PreparedEffect = serde_json::from_slice(&raw).map_err(encoding)?;
         let claim_id = Uuid::new_v4().to_string();
-        if !claim_preparation(&state.db, id, &claim_id, &turn.turn_id).await? {
+        #[cfg(test)]
+        if let Ok(hook) = continuation::BEFORE_EFFECT_CLAIM.try_with(Clone::clone) {
+            hook(state.db.clone(), request.clone()).await;
+        }
+        if !claim_preparation(&state.db, id, &claim_id, row).await? {
             notes.push("The approved operation is already being processed.".into());
             continue;
         }
         let resume = Resume {
+            turn_authority: Some(super::batch::TurnAuthority::capture(row)?),
             connected_wait: None,
             version: version.number(),
             source_credential_id: p.source_credential_id.clone(),
@@ -457,9 +501,10 @@ pub(crate) async fn resume_turn(
         }
         let update = doc! {"$set": set, "$unset": unset};
         let mut session = state.db.client().start_session().await?;
-        session.start_transaction().and_run((&state.db,id,&claim_id,&update,state_name),move |session,(db,id,claim,update,state_name)|Box::pin(async move {
+        session.start_transaction().and_run((&state.db,id,&claim_id,&update,state_name,sent,row),move |session,(db,id,claim,update,state_name,sent,row)|Box::pin(async move {
             let result:AppResult<()>=async {
-                if db.collection::<Document>(REQUESTS).update_one(version.selector(doc!{"_id":*id,"execution_proposal.v1.claim_id":*claim,"execution_proposal.v1.delivery_abandoned":{"$ne":true},"execution_proposal.v1.state":{"$in":["preparing","dispatched"]}}),version.update((*update).clone())).session(&mut *session).await?.matched_count!=1{return Err(uncertain());}
+                if !*sent { super::batch::fence_turn(db, session, row).await?; }
+                if db.collection::<Document>(REQUESTS).update_one(version.selector(doc!{"_id":*id,"execution_proposal.v1.claim_id":*claim,"execution_proposal.v1.delivery_abandoned":{"$ne":true},"execution_proposal.v1.state":if *sent {"dispatched"} else {"preparing"}}),version.update((*update).clone())).session(&mut *session).await?.matched_count!=1{return Err(uncertain());}
                 if *state_name!="waiting" {lifecycle::retire_operations(db,session,&[(*id).to_owned()]).await?;}
                 Ok(())
             }.await;
@@ -517,10 +562,17 @@ pub(crate) async fn result_for_human(
 /// Reclaiming a stale preparer also releases its matching one-operation
 /// reservation. Both updates serialize against the old preparer's send CAS:
 /// once dispatched, neither the proposal nor the grant can be reset here.
-async fn claim_preparation(db: &Database, id: &str, claim: &str, turn: &str) -> AppResult<bool> {
+async fn claim_preparation(
+    db: &Database,
+    id: &str,
+    claim: &str,
+    row: &AssistantConversation,
+) -> AppResult<bool> {
+    let turn = &row.active_turn.as_ref().ok_or_else(refused)?.turn_id;
     let mut session = db.client().start_session().await?;
-    session.start_transaction().and_run((db,id,claim,turn),|session,(db,id,claim,turn)|Box::pin(async move {
+    session.start_transaction().and_run((db,id,claim,turn,row),|session,(db,id,claim,turn,row)|Box::pin(async move {
         let result:AppResult<bool>=async {
+            super::batch::fence_turn(db, session, row).await?;
             let filter=doc!{"_id":*id,"status":"approved","$or":[
                 {"execution_proposal.v1.state":"queued"},
                 {"execution_proposal.v1.state":"preparing","execution_proposal.v1.claimed_at":{"$lt":bson::DateTime::from_chrono(Utc::now()-Duration::minutes(2))}}

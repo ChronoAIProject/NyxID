@@ -512,6 +512,20 @@ Concurrent identical resumes reload proof state inside each transaction attempt;
 an already-bound identical group is a successful no-op, while the effect claim
 and provider-send fences still admit one operation.
 
+Preparation, provider reservation/dispatch and pre-send cancellation or retirement
+recheck one captured live turn authority in the same transaction as their effect
+or grant mutation. It binds the worker, execution epoch/claim, semantic task,
+conversation key, model/agent, Stop, database-time turn lease and complete stored
+event set. Reordering and identical duplicate events do not create new authority.
+Worker/event loss is an error, including loss after batch admission; it cannot
+become the optional-readiness fallback or retire another worker's operation grant.
+Only an explicit disabled-enrollment result after this live authority check takes
+the normal not-sent cancellation path. The provider capability carries the same
+captured authority through the actual send barrier. A pre-send refusal result
+also requires that authority and the exact preparing claim before retiring a grant.
+A known dispatched provider receipt retains its exact operation/claim/state fence
+so loss of the conversation lease cannot discard an already confirmed outcome.
+
 Only decisions actually present in the admitted wake enter executable resume.
 Stored sibling IDs are evidence-only reads. A partial wake observing another
 member still queued, preparing or dispatched leaves successful receipts pending;
@@ -536,8 +550,13 @@ unblocked proof. Refusal metadata requires no optional continuation-readiness re
 and also protects unmarked legacy roots without enrolling them in automatic
 continuation. Their approved operations retain the normal single-send receipt
 path. Unsupported source lanes retain their existing admission and resume paths.
-Already released or delivered observations cannot join a new launch;
-independent new proofs remain pending for their own recovery. Historical
+A known successful released or delivered observation stays outside a fresh
+continuation group. Its immutable earlier release cannot be joined or launched
+again, while independently approved new members can promote and complete their
+own proof even when admitted beside that observation. Their final settlement can
+publish the old receipt alongside the new result: each release ID is preserved,
+and delivery records the turn that actually publishes it. Denied, unknown,
+blocked or invalid-authority observations do not receive this exclusion. Historical
 proofs without the original admitted turn ID remain receipt-only. Successful
 final settlement marks every receipt in the atomically released handoff delivered,
 including members absent from that final wake, so maintenance cannot publish a
@@ -613,10 +632,12 @@ its legacy receipt. A preceding v2-marked root with only fresh version-0 intent
 also sends its otherwise authorized effect once and commits a blocked receipt-only
 outcome when optional v3 readiness is unavailable. It publishes no positive v3
 marker or eligible joined handoff. Existing eligible v2/v3 pending continuations
-refuse on readiness loss. Enrollment/source failures before a fresh retained send
-flow through ordinary cancellation and grant retirement and return a truthful
-not-sent receipt; optional batch metadata grants no execution authority. Version-1
-pending markers remain receipt-only on upgraded workers. Version-3 handoff markers
+refuse on readiness loss. A still-authorized current worker handles enrollment
+or task/source failure through ordinary cancellation and grant retirement and
+returns a truthful not-sent receipt. Loss of worker/event authority propagates
+without preparation or retirement. Optional batch metadata grants no execution
+authority. Version-1 pending markers remain receipt-only on upgraded workers.
+Version-3 handoff markers
 cannot release through v1/v2 readers. It adds no cohort prerequisite, feature flag,
 collection or backfill. The versioned release indexes are installed at startup. Before binary rollback, disable effective execution
 cohorts and drain/cancel pending owner continuations and marked original tasks on
