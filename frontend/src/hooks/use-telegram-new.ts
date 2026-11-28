@@ -33,8 +33,13 @@ export function useTelegramNewConfiguration(requestId?: string, poll = true) {
     refetchIntervalInBackground: false,
     refetchOnWindowFocus: true,
     queryFn: async () => {
+      // A GET already in flight when hosted status fails cannot certify recovery,
+      // even if its response arrives after a successful hosted refetch.
+      const hostedRecoveryGeneration = link?.getRecoveryGeneration?.();
       const config = telegramNewConfigSchema.parse(await api.get(requestId ? `${ROOT}?request_id=${encodeURIComponent(requestId)}` : ROOT));
-      return link && !requestId ? { ...config, request: null } : config;
+      return { ...config, request: link && !requestId ? null : config.request,
+        hostedRecoveryGeneration,
+      };
     },
   });
 }
@@ -114,6 +119,14 @@ export function useTelegramNew(requestId?: string) {
     },
   });
   return { configuration, begin, launch, creationLink, regenerateUsername, cancel, connect,
-    getCurrentRequest: () => client.getQueryData<{ request: TelegramNewRequest | null }>(["telegram-new", actor, requestId, link?.id])?.request,
+    // Error counts survive successful refetches. Read the live cache so even a
+    // failure and recovery between renders permanently fence an older issuance.
+    getRecoveryGeneration: () => `${client.getQueryState(["telegram-new", actor, requestId, link?.id])?.errorUpdateCount ?? 0}:${link?.getRecoveryGeneration?.() ?? 0}`,
+    getCurrentConfiguration: () => {
+      const current = client.getQueryState<{ available: boolean; request: TelegramNewRequest | null; manager_username: string | null; hostedRecoveryGeneration?: number }>(["telegram-new", actor, requestId, link?.id]);
+      if (current?.status !== "success" || current.isInvalidated || !current.data?.available) return undefined;
+      if (link?.isRecoveryCurrent && (!current.data?.request || !link.isRecoveryCurrent(current.data.request.id, current.data.hostedRecoveryGeneration))) return undefined;
+      return current.data;
+    },
   };
 }
