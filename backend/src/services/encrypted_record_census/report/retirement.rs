@@ -286,3 +286,22 @@ pub(in crate::services) async fn open(
 pub(in crate::services) fn current_registry(digest: &str) -> bool {
     contract().is_ok_and(|(current, _)| current == digest)
 }
+
+#[cfg(test)]
+pub(in crate::services) async fn test_first_published_root(
+    db: &Database,
+    keys: &EncryptionKeys,
+    generation: &str,
+) -> String {
+    Store {
+        db,
+        keys,
+        generation,
+    }
+    .load()
+    .await
+    .unwrap()
+    .1
+    .published[0]
+        .clone()
+}

@@ -1088,6 +1088,15 @@ pub(crate) async fn ready_automation_test_replica(db: &Database) {
 }
 
 #[cfg(test)]
+pub(crate) async fn observe_retirement_test_replica(db: &Database, cohort: String) {
+    ready_test_replica(db).await;
+    stop_test_replica(db).await;
+    let mut local = runtime().unwrap().clone();
+    local.retirement_cohort = Some(cohort);
+    observe_with_automation(db, &local, false).await.unwrap();
+}
+
+#[cfg(test)]
 pub(crate) async fn controlled_ready_test_replica(db: &Database) -> tokio::task::JoinHandle<()> {
     ready_test_replica_inner(db, false, None).await
 }

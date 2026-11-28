@@ -466,3 +466,6 @@ pub(super) async fn admit(db: &Database, config: &AppConfig, head: &Document) ->
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;
